@@ -1,0 +1,24 @@
+# Rust
+target/
+Cargo.lock.bak
+# PlatformIO / embedded
+.pio/
+build/
+*.bin
+*.elf
+*.hex
+# Node / app
+node_modules/
+dist/
+# Python (tooling only, never project code)
+.venv/
+__pycache__/
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+*.swp
+# Claude Code worktrees
+.claude/worktrees/
+# Local scratch
+scratch/
