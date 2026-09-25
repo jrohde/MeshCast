@@ -1,0 +1,21 @@
+[package]
+name = "meshcast-sim"
+description = "Discrete-event simulator that runs the real MeshCast core against modelled radios."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "meshcast_sim"
+path = "src/lib.rs"
+
+[[bin]]
+name = "meshcast-sim"
+path = "src/main.rs"
+
+[dependencies]
+meshcast-core = { path = "../core" }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

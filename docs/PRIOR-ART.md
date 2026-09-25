@@ -77,8 +77,10 @@ canonical worldwide band table. We borrow the regional table structure and the S
 practice (`libloragw`, ChirpStack Concentratord). LoRaWAN's uplinks at 867.x MHz are the traffic
 MeshCast must listen for in EU band L.
 
-**Helium / Meshpoint**. The hardware MeshCast stations are upcycled from; Meshpoint is the mesh
-firmware already running on the maintainer's miner. Coexistence is a Phase 2 topic.
+**Helium / Meshpoint**. Helium miners (Raspberry Pi + RAK2287/SX1302) are the hardware MeshCast
+stations are upcycled from; Meshpoint is a Meshtastic/MeshCore base-station firmware for the
+same boxes and proof that the SX1302 can be driven from Python on a Pi. MeshCast nodes are
+dedicated and do not run it alongside.
 
 **LoRa-APRS**. Amateur-radio position beacons over LoRa on 70 cm; evidence that these chips are
 already used under amateur licences at higher power, a possible future profile.

@@ -143,7 +143,7 @@ Where it strains: dense areas with many cells overlapping (the simulator must qu
 hidden-node collision rate versus density), and niche content that must cross many cells for few
 listeners (the system naturally favours popular content, like Usenet did).
 
-## 6. Corrections to the original brainstorm, summarised
+## 6. Corrections to the original brainstorm, summarised (before simulation)
 
 1. Band O is 250 kHz wide: 100–150 kbit/s GFSK, not 300; 10–15 kbit/s average, not 30.
 2. The SX1302 has one FSK demodulator, not eight.
@@ -153,3 +153,100 @@ listeners (the system naturally favours popular content, like Usenet did).
 5. RaptorQ inactivation decoding is heavy on a microcontroller; feasible on the XIAO ESP32S3
    (8 MB PSRAM) for 50–200 kB blocks, but carousel plus a compact NACK bitmap is the simpler first step.
 6. Regulation is per region, not Dutch. See [ETHERDISCIPLINE.md](ETHERDISCIPLINE.md).
+
+
+## 7. Phase 0 simulation results
+
+The simulator in `sim/` runs the real `meshcast-core` protocol on modelled radios (log-distance
+path loss, exponent 3, 6 dB shadowing, capture, half-duplex, CCA, per-band accounting). Tracks are
+540 kB (3 minutes of Opus at 24 kbit/s). Every number below is reproducible with the command
+shown; seeds are fixed. These are simulation results, not measurements: Phase 1 checks them
+against real radios.
+
+### 7.1 What the simulator changed in the design
+
+Five protocol defects were found and fixed before any hardware existed:
+
+1. **The carousel never went idle**, looping manifests forever at the full duty cycle and
+   causing half-duplex losses during uploads. Now: `max_passes` per object, manifests at most every
+   5 minutes, silence when nothing is wanted.
+2. **Control and bulk shared one duty-cycle budget** (EU band O), so the carousel starved the
+   beacons and followers declared the announcer dead. Now: 10 % of the budget reserved for control.
+3. **A missed upload symbol caused a full re-upload** of 2700 symbols. Now: NACKs are answered
+   by the uploading source too, with exactly the missing symbols.
+4. **Electing over a long-range control carrier elects announcers that followers cannot hear
+   on the bulk carrier.** With LoRa control (10 km) and GFSK bulk (2.7 km), 200 nodes on 30 km²
+   ended up with two announcers, WANT/NACK storms and 100 million collisions; with ESP-NOW
+   (460 m) nothing was delivered at all. Now: beacons, election, gossip and NACK travel on the bulk
+   carrier; a cell is what hears each other there; LoRa carries only manifest discovery.
+5. **Overlapping cells in one channel caused election churn** (50 000 role changes per day):
+   announcers hearing each other weakly kept yielding on the id tie-break, orphaning their
+   followers. Now: followers follow the strongest signal, announcers yield on a near-tie only to a
+   strong (same-cell) or lonely counterpart, better nodes challenge after three beacons. Churn fell
+   to 6 600 events per day, most of them normal switches between overlapping cells.
+
+Two more found while testing frequency agility: hop sequences derived from a fixed per-announcer
+offset never coincide, so nodes could not find each other (now pseudo-random sequences with
+dwell-start beacons and scanning); and timers aligned to dwell boundaries made edge-of-range
+nodes, invisible to CCA, collide every time (now 0–500 ms jitter before control frames).
+
+### 7.2 Two nodes
+
+`meshcast-sim two-nodes --distance-m D --tracks 3 --bulk B`
+
+| Carrier | Distance | Track 1 / 2 / 3 complete after | Note |
+|---|---|---|---|
+| GFSK band O, 500 mW, 10 % | 1 km and 2 km | 15 / 25 / 36 min | 5 min of that is the initial election |
+| GFSK band O | 5 km | never | out of GFSK range (2.7 km); LoRa control alone cannot carry content |
+| LoRa SF7 as bulk (`lora-bulk`) | 5 km | 3.0 / 5.9 / 8.8 h | the sparse-cell fallback: slow but works |
+| GFSK band L, 25 mW, polite, 15 channels | 800 m | 16 / 21 / 27 min | includes finding the hop sequence |
+| ESP-NOW LR, 100 mW | 300 m | 6 / 7 / 8 min | no duty cycle |
+
+### 7.3 One cell, density sweep
+
+`meshcast-sim cell --nodes N --area-km2 1 --stations 1 --sources 1 --tracks 3 --hours 8`
+
+| Nodes per km² | Followers complete (3 tracks) | p50 completion | max | Collisions (per receiver) |
+|---|---|---|---|---|
+| 10 | 9 / 9 | 15 / 25 / 36 min | same | 18 |
+| 100 | 99 / 99 | 15 / 25 / 36 min | same | 1 141 |
+| 1000 | 999 / 999 | 15 / 25 / 36 min | 25 / 46 / 76 min | 147 431 |
+
+Receivers cost nothing: a thousand followers complete at the same median time as ten. The tail
+at 1000 nodes is NACK repair after collisions between the few nodes that do transmit (WANTs).
+Delivered volume scales with followers: 1.9, 20.5 and 207 MB per hour for the same announcer
+airtime.
+
+### 7.4 Failover
+
+`meshcast-sim failover --nodes 20 --kill-at-h 2 --revive-at-h 6 --hours 10`
+
+The station (announcer) is switched off at 2.00 h. A new announcer is running at 2.07 h
+(260 s: three missed 60 s beacons plus the score-weighted wait). At no time are there two
+announcers, except for one beacon interval when the revived station, rebooted as a follower,
+challenges and takes the role back. Listeners keep playing their local copies throughout.
+
+### 7.5 A town: 200 nodes on 30 km², 3 stations, 5 sources × 10 tracks, 24 h
+
+`meshcast-sim cell --nodes 200 --area-km2 30 --stations 3 --sources 5 --tracks 10 --hours 24 --bulk B`
+
+| Bulk carrier | Announcers at end | Role events / day | Tracks fully delivered (of 50) | Follower-completions | Median completion | Bulk occupancy p50 / max |
+|---|---|---|---|---|---|---|
+| GFSK band O (one 250 kHz channel, 500 mW, 10 %) | 5 | 6 645 | 45 | 94 % | 9.4 h | 20 % / 82 % |
+| GFSK band L (15 channels, 25 mW, polite) | see below | | | | | |
+| ESP-NOW LR (460 m cells) | see below | | | | | |
+
+Band O delivers, but five announcers sharing one channel is the structural limit of that band:
+the town is one collision domain. Content crosses cells through bridge nodes that hear two
+carousels; a track published at one edge reaches the far edge after several hours.
+
+*(Band L and ESP-NOW rows are filled in when those runs finish; see the run logs in the
+repository history.)*
+
+### 7.6 What Phase 0 could not answer
+
+- Real GFSK sensitivity at 100 kbit/s (interpolated), real CCA behaviour, and real building
+  loss: Phase 1.
+- Whether 0–500 ms jitter and a 30 % occupancy target are the right values in a live band with
+  LoRaWAN and other users: Phase 2 measurements.
+- Announcer-to-announcer exchange without bridge followers (PROTOCOL.md open question 7).

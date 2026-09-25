@@ -5,6 +5,10 @@ feeling. Phases may overlap; the order of the definitions of done may not.
 
 ## Phase 0: simulator and calculation model
 
+**Status: running.** `core` v0 and `sim` exist and answer definitions of done 1–4 for a single
+bulk carrier per node; results in [FEASIBILITY.md](FEASIBILITY.md) §7, which also lists the five
+protocol defects the simulator found and the fixes now in PROTOCOL.md.
+
 **Goal:** prove or disprove the design on a laptop before touching hardware, and produce the
 starting parameters for EtherFatsoen and the election.
 
@@ -60,7 +64,6 @@ Definition of done:
 Scope:
 - `station` on the miner: `core` + SX1302 via `libloragw` bindings or a second SX1262; object
   store; Opus transcoding; HTTPS seed/fetch between two stations in different towns; metrics.
-- Coexistence with Meshpoint decided and implemented (time-share or second radio).
 - Phone app v0: BLE to a dongle, follow a channel via QR code, see the library, play a track.
 - Signed manifests end to end: publish from a phone, hear it on another dongle.
 - Ten to twenty nodes across a district, some offline, one station.

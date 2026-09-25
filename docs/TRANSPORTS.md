@@ -76,12 +76,23 @@ among those that can deliver it.
 
 ## 5. Baseline scenario
 
-Two dongles, 5 km apart across farmland, no internet, no phones after initial setup:
+**A cell is what hears each other on the bulk carrier**; the long-range LoRa carrier only tells
+neighbouring cells which channels exist. So the distance that matters is the bulk carrier's.
 
-- LoRa SF9–SF12 control frames carry the two manifests and gossip both ways at 500 mW in band O.
-- GFSK at 500 mW in band O (10 %) moves content: about 5 MB per hour in each direction if they
-  alternate as announcer, so a 3-minute Opus track every 15–20 minutes.
-- If a third node appears between them, it likely becomes announcer for both (hears the most).
+Two dongles 2 km apart across farmland, no internet, no phones after initial setup:
+
+- GFSK at 500 mW in band O (10 %) moves content: a 3-minute Opus track every 10 minutes
+  (simulated: 3 tracks complete after 15, 25 and 36 minutes including election and gossip).
+- Beacons, gossip and NACKs also travel on the GFSK channel; LoRa carries only the manifest
+  announcement.
+
+Two dongles 5 km apart: GFSK does not reach (about 2.7 km at 500 mW). The nodes then use **LoRa
+as the bulk carrier** (`lora-bulk`): SF7 at 10 % duty cycle moves about 0.5 kbit/s, a track every
+three hours (simulated: 3.0, 5.9 and 8.8 hours). Slow, but it works with nothing else around.
+
+Two dongles 800 m apart in band L (25 mW, polite access, 15 hopping channels): a track every six
+minutes once the follower has found the announcer's hop sequence (simulated: 16, 21 and 27
+minutes for three tracks).
 
 Two dongles in the same street with ESP-NOW: the same protocol, 50–100 kbit/s, an album in an hour.
 

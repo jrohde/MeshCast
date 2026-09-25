@@ -18,13 +18,19 @@ works without anyone assigning bandwidth on the internet.
 
 ## The six mechanisms
 
-### 1. Listen before talk with random exponential backoff
+### 1. Listen before talk with random exponential backoff, and jitter
 
 Before every frame, on every carrier, the node samples RSSI for at least the CCA interval (draft
 1 ms, well above the 160 µs legal minimum) and transmits only if the channel is below the CCA
 threshold. On a busy channel it waits `rand(0, B × 2^attempt)` with `B` draft 50 ms, capped at
 attempt 8 (12.8 s), then listens again. There is no maximum number of attempts: a MeshCast frame can
-wait forever.
+wait forever. Control and metadata frames additionally wait a random 0–500 ms even on a clear
+channel: CCA cannot see a transmitter at the edge of range, and timers aligned to the same
+boundaries (dwell starts, 10-minute WANT intervals) would otherwise collide every time.
+
+The CCA threshold is set as close to the sensitivity as the radio allows (LoRa channel activity
+detection reaches the sensitivity; averaged RSSI on GFSK gets within about 3 dB), not at the
+−80 dBm of a naive RSSI check: every dB of gap is a ring of hidden nodes.
 
 ### 2. Scavenger quality of service: content is always the humble guest
 
@@ -77,6 +83,12 @@ Draft parameters:
 | `RATE_MIN`, `RATE_MAX` | 0.05, 1.0 | bounds on the budget fraction |
 | `RATE_STEP` | 0.05 | additive increase per window |
 | CCA sample rate | 1 kHz | RSSI samples per second while idle |
+
+On a band shared by the control and bulk carriers (EU band O carries both the LoRa control
+channel and the GFSK bulk channel), content pacing uses only `1 − control_reserve` (draft 90 %) of
+the legal budget, so that beacons and gossip always have airtime left. The simulator's first
+runs let the carousel spend the whole 10 % and starved the beacons, after which followers
+concluded the announcer had vanished.
 
 The target aggregate occupancy per cell is **≤ 30 %** including foreign traffic. That number
 comes from the Meshtastic experience (trouble above ~40 %, collapse above ~65 %) and from slotted

@@ -45,7 +45,10 @@ regulatory duty cycle limit only how fast new content spreads, never the listeni
   routing tables, no connections, no acknowledgements: less than TCP/IP, not a replacement for it.
 - **Not a live stream.** Even in the best case, sub-GHz spectrum moves a few tens of kilobits per
   second on average. See [docs/FEASIBILITY.md](docs/FEASIBILITY.md) for the honest numbers.
-- **Not compatible with Meshtastic or MeshCore.** Different goal, different protocol.
+- **Not compatible with Meshtastic or MeshCore, and not running beside them.** Different goal,
+  different protocol. A MeshCast node is dedicated hardware; those meshes fill the same bands with
+  realtime traffic that MeshCast yields to, so sharing a radio with them would only import their
+  congestion.
 
 ## Why this can work
 
@@ -101,7 +104,7 @@ Day 0, design phase. Phase 0 is a simulator that runs the real protocol core, no
 ## Related projects
 
 [Meshtastic](https://meshtastic.org), [MeshCore](https://meshcore.co.uk),
-[Meshpoint](https://github.com/sicXnull/meshpoint), [Reticulum](https://reticulum.network),
+[Meshpoint](https://github.com/KMX415/meshpoint), [Reticulum](https://reticulum.network),
 [Othernet](https://github.com/Othernet-Project), [LoRa-APRS](https://github.com/lora-aprs),
 [Codec2](https://github.com/drowe67/codec2), [Opus](https://opus-codec.org),
 [RaptorQ (RFC 6330)](https://www.rfc-editor.org/rfc/rfc6330).

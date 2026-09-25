@@ -1,0 +1,123 @@
+//! Protocol parameters (PROTOCOL.md §8, ETHERFATSOEN.md §4). Draft values; the simulator tunes them.
+
+use crate::Millis;
+
+#[derive(Clone, Copy, Debug)]
+pub struct ElectionParams {
+    pub t_beacon_ms: Millis,
+    pub n_miss: u8,
+    pub t_base_ms: Millis,
+    pub t_jitter_ms: Millis,
+    /// Takeover hysteresis in score units.
+    pub hysteresis: u16,
+    /// A follower switches announcer only for a signal this much stronger (dB).
+    pub rssi_hysteresis_db: u8,
+    /// Beacons in a row with a clearly lower score than ours before we challenge the incumbent.
+    pub challenge_beacons: u8,
+}
+
+impl Default for ElectionParams {
+    fn default() -> Self {
+        ElectionParams { t_beacon_ms: 60_000, n_miss: 3, t_base_ms: 120_000, t_jitter_ms: 20_000, hysteresis: SCORE_MAX / 10, rssi_hysteresis_db: 6, challenge_beacons: 3 }
+    }
+}
+
+/// Maximum value of the election score (see `node::Node::compute_score`).
+pub const SCORE_MAX: u16 = 256 + 64 + 64 + 32 + 16;
+
+#[derive(Clone, Copy, Debug)]
+pub struct FatsoenParams {
+    pub window_ms: Millis,
+    /// EWMA weight in 1/256.
+    pub alpha: u16,
+    pub occ_high: u16,
+    pub occ_low: u16,
+    pub occ_content: u16,
+    pub rate_min: u16,
+    pub rate_max: u16,
+    pub rate_step: u16,
+    pub backoff_base_ms: Millis,
+    pub backoff_max_attempt: u8,
+    /// Own share of airtime allowed on carriers without a regulatory duty cycle (permille).
+    pub max_own_share: u16,
+    /// Token-bucket burst, in milliseconds of airtime.
+    pub burst_ms: u32,
+}
+
+impl Default for FatsoenParams {
+    fn default() -> Self {
+        FatsoenParams {
+            window_ms: 10_000,
+            alpha: 77, // 0.3
+            occ_high: 300,
+            occ_low: 150,
+            occ_content: 250,
+            rate_min: 50,
+            rate_max: 1000,
+            rate_step: 50,
+            backoff_base_ms: 50,
+            backoff_max_attempt: 8,
+            max_own_share: 500,
+            burst_ms: 2000,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Params {
+    pub election: ElectionParams,
+    pub fatsoen: FatsoenParams,
+    /// Gossip interval for announcers and for sources with something pending.
+    pub t_gossip_ms: Millis,
+    /// Minimum interval between WANT frames from a follower.
+    pub t_want_min_ms: Millis,
+    /// How long a WANT stays valid at the announcer.
+    pub want_ttl_ms: Millis,
+    /// Follower may NACK when at least this fraction (permille) of an object is present ...
+    pub nack_threshold_permille: u16,
+    /// ... and no progress for this many carousel rounds.
+    pub nack_rounds: u16,
+    /// Dwell time per channel on frequency-agile carriers.
+    pub dwell_ms: Millis,
+    /// Score recomputation interval.
+    pub t_score_ms: Millis,
+    /// Neighbours not heard for this long are forgotten.
+    pub neighbor_ttl_ms: Millis,
+    /// Share of the regulatory budget (permille) kept free for control frames when the control
+    /// and bulk carriers share a band.
+    pub control_reserve: u16,
+    /// An object leaves the carousel after this many full passes unless re-wanted.
+    pub max_passes: u16,
+    /// Manifests ("always" objects) are carouseled at most this often when nothing else is wanted.
+    pub t_always_ms: Millis,
+    /// A node NACKs an object that is ≥ threshold complete after this long without progress.
+    pub t_nack_stall_ms: Millis,
+    /// Minimum interval between two gossip rounds of the same node.
+    pub t_gossip_min_ms: Millis,
+    /// Random delay before any control/metadata frame on a bulk carrier, so that nodes whose
+    /// CCA cannot see each other (edge of range) do not transmit in lock-step.
+    pub tx_jitter_ms: Millis,
+}
+
+impl Default for Params {
+    fn default() -> Self {
+        Params {
+            election: ElectionParams::default(),
+            fatsoen: FatsoenParams::default(),
+            t_gossip_ms: 300_000,
+            t_want_min_ms: 600_000,
+            want_ttl_ms: 3_600_000,
+            nack_threshold_permille: 800,
+            nack_rounds: 2,
+            dwell_ms: 20_000,
+            t_score_ms: 60_000,
+            neighbor_ttl_ms: 3_600_000,
+            control_reserve: 100,
+            max_passes: 3,
+            t_always_ms: 300_000,
+            t_nack_stall_ms: 60_000,
+            t_gossip_min_ms: 30_000,
+            tx_jitter_ms: 500,
+        }
+    }
+}

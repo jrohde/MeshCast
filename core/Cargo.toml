@@ -1,0 +1,19 @@
+[package]
+name = "meshcast-core"
+description = "MeshCast protocol core: objects, manifests, frames, carousel, announcer election, EtherFatsoen and EtherDiscipline. no_std, shared by firmware, station and simulator."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "meshcast_core"
+
+[dependencies]
+blake3 = { version = "1", default-features = false }
+ed25519-dalek = { version = "2", default-features = false, features = ["alloc"] }
+minicbor = { version = "0.26", default-features = false, features = ["alloc"] }
+
+[features]
+default = []
+std = []

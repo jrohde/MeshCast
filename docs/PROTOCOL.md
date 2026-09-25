@@ -74,11 +74,18 @@ Frame types:
 
 | Type | Name | Who sends | Carrier | Purpose |
 |---|---|---|---|---|
-| 0x1 | `BEACON` | announcer only | control (LoRa) and bulk carriers | heartbeat, election, time, spectrum weather |
+| 0x1 | `BEACON` | announcer only | the bulk carrier it announces on | heartbeat, election, time, spectrum weather |
 | 0x2 | `BULK` | announcer, or a source uploading to the announcer | bulk carriers | one symbol of one object |
-| 0x3 | `GOSSIP` | sources and the announcer | control | HAVE / WANT summaries |
-| 0x4 | `MANIFEST_ANNOUNCE` | sources and the announcer | control | newest manifest id per channel |
-| 0x5 | `NACK` | a follower that is missing few symbols of an object | control, rare | compact repair request (v0 repair mechanism) |
+| 0x3 | `GOSSIP` | sources, the announcer, and followers with unserved wants | bulk carrier | HAVE / WANT summaries |
+| 0x4 | `MANIFEST_ANNOUNCE` | sources and the announcer | bulk carrier **and** the long-range control carrier | newest manifest id per channel; the control-carrier copy is discovery for other cells |
+| 0x5 | `NACK` | any node that is nearly complete on an object and sees no progress | bulk carrier, rare | compact repair request, answered by the carousel or by the uploading source |
+
+**A cell is what hears each other on the bulk carrier.** The Phase 0 simulator showed that
+running the election over a long-range control carrier elects announcers that most of their
+"followers" cannot receive content from. So everything cell-local (beacons, election, gossip,
+NACK) travels on the bulk carrier, where a control frame costs milliseconds; the LoRa control
+carrier only carries `MANIFEST_ANNOUNCE`, so that neighbouring cells learn which channels exist
+and fetch them through bridge nodes.
 
 ### 3.1 `BEACON`
 
@@ -160,6 +167,19 @@ the cell wants, as learned from GOSSIP and MANIFEST_ANNOUNCE, that the announcer
 The round never waits for anyone. A follower that joins mid-round starts collecting and completes
 the object next round. Symbols are idempotent, so a slow announcer simply takes more rounds.
 
+**Passes and idleness.** Followers never report HAVE, so the announcer cannot know when everyone
+is done. Instead each object gets `max_passes` (draft 3) full passes and then leaves the carousel
+unless a new WANT arrives after its last pass. Manifests are repeated at most every `T_always`
+(draft 5 min) when nothing else is wanted. A carousel with nothing to send is silent; the
+announcer then only beacons. (The first simulator runs looped manifests forever at the full duty
+cycle, which wasted the budget and caused half-duplex losses during uploads.)
+
+**Repair.** Any node, follower or announcer, that holds at least 80 % of an object and has seen no
+new symbol for `T_nack_stall` (draft 60 s) sends one NACK listing the missing symbols. The
+announcer's carousel answers from its front queue; a source whose upload the announcer is missing
+answers with exactly those symbols. Stall detection is time-based, not round-based, so it also
+works when the carousel is idle.
+
 **Upload**: a source that has an object the announcer lacks sends GOSSIP with HAVE. The announcer
 replies with GOSSIP WANT. The source then transmits the object's symbols as `BULK` frames under
 the same gating; everyone in range collects them, not just the announcer. When the announcer
@@ -189,11 +209,27 @@ in a drawer scores low.
 ### 5.2 States
 
 ```
-FOLLOWER  ── no BEACON for N_miss expected intervals ──▶ CANDIDATE
+FOLLOWER  ── no BEACON for N_miss expected intervals, another announcer audible ──▶ FOLLOWER of that one
+FOLLOWER  ── no BEACON for N_miss expected intervals, nobody audible ─────────────▶ CANDIDATE
+FOLLOWER  ── own score clearly better than the announcer's for `challenge_beacons` beacons ──▶ CANDIDATE (short wait)
 CANDIDATE ── timer expires, still no BEACON ──────────▶ ANNOUNCER
 CANDIDATE ── hears BEACON ────────────────────────────▶ FOLLOWER
-ANNOUNCER ── hears BEACON with higher score + hysteresis, or lower score wins tie-break ──▶ FOLLOWER
+ANNOUNCER ── hears BEACON with clearly higher score ───▶ FOLLOWER
+ANNOUNCER ── hears BEACON with similar score and lower id, strong signal or nobody else heard ──▶ FOLLOWER
 ```
+
+**Following is by signal, stepping up is by score.** A follower needs to *receive* its
+announcer's carousel, so it follows the announcer it hears best (RSSI, averaged) and switches only
+for one at least `rssi_hysteresis` (draft 6 dB) stronger. Scores decide who steps up when nobody
+is heard, who yields when two announcers meet, and when a much better node challenges the
+incumbent.
+
+**Two announcers may coexist.** Overlapping cells in one band are normal: two announcers that
+hear each other weakly usually serve different followers, and if the far one yielded, its
+followers would be orphaned and re-elect, which the simulator showed as thousands of role changes
+per day. So on a near-tie an announcer yields to the lower id only if the other's beacon is
+strong (`near_rssi`, draft sensitivity + 17 dB, "same cell") or if it has heard nobody else at
+all (nobody to orphan). Otherwise both persist and EtherFatsoen shares the channel between them.
 
 - **N_miss** (draft 3): consecutive expected beacons missed (using the announcer's own `next_ms`).
   With `T_beacon = 60 s` that is about three minutes of silence before anyone acts. Nothing is
@@ -208,8 +244,10 @@ ANNOUNCER ── hears BEACON with higher score + hysteresis, or lower score win
   differs from the announcer's own id); an announcer that sees GOSSIP naming a different announcer
   with a higher score yields. Convergence to one announcer per connected cell takes at most a few
   beacon intervals.
-- **Hysteresis**: a returning former announcer (or any newcomer) with a better score takes over
-  only if it exceeds the incumbent by `H`; this prevents flapping between near-equal nodes.
+- **Hysteresis and challenge**: a returning former announcer (or any newcomer) whose score
+  exceeds the incumbent's by more than `H` for `challenge_beacons` consecutive beacons steps up
+  after a short random wait; the incumbent hears the better beacon and yields. Near-equal nodes
+  never challenge, so there is no flapping. A rebooted node always starts as a follower.
 - **Partition**: if the cell splits, the far side elects its own announcer after
   `N_miss × T_beacon + T_wait`. Two cells exist. Nodes hearing both follow the stronger beacon and
   report the other's objects in HAVE; each announcer can WANT them, so content crosses the boundary.
@@ -218,7 +256,31 @@ ANNOUNCER ── hears BEACON with higher score + hysteresis, or lower score win
   GOSSIP within a round, and every node's library persists locally. Content the old announcer had
   not yet delivered is exactly as undelivered as before.
 
-### 5.3 What a listener experiences
+### 5.3 Frequency agility (polite-access bands)
+
+On carriers with more than one channel (EU band L: 15 × 200 kHz) each announcer hops a
+pseudo-random sequence: `channel = splitmix64(announcer_id, dwell_index) mod n`, dwell `T_dwell`
+(draft 20 s). Followers and uploading sources compute the same sequence for their announcer. The
+announcer sends a beacon at every dwell start (2 ms), so:
+
+- a node with no announcer **scans**: it stays on one channel for a whole hop cycle (`n × T_dwell`)
+  and then moves on; any announcer visits its channel about once per cycle and is heard within
+  a few cycles;
+- two announcers land on the same channel about one dwell in `n` and thereby discover each
+  other, after which the yield rules of §5.2 apply.
+
+EtherDiscipline's per-200 kHz accounting is unchanged: a random sequence spends about `1/n` of
+the airtime in each slice. (Sequences derived by a fixed offset per announcer never coincide and
+made nodes unable to find each other; the simulator caught this.)
+
+### 5.4 Timing jitter
+
+Every control or metadata frame on a bulk carrier waits a random `0..T_jitter` (draft 500 ms)
+before transmission, beacons excepted. CCA cannot see a transmitter at the edge of range (a few
+dB above sensitivity), and without jitter two nodes whose timers are both aligned to dwell
+boundaries collide every single time.
+
+### 5.5 What a listener experiences
 
 During the outage, playback of already-collected objects continues from the schedule. New content
 arrives a few minutes later than it otherwise would. That is the entire user-visible effect.
@@ -254,12 +316,22 @@ arrives a few minutes later than it otherwise would. That is the entire user-vis
 |---|---|---|
 | `T` | 200 B | symbol size |
 | `K_max` | 1024 | symbols per source block |
-| `T_beacon` | 60 s | beacon interval on the control carrier |
-| `N_miss` | 3 | missed beacons before election |
-| `T_base`, `T_jitter` | 120 s, 20 s | candidate wait |
-| `H` | 6553 (10 %) | takeover hysteresis |
+| `T_beacon` | 60 s | beacon interval on the bulk carrier |
+| `N_miss` | 3 | missed beacons before switching or election |
+| `T_base`, election jitter | 120 s, 20 s | candidate wait, scaled down by score |
+| `H` | 10 % of the maximum score | yield / challenge hysteresis |
+| `challenge_beacons` | 3 | beacons with a clearly lower score before a follower steps up |
+| `rssi_hysteresis` | 6 dB | a follower switches announcer only for a clearly stronger one |
+| `near_rssi` | sensitivity + 17 dB | beacon strength that means "same cell" for the tie-break |
+| `max_passes` | 3 | carousel passes per object unless re-wanted |
+| `T_always` | 5 min | manifest repetition when idle |
+| `T_nack_stall` | 60 s | no progress on an ≥ 80 % object before a NACK |
+| `T_want_min` | 10 min | minimum interval between a follower's WANT frames |
+| `T_gossip`, `T_gossip_min` | 5 min, 30 s | announcer/source gossip cadence and its floor |
+| `control_reserve` | 10 % | share of the band budget kept free for control frames |
+| `T_dwell` | 20 s | hop dwell on frequency-agile carriers |
+| `T_jitter` (tx) | 0–500 ms | random delay before control/metadata frames |
 | repair overhead (v1) | 10 % | RaptorQ repair symbols per block |
-| NACK threshold | 80 % complete, 2 rounds | when a follower may ask |
 | gossip cap | 12 have + 12 want | per frame |
 
 ## 9. Open questions
@@ -271,3 +343,10 @@ arrives a few minutes later than it otherwise would. That is the entire user-vis
 5. How does a node learn a channel id in the first place without internet? (QR code, spoken
    over the mesh in a "directory" channel that every node follows by default, or both.)
 6. Time without GPS or phone in a fully offline mesh: does mesh-derived time drift acceptably?
+7. Two announcers with no followers in common and no bridge node never exchange content: a
+   source uploads only to its own announcer. Should an announcer with unserved wants also act as
+   a source toward another announcer it hears, or listen to that announcer's carousel when idle?
+8. Nodes with two bulk carriers (GFSK and ESP-NOW) run two elections; the simulator models one
+   bulk carrier per node so far.
+9. zsync-style delta transfer for updated objects (web bundles, firmware): the receiver compares
+   the block lists of the old and new object and wants only the changed symbols.

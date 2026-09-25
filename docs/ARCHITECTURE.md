@@ -29,9 +29,11 @@ and **one** GFSK channel, and transmits one frame at a time. So a station:
 
 It is not a base station in the cellular sense. It is a node with excellent hearing.
 
-Coexistence with Meshpoint on the same miner (both want the SX1302) is a Phase 2 question:
-time-share the concentrator, or run MeshCast on a second SX1262 HAT and leave the SX1302 to
-Meshpoint.
+A MeshCast node is dedicated: the station software owns the SX1302 outright, and no other mesh
+firmware (Meshtastic, MeshCore, Meshpoint) runs on the same radio. Those projects occupy the same
+bands with realtime chat traffic that MeshCast must yield to; sharing a radio with them would
+only import their congestion. Interoperation is not a goal. If their scaling problems are ever
+solved, bridging can be reconsidered then.
 
 ## 3. Data flow
 
