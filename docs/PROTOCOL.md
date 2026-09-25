@@ -176,9 +176,23 @@ cycle, which wasted the budget and caused half-duplex losses during uploads.)
 
 **Repair.** Any node, follower or announcer, that holds at least 80 % of an object and has seen no
 new symbol for `T_nack_stall` (draft 60 s) sends one NACK listing the missing symbols. The
-announcer's carousel answers from its front queue; a source whose upload the announcer is missing
+announcer's carousel answers from its front queue; a holder whose upload the announcer is missing
 answers with exactly those symbols. Stall detection is time-based, not round-based, so it also
 works when the carousel is idle.
+
+**Who uploads.** Any node that holds an object complete may answer a WANT or NACK from *any*
+announcer it hears, its own or a neighbouring cell's; that is how content crosses cells whose
+followers do not overlap. To keep it to one uploader, a holder waits a random time (up to
+`T_suppress`, shorter for its own announcer) and gives up if it hears anyone else sending the
+object meanwhile: the suppression rule of reliable multicast. Uploads follow the asking
+announcer's hop sequence.
+
+**Fresh before repeated.** The first copy of an object into a cell (an upload, or the carousel's
+first pass) is worth more than its second and third pass. Fresh content is paced at the full
+budget and admitted like metadata; repeated passes take the throttled rate and yield first. (The
+simulator found five carousels on one channel throttling every transmitter to the floor,
+including the sources uploading new tracks, so that a channel's last tracks never entered the
+mesh.)
 
 **Upload**: a source that has an object the announcer lacks sends GOSSIP with HAVE. The announcer
 replies with GOSSIP WANT. The source then transmits the object's symbols as `BULK` frames under
@@ -227,9 +241,11 @@ incumbent.
 **Two announcers may coexist.** Overlapping cells in one band are normal: two announcers that
 hear each other weakly usually serve different followers, and if the far one yielded, its
 followers would be orphaned and re-elect, which the simulator showed as thousands of role changes
-per day. So on a near-tie an announcer yields to the lower id only if the other's beacon is
-strong (`near_rssi`, draft sensitivity + 17 dB, "same cell") or if it has heard nobody else at
-all (nobody to orphan). Otherwise both persist and EtherFatsoen shares the channel between them.
+per day. So on a near-tie an announcer yields to the lower id only if the other is *in its own
+cell*, judged relatively: it hears the other announcer at least as well as its typical (median)
+neighbour. No absolute signal threshold, so the rule holds on every carrier; a node that has
+heard nobody else treats any peer as near, since there is nobody to orphan. Otherwise both
+persist and EtherFatsoen shares the channel between them.
 
 - **N_miss** (draft 3): consecutive expected beacons missed (using the announcer's own `next_ms`).
   With `T_beacon = 60 s` that is about three minutes of silence before anyone acts. Nothing is
@@ -258,16 +274,19 @@ all (nobody to orphan). Otherwise both persist and EtherFatsoen shares the chann
 
 ### 5.3 Frequency agility (polite-access bands)
 
-On carriers with more than one channel (EU band L: 15 × 200 kHz) each announcer hops a
-pseudo-random sequence: `channel = splitmix64(announcer_id, dwell_index) mod n`, dwell `T_dwell`
-(draft 20 s). Followers and uploading sources compute the same sequence for their announcer. The
-announcer sends a beacon at every dwell start (2 ms), so:
+On carriers with more than one channel (EU band L: 15 × 200 kHz) there are two hop sequences,
+both pseudo-random (`channel = splitmix64(id, dwell_index) mod n`, dwell `T_dwell`, draft 20 s):
 
-- a node with no announcer **scans**: it stays on one channel for a whole hop cycle (`n × T_dwell`)
-  and then moves on; any announcer visits its channel about once per cycle and is heard within
-  a few cycles;
-- two announcers land on the same channel about one dwell in `n` and thereby discover each
-  other, after which the yield rules of §5.2 apply.
+- the **content plane**: each announcer's own sequence, keyed by its id, on which its carousel
+  runs and which its followers and uploaders compute for it;
+- the **control plane**: one common sequence for everyone, keyed by a fixed id, active during
+  every `meet_every`-th dwell (draft 1 in 5). Announcers beacon there, cell-wide gossip (WANT,
+  HAVE, manifest announcements) is timed to it, and so every cell hears every other cell's needs
+  and offers.
+
+The announcer sends a beacon at every dwell start (2 ms) on whichever sequence is active, so a
+node with no announcer finds one by staying on one channel: any announcer visits it about once
+per cycle, and the meeting dwell brings all of them to the same channel regardless.
 
 EtherDiscipline's per-200 kHz accounting is unchanged: a random sequence spends about `1/n` of
 the airtime in each slice. (Sequences derived by a fixed offset per announcer never coincide and
@@ -330,6 +349,8 @@ arrives a few minutes later than it otherwise would. That is the entire user-vis
 | `T_gossip`, `T_gossip_min` | 5 min, 30 s | announcer/source gossip cadence and its floor |
 | `control_reserve` | 10 % | share of the band budget kept free for control frames |
 | `T_dwell` | 20 s | hop dwell on frequency-agile carriers |
+| `meet_every` | 5 | every fifth dwell is on the common control-plane sequence |
+| `T_suppress` | 20 s (5 s for own announcer) | random wait before answering a WANT, cancelled if someone else answers |
 | `T_jitter` (tx) | 0–500 ms | random delay before control/metadata frames |
 | repair overhead (v1) | 10 % | RaptorQ repair symbols per block |
 | gossip cap | 12 have + 12 want | per frame |
@@ -343,9 +364,7 @@ arrives a few minutes later than it otherwise would. That is the entire user-vis
 5. How does a node learn a channel id in the first place without internet? (QR code, spoken
    over the mesh in a "directory" channel that every node follows by default, or both.)
 6. Time without GPS or phone in a fully offline mesh: does mesh-derived time drift acceptably?
-7. Two announcers with no followers in common and no bridge node never exchange content: a
-   source uploads only to its own announcer. Should an announcer with unserved wants also act as
-   a source toward another announcer it hears, or listen to that announcer's carousel when idle?
+7. *(resolved in Phase 0: any holder answers any announcer's WANT, with suppression; see §4.)*
 8. Nodes with two bulk carriers (GFSK and ESP-NOW) run two elections; the simulator models one
    bulk carrier per node so far.
 9. zsync-style delta transfer for updated objects (web bundles, firmware): the receiver compares

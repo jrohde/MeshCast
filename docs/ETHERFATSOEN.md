@@ -32,13 +32,22 @@ The CCA threshold is set as close to the sensitivity as the radio allows (LoRa c
 detection reaches the sensitivity; averaged RSSI on GFSK gets within about 3 dB), not at the
 −80 dBm of a naive RSSI check: every dB of gap is a ring of hidden nodes.
 
-### 2. Scavenger quality of service: content is always the humble guest
+### 2. Scavenger quality of service: repetition is always the humble guest
 
-Three priority classes: **control** (BEACON, MANIFEST_ANNOUNCE) > **metadata** (GOSSIP, NACK) >
-**content** (BULK). Content frames are sent only when the measured occupancy is below a stricter
-threshold than the other classes (see §4 parameters). Foreign traffic (LoRaWAN, Helium, other
-meshes) is not distinguished from our own: any energy on the channel counts as occupancy, so
-MeshCast yields to everything.
+Priority classes: **control** (BEACON, MANIFEST_ANNOUNCE) > **metadata** (GOSSIP, NACK) >
+**fresh content** (the first copy of an object into the cell: an upload or a carousel's first
+pass) > **repeated content** (later carousel passes). Repeated content is sent only when the
+measured occupancy is below a stricter threshold than the other classes, and only at the
+throttled rate of mechanism 4; fresh content is admitted like metadata and paced at the full
+budget. One copy per cell is cheap; the repetitions are where the airtime goes.
+
+**Polite to strangers, fair among ourselves.** The node separates occupancy into energy it could
+decode as MeshCast frames and energy it could not. Foreign energy (LoRaWAN, Helium, anything
+else) is judged strictly: MeshCast yields to everything it does not understand. Occupancy caused
+by other MeshCast nodes is judged loosely, with a higher threshold and a higher rate floor,
+because those nodes run the same congestion control and the goal among them is fair sharing, not
+retreat. Without this distinction five carousels on one channel throttled each other, and the
+sources between them, to the floor.
 
 ### 3. Redundancy makes collisions harmless
 
@@ -102,12 +111,25 @@ Nodes use it to pick the quietest channel (adaptive frequency agility) and the q
 uploads. It is shared observation, not allocation: nobody is told what to do, everybody sees the
 same sky. Coordination without a coordinator.
 
-### 6. Rarest-first
+### 6. Answer once: suppression
+
+When an announcer asks for an object, every holder in range could answer, and on a broadcast
+channel that would be as bad as everyone repeating a rumour. So a holder waits a random time
+before uploading (shorter for its own announcer, longer for a neighbouring cell's) and gives up
+if it hears anyone else sending that object meanwhile. This is the suppression rule of reliable
+multicast: the first to speak silences the rest, without anyone coordinating.
+
+### 7. Rarest-first
 
 The carousel orders objects by how few nodes report having them (from GOSSIP). Symbols named in
 NACKs go first. The emergent effect is that popular content spreads with the fewest transmissions
 and no node ever repeats what everyone already has. This is BitTorrent's piece-selection rule
 applied to broadcast.
+
+## The six mechanisms are now seven
+
+Mechanism 6 was added in Phase 0 when the simulator showed that content could not cross between
+cells whose followers do not overlap; the title of this document is a name, not a count.
 
 ## The one remaining hard problem: hidden nodes
 

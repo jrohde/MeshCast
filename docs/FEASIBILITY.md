@@ -187,8 +187,17 @@ Five protocol defects were found and fixed before any hardware existed:
 
 Two more found while testing frequency agility: hop sequences derived from a fixed per-announcer
 offset never coincide, so nodes could not find each other (now pseudo-random sequences with
-dwell-start beacons and scanning); and timers aligned to dwell boundaries made edge-of-range
-nodes, invisible to CCA, collide every time (now 0–500 ms jitter before control frames).
+dwell-start beacons, scanning, and a common control-plane sequence every fifth dwell); and timers
+aligned to dwell boundaries made edge-of-range nodes, invisible to CCA, collide every time (now
+0–500 ms jitter before control frames).
+
+And one found by asking where the last undelivered tracks went: all four came from one source
+whose uploads to its announcer crawled at the throttle floor because five carousels shared the
+channel. The fix became two principles rather than an exception: fresh content has right of way
+over repetition, and occupancy by other MeshCast nodes is judged loosely ("fair among
+ourselves") while foreign energy is judged strictly ("polite to strangers"). Together with
+suppression-based uploads to any announcer, this also solved the cross-cell exchange question:
+two clusters 1.8 km apart with separate announcers now exchange an album in 1.4 hours in band L.
 
 ### 7.2 Two nodes
 
