@@ -10,6 +10,7 @@ use crate::Millis;
 pub struct Fatsoen {
     p: FatsoenParams,
     occ_ewma: u16,
+    foreign_ewma: u16,
     rate: u16,
     attempt: u8,
     pub backoff_until: Millis,
@@ -21,47 +22,63 @@ pub struct Fatsoen {
 
 impl Fatsoen {
     pub fn new(p: FatsoenParams, now: Millis) -> Self {
-        Fatsoen { p, occ_ewma: 0, rate: p.rate_max / 2, attempt: 0, backoff_until: 0, tokens_us: p.burst_ms as i64 * 1000, last_refill: now, last_window: now, windows: 0 }
+        Fatsoen { p, occ_ewma: 0, foreign_ewma: 0, rate: p.rate_max / 2, attempt: 0, backoff_until: 0, tokens_us: p.burst_ms as i64 * 1000, last_refill: now, last_window: now, windows: 0 }
     }
 
-    /// Feed the measured occupancy (permille of the last window busy with others' energy).
-    pub fn maybe_window(&mut self, now: Millis, occ_permille: u16) {
+    /// Feed the measured occupancy: `occ_total` is the fraction (permille) of the last window
+    /// busy with others' energy, `own_air_ms` the airtime of MeshCast frames we decoded in that
+    /// window. Foreign occupancy is the difference. Returns true when a window closed.
+    pub fn maybe_window(&mut self, now: Millis, occ_total: u16, own_air_ms: u64) -> bool {
         if now < self.last_window + self.p.window_ms {
-            return;
+            return false;
         }
         self.last_window = now;
         self.windows += 1;
         let a = self.p.alpha as u32;
-        self.occ_ewma = ((a * occ_permille.min(1000) as u32 + (256 - a) * self.occ_ewma as u32) / 256) as u16;
-        if self.occ_ewma > self.p.occ_high {
+        let total = occ_total.min(1000);
+        let own = ((own_air_ms * 1000) / self.p.window_ms.max(1)).min(total as u64) as u16;
+        let foreign = total - own;
+        self.occ_ewma = ((a * total as u32 + (256 - a) * self.occ_ewma as u32) / 256) as u16;
+        self.foreign_ewma = ((a * foreign as u32 + (256 - a) * self.foreign_ewma as u32) / 256) as u16;
+        if self.foreign_ewma > self.p.occ_high {
             self.rate = (self.rate / 2).max(self.p.rate_min);
-        } else if self.occ_ewma < self.p.occ_low {
+        } else if self.occ_ewma > self.p.occ_high_own {
+            self.rate = (self.rate / 2).max(self.p.rate_min_own);
+        } else if self.foreign_ewma < self.p.occ_low && self.occ_ewma < self.p.occ_low_own {
             self.rate = (self.rate + self.p.rate_step).min(self.p.rate_max);
         }
+        true
     }
 
     pub fn occupancy(&self) -> u16 {
         self.occ_ewma
     }
 
+    pub fn foreign_occupancy(&self) -> u16 {
+        self.foreign_ewma
+    }
+
     pub fn rate(&self) -> u16 {
         self.rate
     }
 
-    /// Class gate: content only on a quiet channel, metadata unless congested, control always.
-    pub fn allows(&self, class: Class) -> bool {
+    /// Class gate: control always; metadata and uploads unless congested; carousel content only
+    /// on a quiet channel. Foreign energy is judged strictly, our own protocol's traffic loosely.
+    pub fn allows(&self, class: Class, upload: bool) -> bool {
         match class {
             Class::Control => true,
-            Class::Metadata => self.occ_ewma < self.p.occ_high,
-            Class::Content => self.occ_ewma < self.p.occ_content,
+            Class::Metadata => self.foreign_ewma < self.p.occ_high && self.occ_ewma < self.p.occ_high_own,
+            Class::Content if upload => self.foreign_ewma < self.p.occ_high && self.occ_ewma < self.p.occ_high_own,
+            Class::Content => self.foreign_ewma < self.p.occ_content && self.occ_ewma < self.p.occ_content_own,
         }
     }
 
     /// Token-bucket pacing for content. `budget_permille` is the regulatory (or self-imposed)
     /// share of airtime; the effective rate is `budget × rate`. Returns how long to wait if the
     /// bucket cannot cover `airtime_ms` now.
-    pub fn take_airtime(&mut self, now: Millis, airtime_ms: u32, budget_permille: u16) -> Result<(), Millis> {
-        let per_mille2 = budget_permille as i64 * self.rate as i64; // 0..1e6
+    pub fn take_airtime(&mut self, now: Millis, airtime_ms: u32, budget_permille: u16, exempt: bool) -> Result<(), Millis> {
+        let rate = if exempt { self.p.rate_max } else { self.rate };
+        let per_mille2 = budget_permille as i64 * rate as i64; // 0..1e6
         let elapsed = now.saturating_sub(self.last_refill) as i64;
         self.last_refill = now;
         // refill in µs: elapsed_ms × 1000 × per_mille2 / 1e6

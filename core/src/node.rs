@@ -121,6 +121,11 @@ struct ManifestInfo {
 #[derive(Clone, Debug)]
 struct Upload {
     object: ShortId,
+    /// The announcer that asked; determines the hop channel on agile carriers.
+    to: NodeId,
+    /// Suppression: do not start before this time, and give up if someone else is heard
+    /// uploading the same object meanwhile.
+    start_at: Millis,
     block: u16,
     esi: u16,
     list: Option<VecDeque<(u16, u16)>>,
@@ -155,6 +160,8 @@ struct CarrierRt {
     last_dwell: u64,
     /// The next queued frame has already waited its random jitter.
     jittered: bool,
+    /// Airtime of MeshCast frames decoded on this carrier since the last EtherFatsoen window.
+    rx_air_ms: u64,
 }
 
 enum Cand {
@@ -212,6 +219,7 @@ impl Node {
                 dropped: 0,
                 last_dwell: u64::MAX,
                 jittered: false,
+                rx_air_ms: 0,
             });
         }
         let mut stats = Stats::default();
@@ -296,12 +304,46 @@ impl Node {
         if n == 1 {
             return 0;
         }
+        self.channel_for(carrier, self.announcer_of(carrier), now)
+    }
+
+    /// Channel of `ann`'s hop sequence at `now`, with the common meeting dwell every
+    /// `meet_every` dwells; a node following nobody scans slowly outside meeting dwells.
+    pub fn channel_for(&self, carrier: usize, ann: NodeId, now: Millis) -> u8 {
+        let c = &self.carriers[carrier];
+        let n = c.p.channels.len().max(1) as u64;
+        if n == 1 {
+            return 0;
+        }
         let dwell = self.cfg.params.dwell_ms.max(1);
-        let ann = self.announcer_of(carrier);
+        let di = now / dwell;
+        if self.is_meeting_dwell(di) {
+            return hop_channel(MEETING_ID, di, n);
+        }
         if ann.is_none() {
             return ((now / (dwell * n)) % n) as u8;
         }
-        hop_channel(ann, now / dwell, n)
+        hop_channel(ann, di, n)
+    }
+
+    fn is_meeting_dwell(&self, dwell_index: u64) -> bool {
+        let m = self.cfg.params.meet_every.max(1);
+        dwell_index % m == 0
+    }
+
+    /// Start of the next meeting dwell strictly after `now`.
+    fn next_meeting_start(&self, now: Millis) -> Millis {
+        let dwell = self.cfg.params.dwell_ms.max(1);
+        let m = self.cfg.params.meet_every.max(1);
+        let di = now / dwell + 1;
+        let next = di.div_ceil(m) * m;
+        next * dwell
+    }
+
+    /// Whether the cell carrier hops, in which case cell-wide control traffic is timed to the
+    /// meeting dwell so that every cell hears it.
+    fn agile(&self) -> bool {
+        self.carriers.get(self.cell_carrier()).map(|c| c.p.channels.len() > 1).unwrap_or(false)
     }
 
     pub fn is_announcing(&self) -> bool {
@@ -391,7 +433,12 @@ impl Node {
             let announcing = c.election.as_ref().map(|e| e.is_announcer()).unwrap_or(false);
             let has_pending = !c.queue.is_empty() || c.upload.is_some() || (announcing && c.carousel.as_ref().map(|k| k.has_work(&self.store)).unwrap_or(false));
             if has_pending {
-                let t = c.busy_until.max(c.pace_until).max(c.fatsoen.backoff_until).max(self.now + 1);
+                let mut t = c.busy_until.max(c.pace_until).max(c.fatsoen.backoff_until).max(self.now + 1);
+                if c.queue.is_empty() && !announcing {
+                    if let Some(u) = &c.upload {
+                        t = t.max(u.start_at);
+                    }
+                }
                 d = d.min(t);
             }
             if announcing {
@@ -443,7 +490,9 @@ impl Node {
         self.now = now;
         for (i, c) in self.carriers.iter_mut().enumerate() {
             let occ = states.get(i).map(|s| s.occupancy_permille).unwrap_or(0);
-            c.fatsoen.maybe_window(now, occ);
+            if c.fatsoen.maybe_window(now, occ, c.rx_air_ms) {
+                c.rx_air_ms = 0;
+            }
         }
         if now >= self.next_score {
             self.expire_neighbors();
@@ -483,10 +532,15 @@ impl Node {
             }
         }
         if now >= self.next_gossip {
-            self.next_gossip = now + self.cfg.params.t_gossip_ms;
-            if self.is_announcing() || !self.pending_ack.is_empty() {
-                self.last_gossip = now;
-                self.gossip_round();
+            if self.agile() && !self.is_meeting_dwell(now / self.cfg.params.dwell_ms.max(1)) {
+                // Hold cell-wide gossip for the meeting dwell, when other cells listen too.
+                self.next_gossip = self.next_meeting_start(now) + self.rng.below(self.cfg.params.dwell_ms / 4);
+            } else {
+                self.next_gossip = now + self.cfg.params.t_gossip_ms;
+                if self.is_announcing() || !self.pending_ack.is_empty() {
+                    self.last_gossip = now;
+                    self.gossip_round();
+                }
             }
         }
         self.follower_want_check();
@@ -803,6 +857,9 @@ impl Node {
             } else if is_ann {
                 c.carousel.as_mut().and_then(|k| k.peek(&self.store, now)).map(Cand::Carousel)
             } else if let Some(u) = c.upload.as_mut() {
+                if u.start_at > now {
+                    return;
+                }
                 match &mut u.list {
                     Some(list) => loop {
                         match list.front().copied() {
@@ -860,7 +917,8 @@ impl Node {
             }
         };
         let airtime = self.carriers[i].p.airtime_ms(bytes.len());
-        if !self.carriers[i].fatsoen.allows(class) {
+        let is_upload = matches!(cand, Cand::Upload(..));
+        if !self.carriers[i].fatsoen.allows(class, is_upload) {
             self.carriers[i].pace_until = now + 1000;
             return;
         }
@@ -874,7 +932,10 @@ impl Node {
                 return;
             }
         }
-        let channel = self.channel(i, now);
+        let channel = match (&cand, self.carriers[i].upload.as_ref()) {
+            (Cand::Upload(..), Some(u)) => self.channel_for(i, u.to, now),
+            _ => self.channel(i, now),
+        };
         let center = self.carriers[i].p.channels.get(channel as usize).copied().unwrap_or(0);
         let bw = self.carriers[i].p.bw_hz;
         if let Some(band) = self.carriers[i].p.band {
@@ -894,7 +955,7 @@ impl Node {
         }
         if class == Class::Content {
             let budget = self.budget_for(i);
-            if let Err(w) = self.carriers[i].fatsoen.take_airtime(now, airtime, budget) {
+            if let Err(w) = self.carriers[i].fatsoen.take_airtime(now, airtime, budget, is_upload) {
                 self.carriers[i].pace_until = now + w;
                 return;
             }
@@ -977,6 +1038,14 @@ impl Node {
     fn rx_frame(&mut self, now: Millis, carrier: usize, f: &Frame, rssi: i16, out: &mut Vec<Action>) {
         self.now = now;
         self.stats.rx_frames += 1;
+        if let Some(c) = self.carriers.get_mut(carrier) {
+            let len = match f {
+                Frame::Bulk(_) => 2 + 14 + SYMBOL_SIZE + 2,
+                Frame::Beacon(_) => 28,
+                other => other.encode().len(),
+            };
+            c.rx_air_ms += c.p.airtime_ms(len) as u64;
+        }
         match f {
             Frame::Beacon(b) => self.rx_beacon(carrier, b, rssi, out),
             Frame::Bulk(b) => self.rx_bulk(carrier, b, out),
@@ -1021,6 +1090,14 @@ impl Node {
     }
 
     fn rx_bulk(&mut self, _carrier: usize, b: &Bulk, out: &mut Vec<Action>) {
+        // Someone else is sending this object: a pending upload of ours is redundant.
+        for c in self.carriers.iter_mut() {
+            if let Some(u) = &c.upload {
+                if u.object == b.object && u.start_at > self.now {
+                    c.upload = None;
+                }
+            }
+        }
         let interested = self.wants.contains(&b.object) || self.store.is_known(&b.object) || self.is_announcing();
         if !interested {
             return;
@@ -1143,32 +1220,33 @@ impl Node {
                 }
             }
         }
-        // Source / follower side: the announcer tells us what it has and wants.
+        // Holder side: an announcer (ours or a neighbouring cell's) tells us what it has and
+        // wants. Any holder may answer; a random wait plus suppression keeps it to one uploader.
+        let from_announcer = g.announcer == g.node;
         for i in 0..self.carriers.len() {
             if !self.carriers[i].p.kind.is_bulk() || self.role(i) == Role::Announcer {
                 continue;
             }
-            if self.announcer_of(i) != g.node {
+            let own = self.announcer_of(i) == g.node;
+            if own {
+                for h in &g.have {
+                    self.pending_ack.remove(h);
+                }
+            } else if !from_announcer {
                 continue;
-            }
-            for h in &g.have {
-                self.pending_ack.remove(h);
             }
             if self.carriers[i].upload.is_none() {
                 for w in &g.want {
-                    if self.store.has_complete(w) && self.should_upload(w) {
-                        self.carriers[i].upload = Some(Upload { object: *w, block: 0, esi: 0, list: None });
+                    if self.store.has_complete(w) {
+                        let max = if own { self.cfg.params.upload_suppress_ms / 4 } else { self.cfg.params.upload_suppress_ms };
+                        let start_at = now + self.rng.below(max.max(1));
+                        self.carriers[i].upload = Some(Upload { object: *w, to: g.node, start_at, block: 0, esi: 0, list: None });
                         self.stats.uploads_started += 1;
                         break;
                     }
                 }
             }
         }
-    }
-
-    /// Upload only if no other node with a lower id is known to have the object (it will).
-    fn should_upload(&self, id: &ShortId) -> bool {
-        !self.neighbors.iter().any(|(n, nb)| n.0 < self.cfg.id.0 && nb.haves.contains(id) && nb.announcer != *n)
     }
 
     fn rx_announce(&mut self, m: &ManifestAnnounce) {
@@ -1218,8 +1296,8 @@ impl Node {
                 if let Some(car) = self.carriers[i].carousel.as_mut() {
                     car.on_nack(n.object, n.block, &n.missing, &self.store);
                 }
-            } else if self.announcer_of(i) == n.node {
-                // Our announcer is missing pieces of something we have: send exactly those.
+            } else if self.announcer_of(i) == n.node || self.neighbors.get(&n.node).map(|nb| nb.announcer == n.node).unwrap_or(false) {
+                // An announcer is missing pieces of something we have: send exactly those.
                 let Some(k) = self.store.block_k(&n.object, n.block) else { continue };
                 let mut list: VecDeque<(u16, u16)> = VecDeque::new();
                 for &(start, count) in &n.missing {
@@ -1238,7 +1316,8 @@ impl Node {
                         // A full pass is in progress; it will cover these.
                     }
                     _ => {
-                        self.carriers[i].upload = Some(Upload { object: n.object, block: n.block, esi: 0, list: Some(list) });
+                        let start_at = self.now + self.rng.below((self.cfg.params.upload_suppress_ms / 4).max(1));
+                        self.carriers[i].upload = Some(Upload { object: n.object, to: n.node, start_at, block: n.block, esi: 0, list: Some(list) });
                         self.stats.uploads_started += 1;
                     }
                 }
@@ -1246,6 +1325,9 @@ impl Node {
         }
     }
 }
+
+/// Announcer id used for the common meeting-dwell sequence.
+pub const MEETING_ID: NodeId = NodeId(0xFFFF_FFFF);
 
 /// Pseudo-random hop sequence per announcer (splitmix64 of announcer id and dwell index).
 /// Two announcers' sequences coincide on about one dwell in `n`, which is how they discover

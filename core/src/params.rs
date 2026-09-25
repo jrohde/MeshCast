@@ -42,6 +42,12 @@ pub struct FatsoenParams {
     pub max_own_share: u16,
     /// Token-bucket burst, in milliseconds of airtime.
     pub burst_ms: u32,
+    /// Thresholds for occupancy caused by recognisable MeshCast frames ("fair among ourselves"):
+    /// looser than the foreign-energy thresholds above ("polite to strangers").
+    pub occ_high_own: u16,
+    pub occ_low_own: u16,
+    pub occ_content_own: u16,
+    pub rate_min_own: u16,
 }
 
 impl Default for FatsoenParams {
@@ -59,6 +65,10 @@ impl Default for FatsoenParams {
             backoff_max_attempt: 8,
             max_own_share: 500,
             burst_ms: 2000,
+            occ_high_own: 500,
+            occ_low_own: 350,
+            occ_content_own: 450,
+            rate_min_own: 250,
         }
     }
 }
@@ -97,6 +107,12 @@ pub struct Params {
     /// Random delay before any control/metadata frame on a bulk carrier, so that nodes whose
     /// CCA cannot see each other (edge of range) do not transmit in lock-step.
     pub tx_jitter_ms: Millis,
+    /// On frequency-agile carriers, every `meet_every`-th dwell is a meeting dwell on a common
+    /// channel where all announcers and holders can hear each other.
+    pub meet_every: u64,
+    /// Holders wait a random time up to this before uploading to an announcer that asked, and
+    /// give up if they hear someone else uploading the same object meanwhile.
+    pub upload_suppress_ms: Millis,
 }
 
 impl Default for Params {
@@ -118,6 +134,8 @@ impl Default for Params {
             t_nack_stall_ms: 60_000,
             t_gossip_min_ms: 30_000,
             tx_jitter_ms: 500,
+            meet_every: 5,
+            upload_suppress_ms: 20_000,
         }
     }
 }

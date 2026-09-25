@@ -80,6 +80,21 @@ enum Cmd {
         #[command(flatten)]
         common: Common,
     },
+    /// Two clusters of nodes with a gap between them: the source is in cluster A, the station in
+    /// cluster B. Tests whether content crosses when only the cluster edges hear each other.
+    Clusters {
+        /// Nodes per cluster.
+        #[arg(long, default_value_t = 10)]
+        size: usize,
+        /// Cluster radius in metres.
+        #[arg(long, default_value_t = 300.0)]
+        radius_m: f64,
+        /// Distance between cluster centres in metres.
+        #[arg(long, default_value_t = 1500.0)]
+        distance_m: f64,
+        #[command(flatten)]
+        common: Common,
+    },
     /// Like `cell`, but the announcer is switched off at a given hour and back on later.
     Failover {
         #[arg(long, default_value_t = 20)]
@@ -169,6 +184,38 @@ fn main() {
                 positions: None,
                 stations_at: None,
                 sources_at: None,
+            };
+            run(spec, &common, None);
+        }
+        Cmd::Clusters { size, radius_m, distance_m, common } => {
+            let mut rng = meshcast_core::rng::Rng::new(common.seed ^ 0xC1);
+            let mut positions = Vec::new();
+            for cluster in 0..2 {
+                let cx = cluster as f64 * distance_m;
+                for _ in 0..size {
+                    let r = radius_m * rng.unit().sqrt();
+                    let a = rng.unit() * 2.0 * std::f64::consts::PI;
+                    positions.push((cx + r * a.cos(), r * a.sin()));
+                }
+            }
+            let n = positions.len();
+            let spec = ScenarioSpec {
+                nodes: n,
+                area_km2: (distance_m + 2.0 * radius_m) * 2.0 * radius_m / 1e6,
+                stations: 1,
+                sources: 1,
+                tracks: common.tracks,
+                track_kb: common.track_kb,
+                hours: common.hours,
+                seed: common.seed,
+                bulk: common.bulk,
+                control_sf: common.control_sf,
+                exponent: common.exponent,
+                shadow_db: common.shadow_db,
+                follow_fraction: 1.0,
+                positions: Some(positions),
+                stations_at: Some(vec![n - 1]),
+                sources_at: Some(vec![0]),
             };
             run(spec, &common, None);
         }
