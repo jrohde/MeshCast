@@ -3,22 +3,13 @@
 use clap::ValueEnum;
 use meshcast_core::frame::CarrierKind;
 use meshcast_core::node::CarrierParams;
-use meshcast_core::profile::{RegionProfile, EU868, ISM2400, US915};
+use meshcast_core::profile::{RegionProfile, EU868, US915};
 use serde::Serialize;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, ValueEnum, Serialize)]
 pub enum Region {
     Eu868,
     Us915,
-}
-
-impl Region {
-    pub fn profile(&self) -> &'static RegionProfile {
-        match self {
-            Region::Eu868 => &EU868,
-            Region::Us915 => &US915,
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, ValueEnum, Serialize)]
@@ -65,7 +56,6 @@ impl Phy {
             channels: self.channels.clone(),
             bw_hz: self.bw_hz,
             tx_dbm: self.tx_dbm.round() as i8,
-            near_rssi_dbm: (self.sensitivity_dbm + 17.0).round() as i16,
         }
     }
 }
@@ -227,11 +217,6 @@ pub fn profile_for(preset: BulkPreset) -> &'static RegionProfile {
         BulkPreset::GfskUs => &US915,
         _ => &EU868,
     }
-}
-
-#[allow(dead_code)]
-pub fn ism2400() -> &'static RegionProfile {
-    &ISM2400
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]

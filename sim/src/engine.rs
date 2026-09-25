@@ -4,7 +4,7 @@
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, VecDeque};
 
-use meshcast_core::frame::{CarrierKind, Frame, FrameType};
+use meshcast_core::frame::{Frame, FrameType};
 use meshcast_core::node::{Action, CarrierState, Event, Node, NodeConfig};
 use meshcast_core::rng::Rng;
 use meshcast_core::Millis;
@@ -17,7 +17,6 @@ const MAX_AIRTIME_MS: Millis = 5_000;
 
 pub struct SimNode {
     pub node: Node,
-    pub pos: (f64, f64),
     pub alive: bool,
     pub mains: bool,
     wake_seq: u64,
@@ -47,14 +46,12 @@ enum Ev {
     TxEnd(u64),
     Kill(usize),
     Revive(usize),
-    Sample,
     End,
 }
 
 pub struct Engine {
     pub nodes: Vec<SimNode>,
     pub phys: Vec<Phy>,
-    pub prop: Propagation,
     heap: BinaryHeap<Reverse<(Millis, u64, Ev)>>,
     seq: u64,
     tx_seq: u64,
@@ -103,12 +100,11 @@ impl Engine {
             }
         }
         let mut nodes = Vec::with_capacity(n);
-        for (i, cfg) in configs.into_iter().enumerate() {
+        for cfg in configs.into_iter() {
             let mains = cfg.mains;
             let node = Node::new(cfg, 0);
             nodes.push(SimNode {
                 node,
-                pos: positions[i],
                 alive: true,
                 mains,
                 wake_seq: 0,
@@ -118,7 +114,7 @@ impl Engine {
                 airtime_ms: vec![0; phys.len()],
             });
         }
-        let mut e = Engine { nodes, phys, prop, heap: BinaryHeap::new(), seq: 0, tx_seq: 0, loss, reach, recent: HashMap::new(), txs: HashMap::new(), now: 0, metrics: Metrics::default(), verbose: false };
+        let mut e = Engine { nodes, phys, heap: BinaryHeap::new(), seq: 0, tx_seq: 0, loss, reach, recent: HashMap::new(), txs: HashMap::new(), now: 0, metrics: Metrics::default(), verbose: false };
         for i in 0..n {
             e.schedule_wake(i, 1);
         }
@@ -168,7 +164,6 @@ impl Engine {
             }
             match ev {
                 Ev::End => break,
-                Ev::Sample => {}
                 Ev::Wake(i, s) => self.wake(i, s),
                 Ev::TxEnd(id) => self.tx_end(id),
                 Ev::Kill(i) => {
@@ -348,8 +343,6 @@ impl Engine {
             // Keep this transmission visible to later-ending overlapping ones.
             q.retain(|other| *other != id);
         }
-        // Later-ending transmissions must still see this one: keep a stub.
-        let stub_needed = !overlapping.is_empty() || true;
         let phy_capture = self.phys[tx.carrier].capture_db;
         let sens = self.phys[tx.carrier].sensitivity_dbm;
         let mut delivered = 0u64;
@@ -391,24 +384,18 @@ impl Engine {
         if tx.frame_type == FrameType::Bulk {
             self.metrics.bulk_delivered += delivered;
         }
-        if stub_needed {
-            // Re-insert as an ended transmission so overlapping later frames account for it.
-            let stub = Transmission { id: tx.id, from: tx.from, carrier: tx.carrier, channel: tx.channel, start: tx.start, end: tx.end, bytes: Vec::new(), frame_type: tx.frame_type, candidates: Vec::new() };
-            self.txs.insert(id, stub);
-            self.recent.entry(key).or_default().push_back(id);
-            // Garbage-collect stubs older than the longest frame.
-            let cutoff = now.saturating_sub(MAX_AIRTIME_MS);
-            let stale: Vec<u64> = self.txs.iter().filter(|(_, t)| t.candidates.is_empty() && t.end < cutoff).map(|(k, _)| *k).collect();
-            if stale.len() > 1024 {
-                for k in stale {
-                    self.txs.remove(&k);
-                }
+        // Later-ending frames that overlapped this one must still see it: keep an ended stub
+        // (no payload, no candidates) until it is older than the longest possible frame.
+        let stub = Transmission { id: tx.id, from: tx.from, carrier: tx.carrier, channel: tx.channel, start: tx.start, end: tx.end, bytes: Vec::new(), frame_type: tx.frame_type, candidates: Vec::new() };
+        self.txs.insert(id, stub);
+        self.recent.entry(key).or_default().push_back(id);
+        let cutoff = now.saturating_sub(MAX_AIRTIME_MS);
+        let stale: Vec<u64> = self.txs.iter().filter(|(_, t)| t.candidates.is_empty() && t.end < cutoff).map(|(k, _)| *k).collect();
+        if stale.len() > 1024 {
+            for k in stale {
+                self.txs.remove(&k);
             }
         }
-        let _ = CarrierKind::LoraControl;
     }
 
-    pub fn distance(&self, i: usize, j: usize) -> f64 {
-        ((self.nodes[i].pos.0 - self.nodes[j].pos.0).powi(2) + (self.nodes[i].pos.1 - self.nodes[j].pos.1).powi(2)).sqrt()
-    }
 }

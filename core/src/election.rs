@@ -2,7 +2,9 @@
 //!
 //! A follower follows the announcer it *receives best* (RSSI), because it must receive that
 //! announcer's carousel. Scores decide who steps up when nobody is heard, who yields when two
-//! announcers are close together, and when a much better node challenges the incumbent.
+//! announcers share a cell, and when a much better node challenges the incumbent. "Sharing a
+//! cell" is judged by the node relative to its own neighbourhood (see `Node`), not by an absolute
+//! signal level.
 
 use alloc::collections::BTreeMap;
 
@@ -42,8 +44,6 @@ struct Heard {
 #[derive(Clone, Debug)]
 pub struct Election {
     p: ElectionParams,
-    /// Beacons from an announcer at or above this RSSI mean "same cell" for the tie-break.
-    near_rssi_dbm: i16,
     state: State,
     pub announcer: NodeId,
     pub announcer_score: u16,
@@ -54,10 +54,9 @@ pub struct Election {
 }
 
 impl Election {
-    pub fn new(p: ElectionParams, near_rssi_dbm: i16, now: Millis) -> Self {
+    pub fn new(p: ElectionParams, now: Millis) -> Self {
         Election {
             p,
-            near_rssi_dbm,
             state: State::Follower,
             announcer: NodeId::NONE,
             announcer_score: 0,
@@ -104,7 +103,9 @@ impl Election {
         self.heard.iter().filter(|(id, h)| **id != except && h.last + fresh >= now).max_by_key(|(_, h)| h.rssi).map(|(id, _)| *id)
     }
 
-    pub fn on_beacon(&mut self, now: Millis, from: NodeId, score: u16, next_ms: u16, rssi: i16, lonely: bool, me: NodeId, my_score: u16) -> Option<Transition> {
+    /// `near`: the caller judges this announcer to be in our own cell (heard at least as well
+    /// as our typical neighbour); only then does a near-tie yield to the lower id.
+    pub fn on_beacon(&mut self, now: Millis, from: NodeId, score: u16, next_ms: u16, rssi: i16, near: bool, me: NodeId, my_score: u16) -> Option<Transition> {
         if from == me || from.is_none() {
             return None;
         }
@@ -118,7 +119,7 @@ impl Election {
         match self.state {
             State::Announcer => {
                 let d = score as i32 - my_score as i32;
-                let yields = d > hy || (d >= -hy && from.0 < me.0 && (h_rssi >= self.near_rssi_dbm || lonely));
+                let yields = d > hy || (d >= -hy && from.0 < me.0 && near);
                 if yields {
                     self.follow(now, from);
                     Some(Transition::BecameFollower(from))
@@ -236,7 +237,7 @@ mod tests {
     fn silence_then_election_then_yield() {
         let p = ElectionParams::default();
         let mut rng = Rng::new(1);
-        let mut e = Election::new(p, -90, 0);
+        let mut e = Election::new(p, 0);
         let mut now = 0;
         let mut became_candidate = None;
         while became_candidate.is_none() && now < 10 * p.t_beacon_ms {
@@ -269,19 +270,19 @@ mod tests {
     #[test]
     fn near_equal_far_announcers_both_persist() {
         let p = ElectionParams::default();
-        let mut e = Election::new(p, -90, 0);
+        let mut e = Election::new(p, 0);
         e.state = State::Announcer;
-        // Equal score, lower id, but weak signal: do not yield.
+        // Equal score, lower id, but judged to be in another cell: do not yield.
         assert_eq!(e.on_beacon(1000, NodeId(1), 300, 60000, -100, false, NodeId(5), 300), None);
-        // Same, strong signal: yield.
-        assert_eq!(e.on_beacon(2000, NodeId(1), 300, 60000, -70, false, NodeId(5), 300), Some(Transition::BecameFollower(NodeId(1))));
+        // Same, judged to be in our cell: yield.
+        assert_eq!(e.on_beacon(2000, NodeId(1), 300, 60000, -70, true, NodeId(5), 300), Some(Transition::BecameFollower(NodeId(1))));
     }
 
     #[test]
     fn challenger_steps_up() {
         let p = ElectionParams::default();
         let mut rng = Rng::new(2);
-        let mut e = Election::new(p, -90, 0);
+        let mut e = Election::new(p, 0);
         e.on_beacon(1000, NodeId(7), 100, 60000, -80, false, NodeId(5), 400);
         for i in 0..p.challenge_beacons as u64 {
             assert_eq!(e.tick(2000 + i, 400, &mut rng), None);

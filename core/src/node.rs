@@ -31,8 +31,6 @@ pub struct CarrierParams {
     pub channels: Vec<u32>,
     pub bw_hz: u32,
     pub tx_dbm: i8,
-    /// Beacons at or above this RSSI mean "same cell" for the announcer tie-break.
-    pub near_rssi_dbm: i16,
 }
 
 impl CarrierParams {
@@ -106,6 +104,8 @@ struct Neighbor {
     last_heard: Millis,
     announcer: NodeId,
     score: u16,
+    /// How well we hear this node (averaged RSSI of its frames).
+    rssi: i16,
     haves: BTreeSet<ShortId>,
 }
 
@@ -209,7 +209,7 @@ impl Node {
             let bulk = c.kind.is_bulk();
             carriers.push(CarrierRt {
                 p: c.clone(),
-                election: if bulk { Some(Election::new(cfg.params.election, c.near_rssi_dbm, now)) } else { None },
+                election: if bulk { Some(Election::new(cfg.params.election, now)) } else { None },
                 carousel: if bulk { Some(Carousel::new(cp)) } else { None },
                 fatsoen: Fatsoen::new(cfg.params.fatsoen, now),
                 queue: Vec::new(),
@@ -655,7 +655,7 @@ impl Node {
         let cp = self.carousel_params();
         for c in self.carriers.iter_mut() {
             if c.election.is_some() {
-                c.election = Some(Election::new(p.election, c.p.near_rssi_dbm, now));
+                c.election = Some(Election::new(p.election, now));
                 c.carousel = Some(Carousel::new(cp));
             }
             c.fatsoen = Fatsoen::new(p.fatsoen, now);
@@ -917,8 +917,13 @@ impl Node {
             }
         };
         let airtime = self.carriers[i].p.airtime_ms(bytes.len());
-        let is_upload = matches!(cand, Cand::Upload(..));
-        if !self.carriers[i].fatsoen.allows(class, is_upload) {
+        // Fresh content (first copy into the cell) has right of way over repetition.
+        let fresh = match &cand {
+            Cand::Upload(..) => true,
+            Cand::Carousel(Item::Symbol { .. }) => self.carriers[i].carousel.as_ref().map(|k| k.current_is_fresh()).unwrap_or(false),
+            _ => false,
+        };
+        if !self.carriers[i].fatsoen.allows(class, fresh) {
             self.carriers[i].pace_until = now + 1000;
             return;
         }
@@ -955,7 +960,7 @@ impl Node {
         }
         if class == Class::Content {
             let budget = self.budget_for(i);
-            if let Err(w) = self.carriers[i].fatsoen.take_airtime(now, airtime, budget, is_upload) {
+            if let Err(w) = self.carriers[i].fatsoen.take_airtime(now, airtime, budget, fresh) {
                 self.carriers[i].pace_until = now + w;
                 return;
             }
@@ -1049,17 +1054,29 @@ impl Node {
         match f {
             Frame::Beacon(b) => self.rx_beacon(carrier, b, rssi, out),
             Frame::Bulk(b) => self.rx_bulk(carrier, b, out),
-            Frame::Gossip(g) => self.rx_gossip(carrier, g, out),
-            Frame::ManifestAnnounce(m) => self.rx_announce(m),
-            Frame::Nack(n) => self.rx_nack(n),
+            Frame::Gossip(g) => self.rx_gossip(carrier, g, rssi, out),
+            Frame::ManifestAnnounce(m) => self.rx_announce(m, rssi),
+            Frame::Nack(n) => self.rx_nack(n, rssi),
         }
     }
 
-    fn touch(&mut self, id: NodeId) -> &mut Neighbor {
+    fn touch(&mut self, id: NodeId, rssi: i16) -> &mut Neighbor {
         let now = self.now;
-        let n = self.neighbors.entry(id).or_insert(Neighbor { last_heard: now, announcer: NodeId::NONE, score: 0, haves: BTreeSet::new() });
+        let n = self.neighbors.entry(id).or_insert(Neighbor { last_heard: now, announcer: NodeId::NONE, score: 0, rssi, haves: BTreeSet::new() });
         n.last_heard = now;
+        n.rssi = ((n.rssi as i32 + rssi as i32) / 2) as i16;
         n
+    }
+
+    /// RSSI of our typical (median) neighbour: the yardstick for "same cell". A node that has
+    /// heard nobody else considers any peer as close as its typical neighbour.
+    fn typical_neighbor_rssi(&self, except: NodeId) -> i16 {
+        let mut v: Vec<i16> = self.neighbors.iter().filter(|(id, _)| **id != except).map(|(_, n)| n.rssi).collect();
+        if v.is_empty() {
+            return i16::MIN;
+        }
+        v.sort_unstable();
+        v[v.len() / 2]
     }
 
     fn rx_beacon(&mut self, carrier: usize, b: &Beacon, rssi: i16, out: &mut Vec<Action>) {
@@ -1073,17 +1090,16 @@ impl Node {
             return;
         }
         {
-            let n = self.touch(b.announcer);
+            let n = self.touch(b.announcer, rssi);
             n.score = b.score;
             n.announcer = b.announcer;
         }
         let me = self.cfg.id;
         let score = self.score;
         let now = self.now;
-        // Lonely: nobody but this other announcer has been heard on any carrier, so there is
-        // no follower to orphan by yielding.
-        let lonely = self.neighbors.len() <= 1;
-        let t = self.carriers[ti].election.as_mut().and_then(|e| e.on_beacon(now, b.announcer, b.score, b.next_ms, rssi, lonely, me, score));
+        // Same cell: we hear this announcer at least as well as our typical neighbour.
+        let near = rssi >= self.typical_neighbor_rssi(b.announcer);
+        let t = self.carriers[ti].election.as_mut().and_then(|e| e.on_beacon(now, b.announcer, b.score, b.next_ms, rssi, near, me, score));
         if let Some(t) = t {
             self.on_transition(ti, t, out);
         }
@@ -1175,12 +1191,12 @@ impl Node {
         }
     }
 
-    fn rx_gossip(&mut self, _carrier: usize, g: &Gossip, out: &mut Vec<Action>) {
+    fn rx_gossip(&mut self, _carrier: usize, g: &Gossip, rssi: i16, out: &mut Vec<Action>) {
         if g.node == self.cfg.id {
             return;
         }
         {
-            let n = self.touch(g.node);
+            let n = self.touch(g.node, rssi);
             n.announcer = g.announcer;
             for h in &g.have {
                 if n.haves.len() < 512 {
@@ -1249,11 +1265,11 @@ impl Node {
         }
     }
 
-    fn rx_announce(&mut self, m: &ManifestAnnounce) {
+    fn rx_announce(&mut self, m: &ManifestAnnounce, rssi: i16) {
         if m.node == self.cfg.id {
             return;
         }
-        self.touch(m.node);
+        self.touch(m.node, rssi);
         let announcing = self.is_announcing();
         for e in &m.entries {
             let interested = self.follows.contains(&e.channel) || announcing;
@@ -1280,11 +1296,11 @@ impl Node {
         }
     }
 
-    fn rx_nack(&mut self, n: &Nack) {
+    fn rx_nack(&mut self, n: &Nack, rssi: i16) {
         if n.node == self.cfg.id {
             return;
         }
-        self.touch(n.node);
+        self.touch(n.node, rssi);
         if !self.store.has_complete(&n.object) {
             return;
         }

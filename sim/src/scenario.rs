@@ -46,7 +46,6 @@ pub struct TrackInfo {
 pub struct Built {
     pub engine: Engine,
     pub tracks: BTreeMap<ShortId, TrackInfo>,
-    pub manifests: BTreeMap<ShortId, usize>,
     pub phys: Vec<Phy>,
 }
 
@@ -124,7 +123,6 @@ pub fn build(spec: &ScenarioSpec, params: Params) -> Built {
     let mut engine = Engine::new(configs, positions, phys.clone(), prop, spec.seed);
 
     let mut tracks = BTreeMap::new();
-    let mut manifests = BTreeMap::new();
     let mut rng2 = Rng::new(spec.seed ^ 0xF00D);
     for &s in &sources {
         let mut kb = [0u8; 32];
@@ -143,8 +141,6 @@ pub fn build(spec: &ScenarioSpec, params: Params) -> Built {
         let schedule: Vec<ScheduleEntry> = objects.iter().enumerate().map(|(t, o)| ScheduleEntry { object: o.id.short(), start: 3600 * (t as u64 + 1), repeat: 0 }).collect();
         let m = Manifest::sign(&key, 1, &format!("Channel of node {s}"), objects.clone(), schedule, None);
         let chan = m.channel_id();
-        let (mmeta, _) = m.as_object();
-        manifests.insert(mmeta.id.short(), s);
         engine.nodes[s].node.publish(&m, &metas);
         let mut followers = Vec::new();
         for i in 0..n {
@@ -160,5 +156,5 @@ pub fn build(spec: &ScenarioSpec, params: Params) -> Built {
             tracks.insert(o.id.short(), TrackInfo { source: s, index: t, bytes: o.len, followers: followers.clone() });
         }
     }
-    Built { engine, tracks, manifests, phys }
+    Built { engine, tracks, phys }
 }

@@ -62,13 +62,14 @@ impl Fatsoen {
         self.rate
     }
 
-    /// Class gate: control always; metadata and uploads unless congested; carousel content only
-    /// on a quiet channel. Foreign energy is judged strictly, our own protocol's traffic loosely.
-    pub fn allows(&self, class: Class, upload: bool) -> bool {
+    /// Class gate. Control always; metadata and *fresh* content (the first copy of an object
+    /// into a cell: an upload, or a carousel's first pass) unless congested; repeated content
+    /// only on a quiet channel. Foreign energy is judged strictly, our own traffic loosely.
+    pub fn allows(&self, class: Class, fresh: bool) -> bool {
         match class {
             Class::Control => true,
             Class::Metadata => self.foreign_ewma < self.p.occ_high && self.occ_ewma < self.p.occ_high_own,
-            Class::Content if upload => self.foreign_ewma < self.p.occ_high && self.occ_ewma < self.p.occ_high_own,
+            Class::Content if fresh => self.foreign_ewma < self.p.occ_high && self.occ_ewma < self.p.occ_high_own,
             Class::Content => self.foreign_ewma < self.p.occ_content && self.occ_ewma < self.p.occ_content_own,
         }
     }
@@ -76,8 +77,9 @@ impl Fatsoen {
     /// Token-bucket pacing for content. `budget_permille` is the regulatory (or self-imposed)
     /// share of airtime; the effective rate is `budget × rate`. Returns how long to wait if the
     /// bucket cannot cover `airtime_ms` now.
-    pub fn take_airtime(&mut self, now: Millis, airtime_ms: u32, budget_permille: u16, exempt: bool) -> Result<(), Millis> {
-        let rate = if exempt { self.p.rate_max } else { self.rate };
+    /// Fresh content is paced at the full budget; repetition at the AIMD rate.
+    pub fn take_airtime(&mut self, now: Millis, airtime_ms: u32, budget_permille: u16, fresh: bool) -> Result<(), Millis> {
+        let rate = if fresh { self.p.rate_max } else { self.rate };
         let per_mille2 = budget_permille as i64 * rate as i64; // 0..1e6
         let elapsed = now.saturating_sub(self.last_refill) as i64;
         self.last_refill = now;

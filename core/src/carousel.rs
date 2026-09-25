@@ -112,6 +112,14 @@ impl Carousel {
         self.wants.keys()
     }
 
+    /// Whether the object at the cursor is on its first pass through this cell.
+    pub fn current_is_fresh(&self) -> bool {
+        match self.set.get(self.idx) {
+            Some(id) => self.passes.get(id).map(|p| p.0 == 0).unwrap_or(true),
+            None => false,
+        }
+    }
+
     pub fn set_ids(&self) -> &[ShortId] {
         &self.set
     }
