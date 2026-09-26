@@ -166,13 +166,15 @@ pub fn bulk_phy(preset: BulkPreset) -> Phy {
             }
         }
         BulkPreset::EspNow => Phy {
-            name: "ESP-NOW LR 2.4 GHz 100 mW".into(),
+            name: "ESP-NOW LR 2.4 GHz 100 mW, channels 1/6/11".into(),
             kind: CarrierKind::EspNow,
             bitrate_bps: 250_000,
             overhead_ms: 2,
             band: None,
             rule_choice: None,
-            channels: vec![2_412_000_000],
+            // The three non-overlapping 2.4 GHz WiFi channels; announcers hop between them
+            // like on band L, with the common control-plane dwell.
+            channels: vec![2_412_000_000, 2_437_000_000, 2_462_000_000],
             bw_hz: 20_000_000,
             tx_dbm: 20.0,
             sensitivity_dbm: -100.0,

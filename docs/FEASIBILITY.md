@@ -239,18 +239,62 @@ challenges and takes the role back. Listeners keep playing their local copies th
 
 `meshcast-sim cell --nodes 200 --area-km2 30 --stations 3 --sources 5 --tracks 10 --hours 24 --bulk B`
 
-| Bulk carrier | Announcers at end | Role events / day | Tracks fully delivered (of 50) | Follower-completions | Median completion | Bulk occupancy p50 / max |
+| Bulk carrier | Announcers at end | Role events / day | Tracks fully delivered (of 50) | Follower-completions | Mean of per-track median completion | Bulk occupancy p50 / max |
 |---|---|---|---|---|---|---|
-| GFSK band O (one 250 kHz channel, 500 mW, 10 %) | 5 | 6 645 | 45 | 94 % | 9.4 h | 20 % / 82 % |
-| GFSK band L (15 channels, 25 mW, polite) | see below | | | | | |
-| ESP-NOW LR (460 m cells) | see below | | | | | |
+| GFSK band O, before fresh-content priority | 5 | 6 645 | 45 | 94 % | 9.4 h | 20 % / 82 % |
+| GFSK band O (one 250 kHz channel, 500 mW, 10 %) | 5 | 14 311 | **50** | **100 %** | 9.7 h | 34 % / 87 % |
+| GFSK band L (15 channels, 25 mW, polite) | 24 | 6 342 | **50** | **100 %** | 9.9 h | 17 % / 91 % |
+| ESP-NOW LR (460 m cells) | not connected at this density: see §7.5.1 | | | | | |
 
-Band O delivers, but five announcers sharing one channel is the structural limit of that band:
-the town is one collision domain. Content crosses cells through bridge nodes that hear two
-carousels; a track published at one edge reaches the far edge after several hours.
+Both sub-GHz carriers deliver every track to every follower within the day. Band O does it with
+five announcers sharing one channel, so the town is one collision domain: occupancy is high and
+the announcers switch roles often (most role events are followers moving between overlapping
+cells, not announcer changes). Band L forms 24 smaller cells on 15 channels at 25 mW, with lower
+occupancy and less churn, at the same delivery time; it is the better-behaved band in a town, at
+the price of shorter reach per cell. Content crosses cells through bridge nodes that hear two
+carousels and through holders answering neighbouring announcers' WANTs; a track published at one
+edge reaches the far edge after several hours.
 
-*(Band L and ESP-NOW rows are filled in when those runs finish; see the run logs in the
-repository history.)*
+The fresh-content rule turned 45 of 50 into 50 of 50, at the cost of more airtime and role
+churn in band O. Whether that churn matters on real hardware is a Phase 1 question.
+
+#### 7.5.0 A neighbourhood: 50 nodes on 1 km², 1 station, 2 sources × 10 tracks, 3 h
+
+`meshcast-sim cell --nodes 50 --area-km2 1 --stations 1 --sources 2 --tracks 10 --hours 3 --bulk B`
+
+| Bulk carrier | Announcers | Tracks fully delivered (of 20) | Follower-completions | Mean p50 | Occupancy p50 / max | Collisions |
+|---|---|---|---|---|---|---|
+| GFSK band O | 1 | 20 | 100 % | 1.10 h | 18 % / 27 % | 0 |
+| ESP-NOW, one channel, fixed 50 % share | 8 | 15 | 85 % | 1.09 h | 50 % / 100 % | 37 M |
+| ESP-NOW, one channel, derived fair share | 5 | 15 | 84 % | 1.43 h | 27 % / 100 % | 12.6 M |
+| ESP-NOW, channels 1/6/11, fair share | 6 | 12 | 78 % | 1.82 h | 24 % / 74 % | 7.3 M |
+
+The surprise: on 1 km² ESP-NOW is not faster than band O, despite 25 times the raw bit rate.
+Band O reaches the whole square from one announcer at 10 % duty cycle with no collisions at all.
+ESP-NOW's 460 m reach splits the square into five to eight cells whose announcers cannot hear
+each other but whose followers hear several of them: the hidden-node case in its purest form.
+Deriving each announcer's share from the number of announcers it hears (instead of a fixed 50 %)
+cut collisions by two thirds and occupancy in half but did not raise delivery; spreading cells
+over the three non-overlapping WiFi channels cut collisions again but slowed cross-cell
+propagation, because a follower is deaf to other cells except during the common dwell.
+
+ESP-NOW is therefore *not* solved in Phase 0: within one cell it is the fastest carrier we have
+(two nodes at 300 m: three tracks in eight minutes), but between overlapping cells on a single
+2.4 GHz channel it needs a mechanism this design does not yet have, most likely announcers that
+take turns (an emergent time division learned from each other's beacons) rather than contend.
+Recorded as open question 10 in PROTOCOL.md. In practice the sub-GHz carrier carries content
+between cells and ESP-NOW serves a street; the simulator models one bulk carrier per node, so
+that combination is untested.
+
+#### 7.5.1 ESP-NOW at town scale
+
+200 nodes on 30 km² is 6.7 nodes per km²; at ESP-NOW's 460 m reach a node hears about four
+others, and the graph of who hears whom falls apart into islands. The 24-hour run did not finish
+in the time allowed (tens of announcers each at a 50 % airtime share generate far more frames
+than a duty-cycled carrier), and the model says the outcome anyway: ESP-NOW cannot bridge the
+gaps between islands. It is a neighbourhood carrier, not a town carrier; the sub-GHz carrier
+carries content across the gaps and ESP-NOW distributes it within a street. The dense-town run
+below shows it in its element.
 
 ### 7.6 What Phase 0 could not answer
 

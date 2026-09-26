@@ -348,6 +348,7 @@ arrives a few minutes later than it otherwise would. That is the entire user-vis
 | `T_want_min` | 10 min | minimum interval between a follower's WANT frames |
 | `T_gossip`, `T_gossip_min` | 5 min, 30 s | announcer/source gossip cadence and its floor |
 | `control_reserve` | 10 % | share of the band budget kept free for control frames |
+| own share | `min(regulatory, occ_high_own / (announcers heard + 1))` | content pacing ceiling; derived, not configured |
 | `T_dwell` | 20 s | hop dwell on frequency-agile carriers |
 | `meet_every` | 5 | every fifth dwell is on the common control-plane sequence |
 | `T_suppress` | 20 s (5 s for own announcer) | random wait before answering a WANT, cancelled if someone else answers |
@@ -369,3 +370,8 @@ arrives a few minutes later than it otherwise would. That is the entire user-vis
    bulk carrier per node so far.
 9. zsync-style delta transfer for updated objects (web bundles, firmware): the receiver compares
    the block lists of the old and new object and wants only the changed symbols.
+10. Overlapping cells on a carrier without duty cycle (ESP-NOW): announcers that cannot hear each
+    other collide at the followers between them, and fair-share pacing alone does not fix it
+    (FEASIBILITY.md §7.5.0). Candidate: announcers take turns in a cycle derived from the
+    beacons they and their followers hear (emergent time division), so that at most one carousel
+    is audible at any follower at a time.

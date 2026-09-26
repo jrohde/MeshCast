@@ -93,9 +93,17 @@ Draft parameters:
 | `RATE_STEP` | 0.05 | additive increase per window |
 | CCA sample rate | 1 kHz | RSSI samples per second while idle |
 
+**Two ceilings, the lower wins.** A node paces its content to the smaller of (a) the regulatory
+budget of the band minus a reserve for control frames, and (b) a fair share of the channel's
+occupancy target among the announcers it can hear, itself included: `occ_target / (heard + 1)`.
+On duty-cycled bands (a) usually binds; on carriers without a duty cycle (ESP-NOW, US 915 MHz) (b)
+is what stops eight announcers on one channel from each claiming half of it. The share is
+derived from what the node hears, never configured; when announcers leave, the survivors' share
+grows by itself.
+
 On a band shared by the control and bulk carriers (EU band O carries both the LoRa control
-channel and the GFSK bulk channel), content pacing uses only `1 − control_reserve` (draft 90 %) of
-the legal budget, so that beacons and gossip always have airtime left. The simulator's first
+channel and the GFSK bulk channel), the regulatory ceiling uses only `1 − control_reserve`
+(draft 90 %) of the legal budget, so that beacons and gossip always have airtime left. The simulator's first
 runs let the carousel spend the whole 10 % and starved the beacons, after which followers
 concluded the announcer had vanished.
 

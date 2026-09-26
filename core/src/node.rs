@@ -816,23 +816,27 @@ impl Node {
         }
     }
 
-    /// Share of airtime the bulk carrier may pace itself to: the regulatory budget minus a
-    /// reserve for control frames on the same band, or the self-imposed share where no
-    /// regulatory duty cycle exists.
+    /// Share of airtime the bulk carrier may pace itself to. Two ceilings, the lower wins:
+    /// the regulatory budget minus a reserve for control frames on the same band, and a fair
+    /// share of the channel's occupancy target among the announcers we can hear (ourselves
+    /// included). The second is what keeps eight ESP-NOW announcers on one channel from each
+    /// claiming half of it; on duty-cycled bands the first usually binds.
     fn budget_for(&self, carrier: usize) -> u16 {
         let c = &self.carriers[carrier];
-        let share = self.cfg.params.fatsoen.max_own_share;
         let reserve = 1000u32.saturating_sub(self.cfg.params.control_reserve as u32);
-        match c.p.band {
+        let regulatory = match c.p.band {
             Some(b) => match self.discipline.rule(b) {
                 Access::DutyCycle { .. } | Access::Polite { .. } => {
                     let budget = self.discipline.budget_permille(b, c.p.channels.len() as u16) as u32;
                     (budget * reserve / 1000) as u16
                 }
-                _ => share,
+                _ => self.cfg.params.fatsoen.max_own_share,
             },
-            None => share,
-        }
+            None => self.cfg.params.fatsoen.max_own_share,
+        };
+        let heard = c.election.as_ref().map(|e| e.announcers_heard(self.now, self.cfg.id)).unwrap_or(0) as u32;
+        let fair = self.cfg.params.fatsoen.occ_high_own as u32 / (heard + 1);
+        regulatory.min(fair as u16).max(1)
     }
 
     fn try_tx(&mut self, i: usize, cca_busy: bool, out: &mut Vec<Action>) {

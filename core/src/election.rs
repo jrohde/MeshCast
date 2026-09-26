@@ -227,6 +227,12 @@ impl Election {
     pub fn missed(&self) -> u8 {
         self.missed
     }
+
+    /// Other announcers heard recently (within two beacon intervals), excluding `except`.
+    pub fn announcers_heard(&self, now: Millis, except: NodeId) -> usize {
+        let fresh = self.p.t_beacon_ms * 2 + GRACE_MS;
+        self.heard.iter().filter(|(id, h)| **id != except && h.last + fresh >= now).count()
+    }
 }
 
 #[cfg(test)]
