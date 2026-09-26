@@ -242,16 +242,16 @@ challenges and takes the role back. Listeners keep playing their local copies th
 | Bulk carrier | Announcers at end | Role events / day | Tracks fully delivered (of 50) | Follower-completions | Mean of per-track median completion | Bulk occupancy p50 / max |
 |---|---|---|---|---|---|---|
 | GFSK band O, before fresh-content priority | 5 | 6 645 | 45 | 94 % | 9.4 h | 20 % / 82 % |
-| GFSK band O (one 250 kHz channel, 500 mW, 10 %) | 5 | 14 311 | **50** | **100 %** | 9.7 h | 34 % / 87 % |
-| GFSK band L (15 channels, 25 mW, polite) | 24 | 6 342 | **50** | **100 %** | 9.9 h | 17 % / 91 % |
+| GFSK band O (one 250 kHz channel, 500 mW, 10 %) | 5 | 14 637 | **50** | **100 %** | 10.5 h | 32 % / 92 % |
+| GFSK band L (15 channels, 25 mW, polite) | 26 | 4 791 | **50** | **100 %** | 11.4 h | 17 % / 74 % |
 | ESP-NOW LR (460 m cells) | not connected at this density: see §7.5.1 | | | | | |
 
-Both sub-GHz carriers deliver every track to every follower within the day. Band O does it with
-five announcers sharing one channel, so the town is one collision domain: occupancy is high and
-the announcers switch roles often (most role events are followers moving between overlapping
-cells, not announcer changes). Band L forms 24 smaller cells on 15 channels at 25 mW, with lower
-occupancy and less churn, at the same delivery time; it is the better-behaved band in a town, at
-the price of shorter reach per cell. Content crosses cells through bridge nodes that hear two
+Both sub-GHz carriers deliver every track to every follower within the day (final code, with
+the derived fair-share ceiling). Band O does it with five announcers sharing one channel, so the
+town is one collision domain: occupancy is high and roles change often (most role events are
+followers moving between overlapping cells, not announcer changes). Band L forms 26 smaller cells
+on 15 channels at 25 mW, with half the occupancy and a third of the churn, at a similar delivery
+time; it is the better-behaved band in a town, at the price of shorter reach per cell. Content crosses cells through bridge nodes that hear two
 carousels and through holders answering neighbouring announcers' WANTs; a track published at one
 edge reaches the far edge after several hours.
 
