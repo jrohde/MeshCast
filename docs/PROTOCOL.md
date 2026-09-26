@@ -194,7 +194,11 @@ could not hear each other's suppression.
 
 **Ask only for what is not coming.** An announcer's WANT lists objects that have received no
 symbol for `T_nack_stall`; an object whose symbols are arriving is not asked for again, and a
-holder whose granted upload is flowing is not asked for a second object until it is done. An
+holder whose granted upload is flowing is not asked for a second object until it is done.
+Several holders may upload different objects to one announcer at the same time: each spends its
+own regulatory budget, and serialising them (tried in Phase 0) halves the cell's inbound rate.
+Holders on opposite sides of a cell that cannot hear each other's CCA are the known residual
+source of upload collisions (FEASIBILITY.md §7.5.0, rounds 9–10). An
 object that is at least 80 % complete is never re-asked in full: it is repaired by NACK, which
 the granted uploader answers for as long as the announcer keeps asking. On frequency-agile
 carriers an announcer's NACKs, like its gossip, go out in the meeting dwell, because its

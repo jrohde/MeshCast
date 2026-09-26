@@ -40,6 +40,7 @@ struct Heard {
     score: u16,
     next_ms: u16,
     colour: u8,
+    colours: u8,
 }
 
 #[derive(Clone, Debug)]
@@ -106,16 +107,17 @@ impl Election {
 
     /// `near`: the caller judges this announcer to be in our own cell (heard at least as well
     /// as our typical neighbour); only then does a near-tie yield to the lower id.
-    pub fn on_beacon(&mut self, now: Millis, from: NodeId, score: u16, next_ms: u16, rssi: i16, colour: u8, near: bool, me: NodeId, my_score: u16) -> Option<Transition> {
+    pub fn on_beacon(&mut self, now: Millis, from: NodeId, score: u16, next_ms: u16, rssi: i16, colour: u8, colours: u8, near: bool, me: NodeId, my_score: u16) -> Option<Transition> {
         if from == me || from.is_none() {
             return None;
         }
-        let h = self.heard.entry(from).or_insert(Heard { last: now, rssi, score, next_ms, colour });
+        let h = self.heard.entry(from).or_insert(Heard { last: now, rssi, score, next_ms, colour, colours });
         h.last = now;
         h.rssi = ((h.rssi as i32 + rssi as i32) / 2) as i16;
         h.score = score;
         h.next_ms = next_ms;
         h.colour = colour;
+        h.colours = colours.max(1);
         let h_rssi = h.rssi;
         let hy = self.p.hysteresis as i32;
         match self.state {
@@ -168,7 +170,7 @@ impl Election {
         }
         let Some(s) = other_score else { return None };
         if s as i32 > my_score as i32 + self.p.hysteresis as i32 {
-            self.heard.entry(other).or_insert(Heard { last: now, rssi: i16::MIN / 2, score: s, next_ms: self.p.t_beacon_ms as u16, colour: 0 });
+            self.heard.entry(other).or_insert(Heard { last: now, rssi: i16::MIN / 2, score: s, next_ms: self.p.t_beacon_ms as u16, colour: 0, colours: 1 });
             self.follow(now, other);
             Some(Transition::BecameFollower(other))
         } else {
@@ -254,11 +256,19 @@ impl Election {
         self.heard.get(&id).map(|h| h.colour)
     }
 
-    /// An announcer's gossip also states its colour; keep it current between beacons.
-    pub fn note_colour(&mut self, id: NodeId, colour: u8) {
-        if let Some(h) = self.heard.get_mut(&id) {
-            h.colour = colour;
-        }
+    /// Colour and colour count last announced by `id`.
+    pub fn colouring_of(&self, id: NodeId) -> Option<(u8, u8)> {
+        self.heard.get(&id).map(|h| (h.colour, h.colours))
+    }
+
+    /// An announcer's gossip also states its colouring; keep it current between beacons, and
+    /// treat the gossip as a sighting if we never heard its beacon (a holder must be able to
+    /// reach an announcer that asked it).
+    pub fn note_colouring(&mut self, now: Millis, id: NodeId, colour: u8, colours: u8, rssi: i16) {
+        let h = self.heard.entry(id).or_insert(Heard { last: now, rssi, score: 0, next_ms: self.p.t_beacon_ms as u16, colour, colours });
+        h.last = now;
+        h.colour = colour;
+        h.colours = colours.max(1);
     }
 }
 
@@ -290,13 +300,13 @@ mod tests {
         }
         assert!(ann.unwrap() - t <= p.t_base_ms + p.t_jitter_ms);
         // A much better node appears: yield.
-        let tr = e.on_beacon(now, NodeId(9), 400, 60000, -80, 0, false, NodeId(5), 100);
+        let tr = e.on_beacon(now, NodeId(9), 400, 60000, -80, 0, 1, false, NodeId(5), 100);
         assert_eq!(tr, Some(Transition::BecameFollower(NodeId(9))));
         // Another announcer, weaker signal: keep following 9.
-        let tr = e.on_beacon(now + 1, NodeId(20), 400, 60000, -100, 0, false, NodeId(5), 100);
+        let tr = e.on_beacon(now + 1, NodeId(20), 400, 60000, -100, 0, 1, false, NodeId(5), 100);
         assert_eq!(tr, None);
         // A much stronger signal: switch.
-        let tr = e.on_beacon(now + 2, NodeId(21), 100, 60000, -60, 0, false, NodeId(5), 100);
+        let tr = e.on_beacon(now + 2, NodeId(21), 100, 60000, -60, 0, 1, false, NodeId(5), 100);
         assert_eq!(tr, Some(Transition::AnnouncerChanged(NodeId(21))));
     }
 
@@ -306,9 +316,9 @@ mod tests {
         let mut e = Election::new(p, 0);
         e.state = State::Announcer;
         // Equal score, lower id, but judged to be in another cell: do not yield.
-        assert_eq!(e.on_beacon(1000, NodeId(1), 300, 60000, -100, 0, false, NodeId(5), 300), None);
+        assert_eq!(e.on_beacon(1000, NodeId(1), 300, 60000, -100, 0, 1, false, NodeId(5), 300), None);
         // Same, judged to be in our cell: yield.
-        assert_eq!(e.on_beacon(2000, NodeId(1), 300, 60000, -70, 0, true, NodeId(5), 300), Some(Transition::BecameFollower(NodeId(1))));
+        assert_eq!(e.on_beacon(2000, NodeId(1), 300, 60000, -70, 0, 1, true, NodeId(5), 300), Some(Transition::BecameFollower(NodeId(1))));
     }
 
     #[test]
@@ -316,10 +326,10 @@ mod tests {
         let p = ElectionParams::default();
         let mut rng = Rng::new(2);
         let mut e = Election::new(p, 0);
-        e.on_beacon(1000, NodeId(7), 100, 60000, -80, 0, false, NodeId(5), 400);
+        e.on_beacon(1000, NodeId(7), 100, 60000, -80, 0, 1, false, NodeId(5), 400);
         for i in 0..p.challenge_beacons as u64 {
             assert_eq!(e.tick(2000 + i, 400, &mut rng), None);
-            e.on_beacon(3000 + i, NodeId(7), 100, 60000, -80, 0, false, NodeId(5), 400);
+            e.on_beacon(3000 + i, NodeId(7), 100, 60000, -80, 0, 1, false, NodeId(5), 400);
         }
         assert_eq!(e.tick(4000, 400, &mut rng), Some(Transition::BecameCandidate));
     }

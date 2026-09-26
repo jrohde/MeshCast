@@ -290,13 +290,19 @@ the next change (per-node collision counters, then collisions by sender role, th
 | 5 | granted uploaders switched objects on every re-ask | grants queue per holder, one object per holder at a time, NACKs answered by the granted uploader only, grants live 10 min | 52 % at 3 h, **88 % at 6 h**, upload redundancy 6× |
 | 6 | (from the dynamics scenario) nodes collected and kept objects of channels they do not follow | you carry what you listen to; orphans evicted | unchanged |
 | 7 | nearly complete objects were re-asked in full; grants forgotten after 10 min left NACKs unanswered; cross-cell NACKs never reached the other sequence; uploaders used stale colours | objects ≥ 80 % repaired by NACK only; grants stay answerable while the announcer asks; announcer NACKs in the meeting dwell; gossip refreshes colours | 80 % at 6 h, uploads 252 (from 661) |
+| 8 | uploaders that had never heard the asking announcer's beacon defaulted to colour 0 and collided | an announcer's gossip states its colouring and counts as a sighting; beacons carry the colour count | **91 % at 6 h** (best), band L neighbourhood 70 % |
+| 9 | uploaders on opposite sides of one cell cannot hear each other (hidden uploaders) | tried: one inbound upload per announcer at a time | collisions gone (0.7 %) but throughput halved: 69 %, and single-cell band O fell to 75 %; **rejected** |
+| 10 | same, keeping parallel budgets | tried: uploaders to one announcer take turns from their position in its WANT list, nested inside announcer slots | 74 %, clusters in band L 67 %; positions shift as objects complete and turns starve; **rejected** |
+
+The reverted state (round 8) is what ships: parallel granted uploads. Hidden uploaders inside one
+cell remain the known residual of the 2.4 GHz and 25 mW cases.
 
 The sub-GHz cases were re-run after every round and stayed at 100 %; the grant mechanism also
 cut their uploads to the minimum (a 20-node cell: 4 uploads for 3 tracks and a manifest).
 
-ESP-NOW between overlapping cells is therefore *better but not solved*: 88 % of
+ESP-NOW between overlapping cells is therefore *better but not solved*: 86–91 % of
 follower-completions in 6 hours against 100 % in 1.8 hours on band O, with a bulk collision
-rate still near 24 % and six uploads per object per cell instead of one. The remaining cause is
+rate still near 17 % and about four uploads per object per cell instead of one. The remaining cause is
 pull-based fetching among hidden nodes: a grant lapses when the uploader's frames are lost, the
 re-ask brings in another holder, and the duplicates collide with each other. Within one cell
 ESP-NOW is the fastest carrier we have (two nodes at 300 m: three tracks in eight minutes).
@@ -326,7 +332,7 @@ every `publish_h` hours while dropping its oldest, keeping three in its manifest
 |---|---|---|---|---|---|
 | GFSK band O | 24 h (72 h run, 47 publications) | 99.1 % | ~7 min / ~7 min | 78 | 0.5 |
 | GFSK band O | 6 h (48 h run, 87 publications) | 99.8 % | ~7 min / ~7 min | 158 | 1.3 |
-| GFSK band L | 24 h (72 h run) | 82.7 % | | 489 | 0.5 |
+| GFSK band L | 24 h (72 h run) | 88.8 % | | 491 | 0.5 |
 
 In band O one announcer serves the square; a fresh bulletin reaches its followers seven minutes
 after publication, whatever the subscription pattern, and subscription changes cost nothing but

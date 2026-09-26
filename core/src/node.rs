@@ -204,7 +204,6 @@ pub struct Node {
     /// booted together do not all ask at once.
     next_want_at: Millis,
     have_cursor: usize,
-    want_cursor: usize,
     announce_cursor: usize,
     progress: BTreeMap<ShortId, Progress>,
     /// Announcers reported to be heard together with us by some follower (or heard by us):
@@ -273,7 +272,6 @@ impl Node {
             last_want_tx: 0,
             next_want_at: now + Rng::new(seed ^ 0x5eed).below(p.t_want_min_ms.max(1)),
             have_cursor: 0,
-            want_cursor: 0,
             announce_cursor: 0,
             progress: BTreeMap::new(),
             conflicts: BTreeMap::new(),
@@ -363,10 +361,9 @@ impl Node {
     /// A colour maps to a channel (`colour mod n`) and, when there are more colours than
     /// channels, to a time slot on that channel (`colour div n`). Single-channel carriers are
     /// simply `n = 1`: every colour is a slot.
-    fn slot_of(&self, carrier: usize, colour: u8) -> (u64, u64) {
+    fn slot_of(&self, carrier: usize, colour: u8, colours: u8) -> (u64, u64) {
         let n = self.carriers[carrier].p.channels.len().max(1) as u64;
-        let colours = self.colours() as u64;
-        let slots = colours.div_ceil(n).max(1);
+        let slots = (colours.max(1) as u64).div_ceil(n).max(1);
         (colour as u64 / n, slots)
     }
 
@@ -397,8 +394,13 @@ impl Node {
 
     /// Announcers that share a channel take turns: our carousel runs only in our slot.
     /// Returns when the next slot of ours starts, or None if it is ours now.
-    fn slot_wait(&self, carrier: usize, colour: u8, now: Millis) -> Option<Millis> {
-        let (mine, k) = self.slot_of(carrier, colour);
+    fn slot_wait(&self, carrier: usize, colour: u8, colours: u8, now: Millis) -> Option<Millis> {
+        let (mine, k) = self.slot_of(carrier, colour, colours);
+        self.turn_wait(mine, k, now)
+    }
+
+    /// Wait for turn `mine` of `k` in a cycle of `k × T_slot`; None if it is our turn now.
+    fn turn_wait(&self, mine: u64, k: u64, now: Millis) -> Option<Millis> {
         if k <= 1 {
             return None;
         }
@@ -838,6 +840,7 @@ impl Node {
             utc: 0,
             time_quality: 0,
             colour: self.my_colour(),
+            colours: self.colours(),
             occupancy,
         }
     }
@@ -900,14 +903,14 @@ impl Node {
         }
     }
 
-    /// Colour of the announcer we follow (or our own).
-    fn announcer_colour_field(&self) -> u8 {
-        let Some(i) = self.primary_bulk() else { return 0 };
+    /// Colouring (colour, colour count) of the announcer we follow (or our own).
+    fn announcer_colouring_field(&self) -> (u8, u8) {
+        let Some(i) = self.primary_bulk() else { return (0, 1) };
         let ann = self.announcer_of(i);
         if ann == self.cfg.id {
-            self.my_colour()
+            (self.my_colour(), self.colours())
         } else {
-            self.carriers[i].election.as_ref().and_then(|e| e.colour_of(ann)).unwrap_or(0)
+            self.carriers[i].election.as_ref().and_then(|e| e.colouring_of(ann)).unwrap_or((0, 1))
         }
     }
 
@@ -940,7 +943,7 @@ impl Node {
             self.last_report = self.now;
             return;
         }
-        let g = Gossip { node: self.cfg.id, announcer: self.gossip_announcer_field(), announcer_colour: self.announcer_colour_field(), heard, have: Vec::new(), want: Vec::new() };
+        let g = Gossip { node: self.cfg.id, announcer: self.gossip_announcer_field(), announcer_colour: self.announcer_colouring_field().0, announcer_colours: self.announcer_colouring_field().1, heard, have: Vec::new(), want: Vec::new() };
         let cell = self.cell_carrier();
         self.enqueue(cell, Frame::Gossip(g));
         self.stats.conflict_reports_sent += 1;
@@ -964,7 +967,7 @@ impl Node {
         }
         let want = self.take_wants();
         if !have.is_empty() || !want.is_empty() {
-            let g = Gossip { node: self.cfg.id, announcer: self.gossip_announcer_field(), announcer_colour: self.announcer_colour_field(), heard: self.heard_field(), have, want };
+            let g = Gossip { node: self.cfg.id, announcer: self.gossip_announcer_field(), announcer_colour: self.announcer_colouring_field().0, announcer_colours: self.announcer_colouring_field().1, heard: self.heard_field(), have, want };
             self.enqueue(self.cell_carrier(), Frame::Gossip(g));
         }
         let entries: Vec<AnnounceEntry> = if announcing {
@@ -1046,8 +1049,7 @@ impl Node {
             return Vec::new();
         }
         let n = ids.len().min(MAX_WANT);
-        let v: Vec<ShortId> = (0..n).map(|j| ids[(self.want_cursor + j) % ids.len()]).collect();
-        self.want_cursor = (self.want_cursor + n) % ids.len();
+        let v: Vec<ShortId> = ids.into_iter().take(n).collect();
         for id in &v {
             self.progress.entry(*id).or_default().last_want = now;
         }
@@ -1071,7 +1073,7 @@ impl Node {
         });
         if (self.want_refresh || stalled) && now >= self.next_want_at {
             let want = self.take_wants();
-            let g = Gossip { node: self.cfg.id, announcer: self.gossip_announcer_field(), announcer_colour: self.announcer_colour_field(), heard: self.heard_field(), have: Vec::new(), want };
+            let g = Gossip { node: self.cfg.id, announcer: self.gossip_announcer_field(), announcer_colour: self.announcer_colouring_field().0, announcer_colours: self.announcer_colouring_field().1, heard: self.heard_field(), have: Vec::new(), want };
             let cell = self.cell_carrier();
             self.enqueue(cell, Frame::Gossip(g));
             self.stats.wants_sent += 1;
@@ -1233,12 +1235,14 @@ impl Node {
             }
         };
         let airtime = self.carriers[i].p.airtime_ms(bytes.len());
+        // Content travels in its announcer's slot: our own colouring for the carousel, the
+        // target announcer's (from its beacons) for an upload.
         let content_colour = match (&cand, self.carriers[i].upload.as_ref()) {
-            (Cand::Carousel(Item::Symbol { .. }), _) => Some(self.my_colour()),
-            (Cand::Upload(..), Some(u)) => Some(self.carriers[i].election.as_ref().and_then(|e| e.colour_of(u.to)).unwrap_or(0)),
+            (Cand::Carousel(Item::Symbol { .. }), _) => Some((self.my_colour(), self.colours())),
+            (Cand::Upload(..), Some(u)) => Some(self.carriers[i].election.as_ref().and_then(|e| e.colouring_of(u.to)).unwrap_or((0, 1))),
             _ => None,
         };
-        if let Some(colour) = content_colour {
+        if let Some((colour, colours)) = content_colour {
             // The meeting dwell is control plane only, and announcers that share a channel take
             // turns: content (carousel or upload) runs only in its announcer's slot.
             let dwell = self.cfg.params.dwell_ms.max(1);
@@ -1246,12 +1250,12 @@ impl Node {
                 self.carriers[i].pace_until = (now / dwell + 1) * dwell;
                 return;
             }
-            if let Some(t) = self.slot_wait(i, colour, now) {
+            if let Some(t) = self.slot_wait(i, colour, colours, now) {
                 self.carriers[i].pace_until = t;
                 return;
             }
             // Taking turns means spending a cycle's worth of budget inside one slot.
-            let (_, slots) = self.slot_of(i, colour);
+            let (_, slots) = self.slot_of(i, colour, colours);
             if slots > 1 {
                 let cycle = slots * self.cfg.params.t_slot_ms.max(1);
                 self.carriers[i].fatsoen.set_burst_at_least(cycle as u32);
@@ -1447,7 +1451,7 @@ impl Node {
         if changed && !self.announcer_of(ti).is_none() {
             self.report_due = true;
         }
-        let t = self.carriers[ti].election.as_mut().and_then(|e| e.on_beacon(now, b.announcer, b.score, b.next_ms, rssi, b.colour, near, me, score));
+        let t = self.carriers[ti].election.as_mut().and_then(|e| e.on_beacon(now, b.announcer, b.score, b.next_ms, rssi, b.colour, b.colours, near, me, score));
         if let Some(t) = t {
             self.on_transition(ti, t, out);
         }
@@ -1565,7 +1569,7 @@ impl Node {
         if g.announcer == g.node {
             for c in self.carriers.iter_mut() {
                 if let Some(e) = c.election.as_mut() {
-                    e.note_colour(g.node, g.announcer_colour);
+                    e.note_colouring(now, g.node, g.announcer_colour, g.announcer_colours, rssi);
                 }
             }
         }
@@ -1577,7 +1581,12 @@ impl Node {
                     self.note_conflict(*h, *colour);
                 }
             } else if g.heard.iter().any(|(h, _)| *h == me) {
+                // A follower of another announcer hears us: that announcer, and every other
+                // announcer it hears, collide with us at that node.
                 self.note_conflict(g.announcer, g.announcer_colour);
+                for (h, colour) in &g.heard {
+                    self.note_conflict(*h, *colour);
+                }
             }
         }
         for i in 0..self.carriers.len() {
@@ -1628,7 +1637,7 @@ impl Node {
             } else if !from_announcer {
                 continue;
             }
-            for (w, grant) in &g.want {
+            for (w, grant) in g.want.iter() {
                 if !self.store.has_complete(w) {
                     continue;
                 }
@@ -1677,7 +1686,7 @@ impl Node {
         }
         self.offers.retain(|(_, _, at)| *at > now);
         let have: Vec<ShortId> = due.iter().map(|(o, _)| *o).take(MAX_GOSSIP_IDS).collect();
-        let g = Gossip { node: self.cfg.id, announcer: self.gossip_announcer_field(), announcer_colour: self.announcer_colour_field(), heard: self.heard_field(), have, want: Vec::new() };
+        let g = Gossip { node: self.cfg.id, announcer: self.gossip_announcer_field(), announcer_colour: self.announcer_colouring_field().0, announcer_colours: self.announcer_colouring_field().1, heard: self.heard_field(), have, want: Vec::new() };
         let cell = self.cell_carrier();
         self.enqueue(cell, Frame::Gossip(g));
     }
