@@ -194,7 +194,17 @@ could not hear each other's suppression.
 
 **Ask only for what is not coming.** An announcer's WANT lists objects that have received no
 symbol for `T_nack_stall`; an object whose symbols are arriving is not asked for again, and a
-holder whose granted upload is flowing is not asked for a second object until it is done.
+holder whose granted upload is flowing is not asked for a second object until it is done. An
+object that is at least 80 % complete is never re-asked in full: it is repaired by NACK, which
+the granted uploader answers for as long as the announcer keeps asking. On frequency-agile
+carriers an announcer's NACKs, like its gossip, go out in the meeting dwell, because its
+uploader may live in another cell on another sequence.
+
+**You carry what you listen to.** A node registers, collects and keeps the objects of the
+channels it follows (and, as announcer, of every channel it serves). Objects that no manifest of
+interest references any more, because the channel was unfollowed or the object left the
+channel's window, are evicted; own objects are kept. Content crosses cells through nodes that
+follow the channel, never through bystanders.
 
 **Fresh before repeated.** The first copy of an object into a cell (an upload, or the carousel's
 first pass) is worth more than its second and third pass. Fresh content is paced at the full

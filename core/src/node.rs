@@ -99,6 +99,8 @@ pub struct Stats {
     pub manifests_adopted: u64,
     pub conflict_reports_sent: u64,
     pub conflicts_noted: u64,
+    /// Bulk frames received for objects we do not want, know or serve: airtime spent on us for nothing.
+    pub bulk_uninterested: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -213,6 +215,9 @@ pub struct Node {
     last_report: Millis,
     /// Announcer side: uploader granted per wanted object, with the time of the grant.
     grants: BTreeMap<ShortId, (NodeId, Millis)>,
+    /// Holder side: grants we received, with the time, so that we still answer the announcer's
+    /// NACKs for a while after our full pass is done.
+    granted_to_us: BTreeMap<(ShortId, NodeId), Millis>,
     /// Holder side: offers we owe (object, announcer that asked, when to send).
     offers: Vec<(ShortId, NodeId, Millis)>,
     pub stats: Stats,
@@ -275,6 +280,7 @@ impl Node {
             report_due: false,
             last_report: 0,
             grants: BTreeMap::new(),
+            granted_to_us: BTreeMap::new(),
             offers: Vec::new(),
             stats,
             cfg,
@@ -484,26 +490,108 @@ impl Node {
         self.want_refresh = true;
     }
 
+    /// Stop following a channel: its objects are no longer wanted (unless another followed or
+    /// served manifest references them) and its manifest is no longer announced by us.
+    pub fn unfollow(&mut self, chan: ChannelId) {
+        self.follows.remove(&chan);
+        self.prune_wants();
+    }
+
+    /// Objects referenced by the latest manifest of a channel we are interested in.
+    fn interesting_objects(&self) -> BTreeSet<ShortId> {
+        let mut set = BTreeSet::new();
+        let announcing = self.is_announcing();
+        for (chan, info) in &self.manifests {
+            if !(announcing || self.follows.contains(chan)) {
+                continue;
+            }
+            set.insert(info.short);
+            if let Some(bytes) = self.store.bytes(&info.short) {
+                if let Ok(m) = Manifest::decode(bytes) {
+                    for o in &m.objects {
+                        set.insert(o.id.short());
+                    }
+                }
+            }
+        }
+        set
+    }
+
+    /// Drop wants for objects that no manifest of interest references any more (unfollowed
+    /// channels, or objects that left a channel's manifest).
+    fn prune_wants(&mut self) {
+        let keep = self.interesting_objects();
+        let stale: Vec<ShortId> = self.wants.iter().filter(|id| !keep.contains(id)).copied().collect();
+        for id in stale {
+            self.wants.remove(&id);
+            self.progress.remove(&id);
+            self.grants.remove(&id);
+        }
+        self.offers.retain(|(o, _, _)| keep.contains(o));
+        for c in self.carriers.iter_mut() {
+            c.upload_queue.retain(|u| keep.contains(&u.object));
+        }
+    }
+
+    /// Forget objects no manifest of interest references any more (a channel we unfollowed, or
+    /// an object that left its channel's window). Own objects are kept.
+    fn evict_orphans(&mut self) {
+        let keep = self.interesting_objects();
+        let gone: Vec<ShortId> = self.store.ids().filter(|id| !keep.contains(id) && !self.own_objects.contains(id) && !self.own_manifests.iter().any(|(_, s, _, _)| s == *id)).copied().collect();
+        for id in gone {
+            self.store.remove(&id);
+            self.wants.remove(&id);
+            self.progress.remove(&id);
+        }
+    }
+
+    /// Objects we hold complete that are not referenced by any manifest we know.
+    pub fn orphaned_objects(&self) -> Vec<ShortId> {
+        let mut keep = BTreeSet::new();
+        for info in self.manifests.values() {
+            keep.insert(info.short);
+            if let Some(bytes) = self.store.bytes(&info.short) {
+                if let Ok(m) = Manifest::decode(bytes) {
+                    for o in &m.objects {
+                        keep.insert(o.id.short());
+                    }
+                }
+            }
+        }
+        self.store.complete_ids().filter(|id| !keep.contains(id)).copied().collect()
+    }
+
     /// Publish a channel manifest and the objects it references (we own them, complete).
     pub fn publish(&mut self, manifest: &Manifest, objects: &[(ObjectMeta, Option<&[u8]>)]) {
         let (meta, bytes) = manifest.as_object();
         self.store.insert_complete(meta, Some(&bytes));
         let short = meta.id.short();
         let chan = manifest.channel_id();
-        self.manifests.insert(chan, ManifestInfo { seq: manifest.seq, short, len: meta.len, adopted: true });
+        let old = self.manifests.insert(chan, ManifestInfo { seq: manifest.seq, short, len: meta.len, adopted: true });
         self.own_manifests.retain(|(c, _, _, _)| *c != chan);
         self.own_manifests.push((chan, short, manifest.seq, meta.len));
+        if let Some(o) = old {
+            self.pending_ack.remove(&o.short);
+        }
         self.pending_ack.insert(short);
         for (m, b) in objects {
-            self.store.insert_complete(*m, *b);
+            if !self.store.has_complete(&m.id.short()) {
+                self.store.insert_complete(*m, *b);
+            }
             self.own_objects.insert(m.id.short());
             self.pending_ack.insert(m.id.short());
         }
         for c in self.carriers.iter_mut() {
             if let Some(car) = c.carousel.as_mut() {
+                if let Some(o) = old {
+                    if o.short != short {
+                        car.unset_always(&o.short);
+                    }
+                }
                 car.set_always(short);
             }
         }
+        self.prune_wants();
         self.gossip_soon();
     }
 
@@ -519,6 +607,9 @@ impl Node {
         if !self.wants.is_empty() {
             // Stall checks (WANT / NACK) are time-based; poll them at the stall granularity.
             d = d.min(self.now + self.cfg.params.t_nack_stall_ms);
+            if self.is_announcing() && self.agile() {
+                d = d.min(self.next_meeting_start(self.now) + 1);
+            }
         }
         if let Some(t) = self.offers.iter().map(|(_, _, at)| *at).min() {
             d = d.min(t);
@@ -599,6 +690,9 @@ impl Node {
         if now >= self.next_score {
             self.expire_neighbors();
             self.expire_conflicts();
+            self.evict_orphans();
+            let ttl = self.cfg.params.neighbor_ttl_ms;
+            self.granted_to_us.retain(|_, t| *t + ttl >= now);
             // Announcers we hear directly are in conflict with us too.
             let heard: Vec<(NodeId, u8)> = self.carriers.iter().filter_map(|c| c.election.as_ref()).flat_map(|e| e.heard_with_colour(now, self.cfg.id).collect::<Vec<_>>()).collect();
             if self.is_announcing() {
@@ -792,6 +886,7 @@ impl Node {
         self.progress.clear();
         self.conflicts.clear();
         self.grants.clear();
+        self.granted_to_us.clear();
         self.offers.clear();
         for id in self.own_objects.iter().chain(self.own_manifests.iter().map(|(_, s, _, _)| s)) {
             self.pending_ack.insert(*id);
@@ -915,12 +1010,20 @@ impl Node {
             let p = progress.get(id).copied().unwrap_or_default();
             now < *t + t_grant || p.last_progress > *t
         });
+        let thr = self.cfg.params.nack_threshold_permille as u64;
         let ids: Vec<ShortId> = self
             .wants
             .iter()
             .filter(|id| {
                 let p = self.progress.get(id).copied().unwrap_or_default();
-                now >= p.last_progress + stall || p.last_progress == 0
+                if !(now >= p.last_progress + stall || p.last_progress == 0) {
+                    return false;
+                }
+                // Nearly complete objects are repaired by NACK, never re-asked in full.
+                match self.store.entry(id).map(|e| e.progress()) {
+                    Some((have, Some(total))) => (have as u64) * 1000 < thr * total as u64,
+                    _ => true,
+                }
             })
             .copied()
             .collect();
@@ -984,6 +1087,11 @@ impl Node {
         let Some(pb) = self.primary_bulk() else { return };
         let announcing = self.role(pb) == Role::Announcer;
         if !announcing && self.announcer_of(pb).is_none() {
+            return;
+        }
+        // An announcer's uploader may sit in another cell, on another hop sequence: on agile
+        // carriers the announcer's NACKs go out in the meeting dwell, like its gossip.
+        if announcing && self.agile() && !self.is_meeting_dwell(self.now / self.cfg.params.dwell_ms.max(1)) {
             return;
         }
         let now = self.now;
@@ -1141,6 +1249,12 @@ impl Node {
             if let Some(t) = self.slot_wait(i, colour, now) {
                 self.carriers[i].pace_until = t;
                 return;
+            }
+            // Taking turns means spending a cycle's worth of budget inside one slot.
+            let (_, slots) = self.slot_of(i, colour);
+            if slots > 1 {
+                let cycle = slots * self.cfg.params.t_slot_ms.max(1);
+                self.carriers[i].fatsoen.set_burst_at_least(cycle as u32);
             }
         }
         // Fresh content (first copy into the cell) has right of way over repetition.
@@ -1344,6 +1458,7 @@ impl Node {
         self.offers.retain(|(o, _, _)| *o != b.object);
         let interested = self.wants.contains(&b.object) || self.store.is_known(&b.object) || self.is_announcing();
         if !interested {
+            self.stats.bulk_uninterested += 1;
             return;
         }
         match self.store.put_symbol(b.object, b.block, b.esi, b.k, &b.payload) {
@@ -1403,16 +1518,23 @@ impl Node {
                 car.set_always(short);
             }
         }
+        // You carry what you listen to: objects are registered (and thus collected from the air)
+        // only for channels we follow or, as announcer, serve.
         let interested = self.follows.contains(&chan) || self.is_announcing();
         let mut to_want = Vec::new();
-        for o in &m.objects {
-            self.store.ensure(o.meta());
-            if interested && !self.store.has_complete(&o.id.short()) {
-                to_want.push(o.id.short());
+        if interested {
+            for o in &m.objects {
+                self.store.ensure(o.meta());
+                if !self.store.has_complete(&o.id.short()) {
+                    to_want.push(o.id.short());
+                }
             }
         }
         for id in to_want {
             self.add_want(id);
+        }
+        if old.map(|o| o.short != short).unwrap_or(false) {
+            self.prune_wants();
         }
         if self.follows.contains(&chan) {
             self.want_refresh = true;
@@ -1439,6 +1561,13 @@ impl Node {
         // Another holder offered the same objects: our pending offers are redundant.
         if !g.have.is_empty() {
             self.offers.retain(|(o, _, _)| !g.have.contains(o));
+        }
+        if g.announcer == g.node {
+            for c in self.carriers.iter_mut() {
+                if let Some(e) = c.election.as_mut() {
+                    e.note_colour(g.node, g.announcer_colour);
+                }
+            }
         }
         if self.is_announcing() {
             // A follower of ours hears other announcers, or a follower of another announcer
@@ -1505,6 +1634,7 @@ impl Node {
                 }
                 if *grant == self.cfg.id {
                     // Granted: upload it, after whatever we are already uploading.
+                    self.granted_to_us.insert((*w, g.node), now);
                     let c = &mut self.carriers[i];
                     let active = c.upload.as_ref().map(|u| u.object == *w && u.to == g.node).unwrap_or(false);
                     let queued = c.upload_queue.iter().any(|u| u.object == *w && u.to == g.node);
@@ -1603,8 +1733,13 @@ impl Node {
                 // An announcer is missing pieces of an object we are its granted uploader for:
                 // send exactly those. Other holders stay silent; the announcer will re-ask if
                 // its uploader is gone.
+                let recently = self.granted_to_us.get(&(n.object, n.node)).map(|t| self.now < *t + self.cfg.params.neighbor_ttl_ms).unwrap_or(false);
+                if recently {
+                    self.granted_to_us.insert((n.object, n.node), self.now);
+                }
                 let c = &mut self.carriers[i];
-                let granted = c.upload.as_ref().map(|u| u.object == n.object && u.to == n.node).unwrap_or(false)
+                let granted = recently
+                    || c.upload.as_ref().map(|u| u.object == n.object && u.to == n.node).unwrap_or(false)
                     || c.upload_queue.iter().any(|u| u.object == n.object && u.to == n.node);
                 if !granted {
                     continue;

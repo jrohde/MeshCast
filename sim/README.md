@@ -14,6 +14,10 @@ cargo build --release
 ./target/release/meshcast-sim cell --nodes 200 --area-km2 30 --stations 3 --sources 5 --hours 24 --bulk gfsk-l --out report.json
 ```
 
+`dynamics` models a living network: K channels, each node follows a few, subscriptions change
+over time, every channel publishes a new bulletin periodically and drops its oldest. It reports
+delivery latency per publication, wasted receptions and orphaned objects.
+
 `--bulk` selects the content carrier: `gfsk-o` (EU band O, 500 mW, 10 % duty cycle), `gfsk-l`
 (EU band L, 25 mW, polite access hopping over 15 channels), `esp-now` (2.4 GHz long-range mode),
 `gfsk-us` (FCC 15.247, 1 W, no duty cycle), `lora-bulk` (LoRa SF7 as the only carrier, for sparse

@@ -116,4 +116,12 @@ impl Fatsoen {
     pub fn cca_clear(&mut self) {
         self.attempt = 0;
     }
+
+    /// Raise the token-bucket burst (in milliseconds of airtime) so that budget accrued while
+    /// waiting for our turn can be spent in our slot. Never lowers it.
+    pub fn set_burst_at_least(&mut self, ms: u32) {
+        if ms > self.p.burst_ms {
+            self.p.burst_ms = ms;
+        }
+    }
 }

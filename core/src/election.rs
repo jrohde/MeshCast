@@ -253,6 +253,13 @@ impl Election {
     pub fn colour_of(&self, id: NodeId) -> Option<u8> {
         self.heard.get(&id).map(|h| h.colour)
     }
+
+    /// An announcer's gossip also states its colour; keep it current between beacons.
+    pub fn note_colour(&mut self, id: NodeId, colour: u8) {
+        if let Some(h) = self.heard.get_mut(&id) {
+            h.colour = colour;
+        }
+    }
 }
 
 #[cfg(test)]

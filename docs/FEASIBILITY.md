@@ -288,6 +288,8 @@ the next change (per-node collision counters, then collisions by sender role, th
 | 3 | stale colours: reports carried the colour a follower saw long ago | reports carry current colours, changes reported at once, gossip carries the followed announcer's colour | 80 %, colouring valid |
 | 4 | 4.6 M of 6.6 M bulk collisions are upload against upload; 1 383 uploads started for 100 needed | offer-and-grant replaces any-holder uploads; ask only for what is not flowing | 65 % (grants lapsed while uploaders were queued) |
 | 5 | granted uploaders switched objects on every re-ask | grants queue per holder, one object per holder at a time, NACKs answered by the granted uploader only, grants live 10 min | 52 % at 3 h, **88 % at 6 h**, upload redundancy 6× |
+| 6 | (from the dynamics scenario) nodes collected and kept objects of channels they do not follow | you carry what you listen to; orphans evicted | unchanged |
+| 7 | nearly complete objects were re-asked in full; grants forgotten after 10 min left NACKs unanswered; cross-cell NACKs never reached the other sequence; uploaders used stale colours | objects ≥ 80 % repaired by NACK only; grants stay answerable while the announcer asks; announcer NACKs in the meeting dwell; gossip refreshes colours | 80 % at 6 h, uploads 252 (from 661) |
 
 The sub-GHz cases were re-run after every round and stayed at 100 %; the grant mechanism also
 cut their uploads to the minimum (a 20-node cell: 4 uploads for 3 tracks and a manifest).
@@ -312,7 +314,31 @@ gaps between islands. It is a neighbourhood carrier, not a town carrier; the sub
 carries content across the gaps and ESP-NOW distributes it within a street. The dense-town run
 below shows it in its element.
 
-### 7.6 What Phase 0 could not answer
+### 7.6 A living network: many channels, changing subscriptions, daily bulletins
+
+`meshcast-sim dynamics --nodes 50 --area-km2 1 --stations 1 --channels 8 --follows 3 --publish-h 24 --churn-h 6 --hours 72`
+
+Eight channels, each node follows three of them, every six hours a tenth of the nodes swap one
+subscription, and every channel publishes a new 300 kB bulletin (five minutes of Opus speech)
+every `publish_h` hours while dropping its oldest, keeping three in its manifest.
+
+| Bulk carrier | Publish every | Delivered to followers within one period | Latency per bulletin (p50 / p90) | Uploads | Orphans per node at end |
+|---|---|---|---|---|---|
+| GFSK band O | 24 h (72 h run, 47 publications) | 99.1 % | ~7 min / ~7 min | 78 | 0.5 |
+| GFSK band O | 6 h (48 h run, 87 publications) | 99.8 % | ~7 min / ~7 min | 158 | 1.3 |
+| GFSK band L | 24 h (72 h run) | 82.7 % | | 489 | 0.5 |
+
+In band O one announcer serves the square; a fresh bulletin reaches its followers seven minutes
+after publication, whatever the subscription pattern, and subscription changes cost nothing but
+a WANT. Eviction keeps storage bounded (half an orphaned object per node, waiting for the next
+sweep). In band L the same square splits into two 25 mW cells and the cross-cell path through
+offers, grants and meeting dwells is slower and still leaky; this is the same weakness as
+ESP-NOW's, on a smaller scale.
+
+What this scenario does not model yet: nodes that follow nothing (pure relays), storage limits
+below the working set, and a source that publishes faster than its cell can carry.
+
+### 7.7 What Phase 0 could not answer
 
 - Real GFSK sensitivity at 100 kbit/s (interpolated), real CCA behaviour, and real building
   loss: Phase 1.

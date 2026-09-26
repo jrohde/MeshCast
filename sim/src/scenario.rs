@@ -6,7 +6,7 @@ use meshcast_core::ed25519_dalek::SigningKey;
 use meshcast_core::ids::{NodeId, ObjectId, ShortId};
 use meshcast_core::manifest::{Manifest, ManifestObject, ScheduleEntry};
 use meshcast_core::node::NodeConfig;
-use meshcast_core::object::{Mime, ObjectMeta};
+use meshcast_core::object::Mime;
 use meshcast_core::params::Params;
 use meshcast_core::rng::Rng;
 use serde::Serialize;
@@ -43,10 +43,25 @@ pub struct TrackInfo {
     pub followers: Vec<usize>,
 }
 
+/// A publishing node and what it needs to publish again later.
+pub struct SourceInfo {
+    pub node: usize,
+    pub key: SigningKey,
+    pub channel: meshcast_core::ids::ChannelId,
+    pub objects: Vec<ManifestObject>,
+    pub seq: u32,
+}
+
 pub struct Built {
     pub engine: Engine,
     pub tracks: BTreeMap<ShortId, TrackInfo>,
     pub phys: Vec<Phy>,
+    pub sources: Vec<SourceInfo>,
+}
+
+pub fn track_object(seed: u64, source: usize, index: usize, len: u32) -> ManifestObject {
+    let id = ObjectId::of(format!("track {source} {index} seed {seed}").as_bytes());
+    ManifestObject { id, len, mime: Mime::Audio, title: format!("Track {index}") }
 }
 
 pub fn build(spec: &ScenarioSpec, params: Params) -> Built {
@@ -123,6 +138,7 @@ pub fn build(spec: &ScenarioSpec, params: Params) -> Built {
     let mut engine = Engine::new(configs, positions, phys.clone(), prop, spec.seed);
 
     let mut tracks = BTreeMap::new();
+    let mut source_infos = Vec::new();
     let mut rng2 = Rng::new(spec.seed ^ 0xF00D);
     for &s in &sources {
         let mut kb = [0u8; 32];
@@ -133,10 +149,9 @@ pub fn build(spec: &ScenarioSpec, params: Params) -> Built {
         let mut objects = Vec::new();
         let mut metas = Vec::new();
         for t in 0..spec.tracks {
-            let id = ObjectId::of(format!("track {s} {t} seed {}", spec.seed).as_bytes());
-            let len = spec.track_kb * 1024;
-            objects.push(ManifestObject { id, len, mime: Mime::Audio, title: format!("Track {t}") });
-            metas.push((ObjectMeta { id, len, mime: Mime::Audio }, None));
+            let o = track_object(spec.seed, s, t, spec.track_kb * 1024);
+            metas.push((o.meta(), None));
+            objects.push(o);
         }
         let schedule: Vec<ScheduleEntry> = objects.iter().enumerate().map(|(t, o)| ScheduleEntry { object: o.id.short(), start: 3600 * (t as u64 + 1), repeat: 0 }).collect();
         let m = Manifest::sign(&key, 1, &format!("Channel of node {s}"), objects.clone(), schedule, None);
@@ -155,6 +170,7 @@ pub fn build(spec: &ScenarioSpec, params: Params) -> Built {
         for (t, o) in objects.iter().enumerate() {
             tracks.insert(o.id.short(), TrackInfo { source: s, index: t, bytes: o.len, followers: followers.clone() });
         }
+        source_infos.push(SourceInfo { node: s, key, channel: chan, objects, seq: 1 });
     }
-    Built { engine, tracks, phys }
+    Built { engine, tracks, phys, sources: source_infos }
 }

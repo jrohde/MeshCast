@@ -95,6 +95,36 @@ enum Cmd {
         #[command(flatten)]
         common: Common,
     },
+    /// A living network: K channels, each node follows a few of them, subscriptions change over
+    /// time, and every channel publishes a new bulletin periodically while dropping its oldest.
+    Dynamics {
+        #[arg(long, default_value_t = 50)]
+        nodes: usize,
+        #[arg(long, default_value_t = 1.0)]
+        area_km2: f64,
+        #[arg(long, default_value_t = 1)]
+        stations: usize,
+        /// Number of channels (each has its own source node).
+        #[arg(long, default_value_t = 8)]
+        channels: usize,
+        /// Channels each node follows at the start.
+        #[arg(long, default_value_t = 3)]
+        follows: usize,
+        /// Hours between two publications of the same channel.
+        #[arg(long, default_value_t = 24.0)]
+        publish_h: f64,
+        /// Size of one bulletin in kB (300 kB is five minutes of Opus speech at 8 kbit/s).
+        #[arg(long, default_value_t = 300)]
+        bulletin_kb: u32,
+        /// Objects a channel keeps in its manifest.
+        #[arg(long, default_value_t = 3)]
+        window: usize,
+        /// Hours between subscription changes; each time 10 % of nodes swap one channel.
+        #[arg(long, default_value_t = 6.0)]
+        churn_h: f64,
+        #[command(flatten)]
+        common: Common,
+    },
     /// Like `cell`, but the announcer is switched off at a given hour and back on later.
     Failover {
         #[arg(long, default_value_t = 20)]
@@ -227,6 +257,9 @@ fn main() {
                 sources_at: Some(vec![0]),
             };
             run(spec, &common, None);
+        }
+        Cmd::Dynamics { nodes, area_km2, stations, channels, follows, publish_h, bulletin_kb, window, churn_h, common } => {
+            run_dynamics(nodes, area_km2, stations, channels, follows, publish_h, bulletin_kb, window, churn_h, &common);
         }
         Cmd::Failover { nodes, area_km2, kill_at_h, revive_at_h, common } => {
             let spec = ScenarioSpec {
@@ -475,5 +508,211 @@ fn print_report(r: &Report, wall: std::time::Duration) {
     println!("\ncore stats (transmitting nodes and the first three):");
     for (i, s) in &r.core_stats {
         println!("  node {:>4}: {}", i, s);
+    }
+}
+
+
+#[derive(Serialize)]
+struct DynamicsReport {
+    nodes: usize,
+    channels: usize,
+    follows: usize,
+    publish_h: f64,
+    churn_h: f64,
+    hours: f64,
+    publications: usize,
+    /// Per publication: hours after publication at which p50 / p90 of the followers had it.
+    latency_p50_h: Vec<Option<f64>>,
+    latency_p90_h: Vec<Option<f64>>,
+    delivered_within_period: f64,
+    wasted_bulk_fraction: f64,
+    orphaned_objects_mean: f64,
+    uploads: u64,
+    announcers_final: usize,
+    role_events: usize,
+    airtime_top: Vec<(usize, f64)>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_dynamics(nodes: usize, area_km2: f64, stations: usize, channels: usize, follows: usize, publish_h: f64, bulletin_kb: u32, window: usize, churn_h: f64, common: &Common) {
+    use meshcast_core::manifest::{Manifest, ScheduleEntry};
+    use meshcast_core::rng::Rng;
+    use meshcast_core::ids::ShortId;
+    use scenario::{track_object, TrackInfo};
+    let spec = ScenarioSpec {
+        nodes,
+        area_km2,
+        stations,
+        sources: channels,
+        tracks: window,
+        track_kb: bulletin_kb,
+        hours: common.hours,
+        seed: common.seed,
+        bulk: common.bulk,
+        control_sf: common.control_sf,
+        exponent: common.exponent,
+        shadow_db: common.shadow_db,
+        follow_fraction: 0.0,
+        positions: None,
+        stations_at: None,
+        sources_at: None,
+    };
+    let params = Params::default();
+    let mut built = build(&spec, params);
+    built.engine.verbose = common.verbose;
+    let mut rng = Rng::new(common.seed ^ 0xD1);
+    // Initial subscriptions: each node follows `follows` distinct channels.
+    let mut subs: Vec<Vec<usize>> = vec![Vec::new(); nodes];
+    for i in 0..nodes {
+        let mut choice: Vec<usize> = (0..channels).collect();
+        for k in (1..choice.len()).rev() {
+            let j = rng.below(k as u64 + 1) as usize;
+            choice.swap(k, j);
+        }
+        for &c in choice.iter().take(follows.min(channels)) {
+            if built.sources[c].node != i {
+                subs[i].push(c);
+                built.engine.nodes[i].node.follow(built.sources[c].channel);
+            }
+        }
+    }
+    // The initial catalogue counts as publications at t = 0 with the initial followers.
+    let mut pubs: Vec<(ShortId, Millis, Vec<usize>)> = Vec::new();
+    for (c, src) in built.sources.iter().enumerate() {
+        let followers: Vec<usize> = (0..nodes).filter(|&i| subs[i].contains(&c)).collect();
+        for o in &src.objects {
+            pubs.push((o.id.short(), 0, followers.clone()));
+        }
+    }
+    let until: Millis = (common.hours * 3.6e6) as Millis;
+    let publish_ms = (publish_h * 3.6e6) as Millis;
+    let churn_ms = (churn_h * 3.6e6) as Millis;
+    // Event schedule: publications staggered over the period, churn on its own cadence.
+    let mut events: Vec<(Millis, u8, usize)> = Vec::new();
+    for c in 0..channels {
+        let mut t = publish_ms * (c as Millis + 1) / channels as Millis;
+        while t < until {
+            events.push((t, 0, c));
+            t += publish_ms;
+        }
+    }
+    let mut t = churn_ms;
+    while t < until {
+        events.push((t, 1, 0));
+        t += churn_ms;
+    }
+    events.sort();
+    let t0 = std::time::Instant::now();
+    let mut next_index: Vec<usize> = built.sources.iter().map(|s| s.objects.len()).collect();
+    for (t, kind, c) in events {
+        built.engine.run(t, 600_000);
+        match kind {
+            0 => {
+                let src = &mut built.sources[c];
+                let o = track_object(common.seed, src.node, next_index[c], bulletin_kb * 1024);
+                next_index[c] += 1;
+                src.objects.push(o.clone());
+                while src.objects.len() > window {
+                    src.objects.remove(0);
+                }
+                src.seq += 1;
+                let schedule: Vec<ScheduleEntry> = src.objects.iter().enumerate().map(|(k, o)| ScheduleEntry { object: o.id.short(), start: t / 1000 + 3600 * k as u64, repeat: 0 }).collect();
+                let m = Manifest::sign(&src.key, src.seq, &format!("Channel {c}"), src.objects.clone(), schedule, None);
+                let node = src.node;
+                built.engine.nodes[node].node.publish(&m, &[(o.meta(), None)]);
+                built.engine.poke(node);
+                let followers: Vec<usize> = (0..nodes).filter(|&i| subs[i].contains(&c)).collect();
+                built.tracks.insert(o.id.short(), TrackInfo { source: node, index: next_index[c] - 1, bytes: o.len, followers: followers.clone() });
+                pubs.push((o.id.short(), t, followers));
+            }
+            _ => {
+                let n_swap = (nodes / 10).max(1);
+                for _ in 0..n_swap {
+                    let i = rng.below(nodes as u64) as usize;
+                    if subs[i].is_empty() || channels < 2 {
+                        continue;
+                    }
+                    let drop_idx = rng.below(subs[i].len() as u64) as usize;
+                    let dropped = subs[i].remove(drop_idx);
+                    built.engine.nodes[i].node.unfollow(built.sources[dropped].channel);
+                    let mut add = rng.below(channels as u64) as usize;
+                    let mut guard = 0;
+                    while (subs[i].contains(&add) || add == dropped || built.sources[add].node == i) && guard < 20 {
+                        add = rng.below(channels as u64) as usize;
+                        guard += 1;
+                    }
+                    if !subs[i].contains(&add) && built.sources[add].node != i {
+                        subs[i].push(add);
+                        built.engine.nodes[i].node.follow(built.sources[add].channel);
+                    }
+                    built.engine.poke(i);
+                }
+            }
+        }
+    }
+    built.engine.run(until, 600_000);
+    let wall = t0.elapsed();
+    let eng = &built.engine;
+    let m = &eng.metrics;
+    let mut p50 = Vec::new();
+    let mut p90 = Vec::new();
+    let mut within = 0usize;
+    let mut total = 0usize;
+    for (id, t_pub, followers) in &pubs {
+        let mut lat: Vec<f64> = followers.iter().filter_map(|&f| m.completions.get(&(f, *id)).map(|&t| (t.saturating_sub(*t_pub)) as f64 / 3.6e6)).collect();
+        lat.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        total += followers.len();
+        within += lat.iter().filter(|&&l| l <= publish_h).count();
+        p50.push(percentile(&lat, 0.5));
+        p90.push(percentile(&lat, 0.9));
+    }
+    let wasted: u64 = eng.nodes.iter().map(|n| n.node.stats.bulk_uninterested).sum();
+    let useful: u64 = eng.nodes.iter().map(|n| n.node.stats.symbols_new + n.node.stats.symbols_dup).sum();
+    let orphans: f64 = eng.nodes.iter().map(|n| n.node.orphaned_objects().len() as f64).sum::<f64>() / nodes as f64;
+    let uploads: u64 = eng.nodes.iter().map(|n| n.node.stats.uploads_started).sum();
+    let bulk_c = eng.phys.iter().position(|p| p.kind != CarrierKind::LoraControl).unwrap_or(1);
+    let announcers_final = eng.nodes.iter().filter(|n| n.alive && n.node.role(bulk_c) == meshcast_core::node::Role::Announcer).count();
+    let hours = common.hours.max(1e-9);
+    let mut airtime: Vec<(usize, f64)> = eng.nodes.iter().enumerate().map(|(i, n)| (i, n.airtime_ms[bulk_c] as f64 / (hours * 3.6e6))).filter(|(_, a)| *a > 0.0005).collect();
+    airtime.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+    airtime.truncate(8);
+    let report = DynamicsReport {
+        nodes,
+        channels,
+        follows,
+        publish_h,
+        churn_h,
+        hours: common.hours,
+        publications: pubs.len(),
+        latency_p50_h: p50.clone(),
+        latency_p90_h: p90.clone(),
+        delivered_within_period: if total > 0 { within as f64 / total as f64 } else { 0.0 },
+        wasted_bulk_fraction: if wasted + useful > 0 { wasted as f64 / (wasted + useful) as f64 } else { 0.0 },
+        orphaned_objects_mean: orphans,
+        uploads,
+        announcers_final,
+        role_events: m.role_events.len(),
+        airtime_top: airtime.clone(),
+    };
+    println!("MeshCast dynamics: {} nodes, {} channels, {} follows each, publish every {} h, churn every {} h, {} h simulated in {:.1?}", nodes, channels, follows, publish_h, churn_h, common.hours, wall);
+    println!("  carrier: {}", eng.phys[bulk_c].name);
+    println!("publications: {} (initial catalogue + {} later)", pubs.len(), pubs.len().saturating_sub(channels * window));
+    println!("delivered to followers within one publication period: {:.1} %", report.delivered_within_period * 100.0);
+    let f = |x: &Option<f64>| x.map(|v| format!("{v:.2}")).unwrap_or_else(|| "-".into());
+    let later: Vec<String> = pubs.iter().zip(p50.iter().zip(p90.iter())).filter(|((_, t, _), _)| *t > 0).map(|((_, t, fl), (a, b))| format!("t={:.0}h n={} p50={} p90={}", *t as f64 / 3.6e6, fl.len(), f(a), f(b))).collect();
+    println!("latency of later publications (hours after publishing):");
+    for l in later.iter().take(24) {
+        println!("  {l}");
+    }
+    if later.len() > 24 {
+        println!("  ... {} more", later.len() - 24);
+    }
+    println!("bulk frames received by uninterested nodes: {:.1} % of all bulk receptions", report.wasted_bulk_fraction * 100.0);
+    println!("orphaned objects per node at the end (no manifest references them): {:.1}", orphans);
+    println!("uploads {}, announcers {}, role events {}", uploads, announcers_final, m.role_events.len());
+    println!("bulk airtime share, busiest nodes: {}", airtime.iter().map(|(i, a)| format!("{i}:{:.1}%", a * 100.0)).collect::<Vec<_>>().join(" "));
+    if let Some(path) = &common.out {
+        fs::write(path, serde_json::to_string_pretty(&report).unwrap()).expect("write report");
+        println!("full report written to {path}");
     }
 }

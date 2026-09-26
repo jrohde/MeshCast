@@ -125,6 +125,10 @@ impl MemStore {
         self.entries.len()
     }
 
+    pub fn remove(&mut self, id: &ShortId) -> bool {
+        self.entries.remove(id).is_some()
+    }
+
     /// Register an object whose length and mime are known (from a manifest).
     pub fn ensure(&mut self, meta: ObjectMeta) {
         let short = meta.id.short();

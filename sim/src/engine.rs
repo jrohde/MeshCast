@@ -46,7 +46,6 @@ enum Ev {
     TxEnd(u64),
     Kill(usize),
     Revive(usize),
-    End,
 }
 
 pub struct Engine {
@@ -65,6 +64,7 @@ pub struct Engine {
     pub now: Millis,
     pub metrics: Metrics,
     pub verbose: bool,
+    next_sample: Millis,
 }
 
 impl Engine {
@@ -116,7 +116,7 @@ impl Engine {
         }
         let mut metrics = Metrics::default();
         metrics.per_node_bulk = vec![(0, 0); n];
-        let mut e = Engine { nodes, phys, heap: BinaryHeap::new(), seq: 0, tx_seq: 0, loss, reach, recent: HashMap::new(), txs: HashMap::new(), now: 0, metrics, verbose: false };
+        let mut e = Engine { nodes, phys, heap: BinaryHeap::new(), seq: 0, tx_seq: 0, loss, reach, recent: HashMap::new(), txs: HashMap::new(), now: 0, metrics, verbose: false, next_sample: 0 };
         for i in 0..n {
             e.schedule_wake(i, 1);
         }
@@ -152,20 +152,22 @@ impl Engine {
         self.schedule_wake(i, d);
     }
 
+    /// Run until `until` (inclusive). May be called repeatedly to interleave scripted events
+    /// (publications, subscription changes, failures) with simulation.
     pub fn run(&mut self, until: Millis, sample_every: Millis) {
-        self.push(until, Ev::End);
-        let mut next_sample = sample_every;
-        while let Some(Reverse((t, _, ev))) = self.heap.pop() {
-            if t > until {
+        let mut next_sample = if self.next_sample == 0 { sample_every } else { self.next_sample };
+        loop {
+            let Some(Reverse((t, _, _))) = self.heap.peek() else { break };
+            if *t > until {
                 break;
             }
+            let Some(Reverse((t, _, ev))) = self.heap.pop() else { break };
             self.now = t;
             if t >= next_sample {
                 self.sample();
                 next_sample += sample_every;
             }
             match ev {
-                Ev::End => break,
                 Ev::Wake(i, s) => self.wake(i, s),
                 Ev::TxEnd(id) => self.tx_end(id),
                 Ev::Kill(i) => {
@@ -180,6 +182,16 @@ impl Engine {
                     self.schedule_wake(i, self.now + 1);
                 }
             }
+        }
+        self.now = until;
+        self.next_sample = next_sample;
+    }
+
+    /// After changing a node's protocol state from outside (publish, follow, unfollow), make
+    /// sure it wakes up promptly.
+    pub fn poke(&mut self, i: usize) {
+        if self.nodes[i].alive {
+            self.reschedule(i);
         }
     }
 
