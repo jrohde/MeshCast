@@ -278,13 +278,29 @@ cut collisions by two thirds and occupancy in half but did not raise delivery; s
 over the three non-overlapping WiFi channels cut collisions again but slowed cross-cell
 propagation, because a follower is deaf to other cells except during the common dwell.
 
-ESP-NOW is therefore *not* solved in Phase 0: within one cell it is the fastest carrier we have
-(two nodes at 300 m: three tracks in eight minutes), but between overlapping cells on a single
-2.4 GHz channel it needs a mechanism this design does not yet have, most likely announcers that
-take turns (an emergent time division learned from each other's beacons) rather than contend.
-Recorded as open question 10 in PROTOCOL.md. In practice the sub-GHz carrier carries content
-between cells and ESP-NOW serves a street; the simulator models one bulk carrier per node, so
-that combination is untested.
+Following the neighbourhood down to its causes took five more rounds, each one measured before
+the next change (per-node collision counters, then collisions by sender role, then by object):
+
+| Round | Finding in the data | Change | Result at 3 h |
+|---|---|---|---|
+| 1 | every node loses 10–55 % of bulk frames; random hop sequences put conflicting announcers on the same channel a third of the time | conflict colouring: followers report the announcers they hear, announcers take a colour, colour = channel offset or time slot; meeting dwell is control-only | 88 % |
+| 2 | colouring collapses after 30 min: followers reported a conflict once | periodic re-reports from bridge followers | 78 % |
+| 3 | stale colours: reports carried the colour a follower saw long ago | reports carry current colours, changes reported at once, gossip carries the followed announcer's colour | 80 %, colouring valid |
+| 4 | 4.6 M of 6.6 M bulk collisions are upload against upload; 1 383 uploads started for 100 needed | offer-and-grant replaces any-holder uploads; ask only for what is not flowing | 65 % (grants lapsed while uploaders were queued) |
+| 5 | granted uploaders switched objects on every re-ask | grants queue per holder, one object per holder at a time, NACKs answered by the granted uploader only, grants live 10 min | 52 % at 3 h, **88 % at 6 h**, upload redundancy 6× |
+
+The sub-GHz cases were re-run after every round and stayed at 100 %; the grant mechanism also
+cut their uploads to the minimum (a 20-node cell: 4 uploads for 3 tracks and a manifest).
+
+ESP-NOW between overlapping cells is therefore *better but not solved*: 88 % of
+follower-completions in 6 hours against 100 % in 1.8 hours on band O, with a bulk collision
+rate still near 24 % and six uploads per object per cell instead of one. The remaining cause is
+pull-based fetching among hidden nodes: a grant lapses when the uploader's frames are lost, the
+re-ask brings in another holder, and the duplicates collide with each other. Within one cell
+ESP-NOW is the fastest carrier we have (two nodes at 300 m: three tracks in eight minutes).
+Recorded, with candidate remedies, as open question 10 in PROTOCOL.md. In practice the sub-GHz
+carrier carries content between cells and ESP-NOW distributes it within a street; the simulator
+models one bulk carrier per node, so that combination is untested.
 
 #### 7.5.1 ESP-NOW at town scale
 
