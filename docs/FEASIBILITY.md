@@ -245,14 +245,24 @@ challenges and takes the role back. Listeners keep playing their local copies th
 | GFSK band O, fair share, before colouring and grants | 5 | 14 637 | 50 | 100 % | 10.5 h | 32 % / 92 % |
 | GFSK band L, fair share, before colouring and grants | 26 | 4 791 | 50 | 100 % | 11.4 h | 17 % / 74 % |
 | GFSK band O, final (colouring, slots, granted uploads) | 5 | 9 949 | 49 | **100.0 %** (9 949 of 9 950) | **7.3 h** | 4 % / 100 % |
-| GFSK band L, final | see below | | | | | |
+| GFSK band L, final | 19 | 8 557 | 4 | **66 %** | 14.4 h | 17 % / 67 % |
 | ESP-NOW LR (460 m cells) | not connected at this density: see §7.5.1 | | | | | |
 
 Band O: with the final code the five announcers take turns in time slots on the one channel,
 which brought the median from 10.5 to 7.3 hours and the typical occupancy from 32 % to 4 %,
 with the same complete delivery. Most role events are followers moving between overlapping
-cells, not announcer changes. Band L forms about 25 smaller cells on 15 channels at 25 mW; before
-colouring and grants it delivered everything in 11.4 hours; the final figure is below. Content crosses cells through bridge nodes that hear two
+cells, not announcer changes.
+
+Band L is the honest disappointment of this round: before colouring and granted uploads,
+about 25 cells on 15 channels with random hopping and any-holder uploads delivered everything in
+11.4 hours; with them, 66 % in 24 hours. On a carrier with many channels, random hopping already
+kept coinciding announcers to one dwell in fifteen, while the grant round-trips at the
+100-second meeting-dwell cadence, one object per holder at a time, and uploads to different
+announcers landing on coinciding channels (10 million upload-against-upload collisions) slow the
+cross-cell path down. The mechanisms that rescued the scarce-channel cases (band O, ESP-NOW)
+cost the rich-channel case. This is the first item of open question 10: either the grant path
+must become as cheap as the old any-holder path where channels are plentiful, or the rules must
+be chosen per carrier by channel count, which is not yet a principle. Content crosses cells through bridge nodes that hear two
 carousels and through holders answering neighbouring announcers' WANTs; a track published at one
 edge reaches the far edge after several hours.
 

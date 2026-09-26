@@ -410,12 +410,12 @@ arrives a few minutes later than it otherwise would. That is the entire user-vis
    bulk carrier per node so far.
 9. zsync-style delta transfer for updated objects (web bundles, firmware): the receiver compares
    the block lists of the old and new object and wants only the changed symbols.
-10. Overlapping cells on a carrier without duty cycle (ESP-NOW) remain the weakest case: with
-    conflict colouring and granted uploads a 50-node neighbourhood on 1 km² reaches 88 % of
-    follower-completions in 6 hours, against 100 % in 1.8 hours on band O, with a 24 % bulk
-    collision rate and about six uploads per object per cell instead of one (grants lapse when an
-    uploader's frames are lost, and the re-ask brings in another holder). The remaining problem
-    is pull-based cross-cell fetching among hidden nodes. Candidates: grants acknowledged by the
-    uploader so they do not lapse while queued; announcers pulling only from announcers they hear
-    at the meeting dwell rather than from arbitrary holders; or accepting that on 2.4 GHz a
-    sub-GHz carrier carries content between cells. See FEASIBILITY.md §7.5.0.
+10. Cross-cell fetching among cells that cannot hear each other is the weakest part of the
+    protocol, and the Phase 0 answer is mixed. Conflict colouring with granted uploads took band O
+    at town scale from a 10.5-hour to a 7.3-hour median at the same complete delivery, and the
+    ESP-NOW neighbourhood from 78 % to 86–91 %; but it took band L at town scale from 100 % in
+    11.4 hours to 66 % in 24 hours, because random hopping over fifteen channels was already good
+    and the grant round-trips at meeting-dwell cadence are not (FEASIBILITY.md §7.5). Serialised
+    and turn-taking uploads were tried and rejected. Next: measure where the band L town path
+    stalls (grant latency, coinciding upload channels, or one-object-per-holder), and find a rule
+    that is cheap where channels are plentiful without being unsafe where they are scarce.
