@@ -115,7 +115,7 @@ pub fn build(spec: &ScenarioSpec, params: Params) -> Built {
             carriers: phys.iter().map(|p| p.to_core()).collect(),
             params,
             seed: spec.seed.wrapping_add(i as u64 * 7919),
-            keep_bytes_below: 64 * 1024,
+            keep_bytes_below: 4096,
         })
         .collect();
 

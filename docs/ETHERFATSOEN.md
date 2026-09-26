@@ -119,25 +119,34 @@ Nodes use it to pick the quietest channel (adaptive frequency agility) and the q
 uploads. It is shared observation, not allocation: nobody is told what to do, everybody sees the
 same sky. Coordination without a coordinator.
 
-### 6. Answer once: suppression
+### 6. Offer, then grant
 
 When an announcer asks for an object, every holder in range could answer, and on a broadcast
-channel that would be as bad as everyone repeating a rumour. So a holder waits a random time
-before uploading (shorter for its own announcer, longer for a neighbouring cell's) and gives up
-if it hears anyone else sending that object meanwhile. This is the suppression rule of reliable
-multicast: the first to speak silences the rest, without anyone coordinating.
+channel that would be as bad as everyone repeating a rumour. So holders answer an open ask with
+a small offer (after a random delay, and not if they hear another offer first), the announcer
+names one of them, and only that one sends. Suppression alone was tried first and failed: holders
+that cannot hear each other do not suppress each other, and the simulator counted fourteen
+uploads per object per cell. A grant is explicit and costs two small frames.
 
-### 7. Rarest-first
+### 7. Colour, do not contend
+
+Announcers whose carousels overlap at some follower are told so by that follower, and colour
+themselves so that they never share a channel, or, when channels run out, share it in turns.
+See PROTOCOL.md §5.3. Contention (mechanism 1) is the fallback for what colouring did not
+foresee; colouring is the plan.
+
+### 8. Rarest-first
 
 The carousel orders objects by how few nodes report having them (from GOSSIP). Symbols named in
 NACKs go first. The emergent effect is that popular content spreads with the fewest transmissions
 and no node ever repeats what everyone already has. This is BitTorrent's piece-selection rule
 applied to broadcast.
 
-## The six mechanisms are now seven
+## The six mechanisms are now eight
 
-Mechanism 6 was added in Phase 0 when the simulator showed that content could not cross between
-cells whose followers do not overlap; the title of this document is a name, not a count.
+Mechanisms 6 and 7 were added in Phase 0 when the simulator showed content failing to cross
+between cells whose followers do not overlap, and overlapping cells colliding at the followers
+between them; the "six" in older text is a name, not a count.
 
 ## The one remaining hard problem: hidden nodes
 

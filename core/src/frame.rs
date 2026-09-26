@@ -10,8 +10,11 @@ pub const VERSION: u8 = 0;
 /// Symbol size `T` in bytes. One symbol per BULK frame.
 pub const SYMBOL_SIZE: usize = 200;
 pub const MAX_GOSSIP_IDS: usize = 12;
+/// WANT entries carry a granted uploader (12 bytes each), so fewer fit.
+pub const MAX_WANT: usize = 8;
 pub const MAX_ANNOUNCE_ENTRIES: usize = 8;
 pub const MAX_NACK_RANGES: usize = 40;
+pub const MAX_HEARD: usize = 3;
 pub const MAX_FRAME: usize = 250;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash, PartialOrd, Ord)]
@@ -71,8 +74,10 @@ pub struct Beacon {
     pub round: u16,
     pub utc: u64,
     pub time_quality: u8,
-    /// Current bulk channel index within the band (for frequency-agile carriers).
-    pub channel: u8,
+    /// The announcer's colour: its rank in its conflict set. On frequency-agile carriers the
+    /// colour is the offset on the shared base hop sequence, on single-channel carriers the
+    /// time slot. Followers and uploaders derive the announcer's channel from it.
+    pub colour: u8,
     /// Spectrum weather: measured occupancy (percent) on up to four bulk channels.
     pub occupancy: [u8; 4],
 }
@@ -90,10 +95,16 @@ pub struct Bulk {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Gossip {
     pub node: NodeId,
-    /// The announcer this node currently follows (NONE if none heard).
+    /// The announcer this node currently follows (NONE if none heard), and its colour.
     pub announcer: NodeId,
+    pub announcer_colour: u8,
+    /// Other announcers this node also hears, with the colour each announced: the conflict
+    /// report that drives colouring.
+    pub heard: Vec<(NodeId, u8)>,
     pub have: Vec<ShortId>,
-    pub want: Vec<ShortId>,
+    /// Objects wanted, each with the node granted to upload it (NONE = open ask: holders
+    /// answer with a HAVE offer and the announcer grants one of them).
+    pub want: Vec<(ShortId, NodeId)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -169,7 +180,7 @@ impl Frame {
                 out.extend_from_slice(&b.round.to_le_bytes());
                 out.extend_from_slice(&b.utc.to_le_bytes());
                 out.push(b.time_quality);
-                out.push(b.channel);
+                out.push(b.colour);
                 out.extend_from_slice(&b.occupancy);
             }
             Frame::Bulk(b) => {
@@ -185,19 +196,26 @@ impl Frame {
                 out.extend_from_slice(&payload);
             }
             Frame::Gossip(g) => {
+                let nheard = g.heard.len().min(MAX_HEARD);
                 out.push((VERSION << 4) | FrameType::Gossip as u8);
-                out.push(0);
+                out.push(nheard as u8);
                 out.extend_from_slice(&g.node.0.to_le_bytes());
                 out.extend_from_slice(&g.announcer.0.to_le_bytes());
+                out.push(g.announcer_colour);
                 let nh = g.have.len().min(MAX_GOSSIP_IDS);
-                let nw = g.want.len().min(MAX_GOSSIP_IDS);
+                let nw = g.want.len().min(MAX_WANT);
                 out.push(nh as u8);
                 out.push(nw as u8);
+                for (id, colour) in &g.heard[..nheard] {
+                    out.extend_from_slice(&id.0.to_le_bytes());
+                    out.push(*colour);
+                }
                 for id in &g.have[..nh] {
                     out.extend_from_slice(&id.0);
                 }
-                for id in &g.want[..nw] {
+                for (id, grant) in &g.want[..nw] {
                     out.extend_from_slice(&id.0);
+                    out.extend_from_slice(&grant.0.to_le_bytes());
                 }
             }
             Frame::ManifestAnnounce(m) => {
@@ -255,11 +273,11 @@ impl Frame {
                 let round = c.u16()?;
                 let utc = c.u64()?;
                 let time_quality = c.u8()?;
-                let channel = c.u8()?;
+                let colour = c.u8()?;
                 let occ = c.bytes(4)?;
                 let mut occupancy = [0u8; 4];
                 occupancy.copy_from_slice(occ);
-                Frame::Beacon(Beacon { carrier, announcer, score, next_ms, round, utc, time_quality, channel, occupancy })
+                Frame::Beacon(Beacon { carrier, announcer, score, next_ms, round, utc, time_quality, colour, occupancy })
             }
             2 => {
                 let object = c.short()?;
@@ -273,12 +291,20 @@ impl Frame {
                 Frame::Bulk(Bulk { object, block, esi, k, payload })
             }
             3 => {
+                let nheard = (flags & 0x03) as usize;
                 let node = NodeId(c.u32()?);
                 let announcer = NodeId(c.u32()?);
+                let announcer_colour = c.u8()?;
                 let nh = c.u8()? as usize;
                 let nw = c.u8()? as usize;
-                if nh > MAX_GOSSIP_IDS || nw > MAX_GOSSIP_IDS {
+                if nh > MAX_GOSSIP_IDS || nw > MAX_WANT || nheard > MAX_HEARD {
                     return Err(DecodeError::BadLength);
+                }
+                let mut heard = Vec::with_capacity(nheard);
+                for _ in 0..nheard {
+                    let id = NodeId(c.u32()?);
+                    let colour = c.u8()?;
+                    heard.push((id, colour));
                 }
                 let mut have = Vec::with_capacity(nh);
                 for _ in 0..nh {
@@ -286,9 +312,11 @@ impl Frame {
                 }
                 let mut want = Vec::with_capacity(nw);
                 for _ in 0..nw {
-                    want.push(c.short()?);
+                    let id = c.short()?;
+                    let grant = NodeId(c.u32()?);
+                    want.push((id, grant));
                 }
-                Frame::Gossip(Gossip { node, announcer, have, want })
+                Frame::Gossip(Gossip { node, announcer, announcer_colour, heard, have, want })
             }
             4 => {
                 let node = NodeId(c.u32()?);
@@ -392,11 +420,11 @@ mod tests {
                 round: 7,
                 utc: 1_700_000_000,
                 time_quality: 2,
-                channel: 3,
+                colour: 3,
                 occupancy: [10, 20, 30, 40],
             }),
             Frame::Bulk(Bulk { object: ShortId([1; 8]), block: 2, esi: 3, k: 100, payload: vec![9u8; SYMBOL_SIZE] }),
-            Frame::Gossip(Gossip { node: NodeId(1), announcer: NodeId(2), have: vec![ShortId([3; 8]); 12], want: vec![ShortId([4; 8]); 12] }),
+            Frame::Gossip(Gossip { node: NodeId(1), announcer: NodeId(2), announcer_colour: 1, heard: vec![(NodeId(7), 0), (NodeId(8), 1), (NodeId(9), 2)], have: vec![ShortId([3; 8]); 12], want: vec![(ShortId([4; 8]), NodeId(5)); 8] }),
             Frame::ManifestAnnounce(ManifestAnnounce {
                 node: NodeId(5),
                 entries: vec![AnnounceEntry { channel: ChannelId([6; 8]), manifest: ShortId([7; 8]), seq: 9, len: 1234 }; 8],
@@ -413,7 +441,7 @@ mod tests {
 
     #[test]
     fn sizes() {
-        let b = Frame::Beacon(Beacon { carrier: CarrierKind::GfskBulk, announcer: NodeId(1), score: 0, next_ms: 0, round: 0, utc: 0, time_quality: 0, channel: 0, occupancy: [0; 4] });
+        let b = Frame::Beacon(Beacon { carrier: CarrierKind::GfskBulk, announcer: NodeId(1), score: 0, next_ms: 0, round: 0, utc: 0, time_quality: 0, colour: 0, occupancy: [0; 4] });
         assert_eq!(b.encode().len(), 28);
         let k = Frame::Bulk(Bulk { object: ShortId([0; 8]), block: 0, esi: 0, k: 1, payload: vec![] });
         assert_eq!(k.encode().len(), 218);
@@ -435,7 +463,7 @@ mod tests {
 
     #[test]
     fn corrupted_crc_rejected() {
-        let f = Frame::Gossip(Gossip { node: NodeId(1), announcer: NodeId(2), have: vec![], want: vec![] });
+        let f = Frame::Gossip(Gossip { node: NodeId(1), announcer: NodeId(2), announcer_colour: 0, heard: vec![], have: vec![], want: vec![] });
         let mut bytes = f.encode();
         bytes[3] ^= 1;
         assert_eq!(Frame::decode(&bytes), Err(DecodeError::BadCrc));

@@ -27,6 +27,18 @@ pub struct Metrics {
     pub bulk_sent: u64,
     pub bulk_delivered: u64,
     pub occupancy_samples: Vec<(Millis, usize, usize, u16)>,
+    /// Per receiver: bulk frames delivered and lost to collisions.
+    pub per_node_bulk: Vec<(u64, u64)>,
+    /// Collisions during meeting dwells versus outside them, by frame type index.
+    pub collided_meeting: [u64; 6],
+    pub collided_other: [u64; 6],
+    /// Bulk collisions by (sender is announcer, strongest interferer is announcer).
+    pub bulk_collision_kinds: [[u64; 2]; 2],
+    /// Bulk frames sent by announcers / by others.
+    pub bulk_sent_by: [u64; 2],
+    /// Upload-upload collisions: same object (duplicate uploaders) vs different objects.
+    pub upload_collision_same_object: u64,
+    pub upload_collision_other_object: u64,
 }
 
 impl Metrics {

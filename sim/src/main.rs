@@ -129,6 +129,15 @@ struct Report {
     delivered_bytes_per_hour_per_announcer: f64,
     failover: Option<FailoverReport>,
     core_stats: Vec<(usize, String)>,
+    /// Per node: announcer followed, bulk frames received, bulk frames lost to collisions,
+    /// tracks completed.
+    per_node: Vec<(usize, u32, u64, u64, usize)>,
+    collided_meeting: [u64; 6],
+    collided_other: [u64; 6],
+    bulk_collision_kinds: [[u64; 2]; 2],
+    bulk_sent_by: [u64; 2],
+    upload_same: u64,
+    upload_other: u64,
 }
 
 #[derive(Serialize, Debug)]
@@ -384,13 +393,31 @@ fn run(spec: ScenarioSpec, common: &Common, failover: Option<(f64, f64)>) {
         .filter(|(i, n)| n.airtime_ms.iter().any(|&a| a > 0) || *i < 3)
         .map(|(i, n)| {
             let s = &n.node.stats;
-            (i, format!("tx[ctl/meta/content]={:?} rx={} bad={} cca_defer={} disc_wait={} sym_new={} sym_dup={} nacks={} wants={} uploads={} manifests={} occ={}‰ rate={}‰ role={:?}",
+            let line = format!("tx[ctl/meta/content]={:?} rx={} bad={} cca_defer={} disc_wait={} sym_new={} sym_dup={} nacks={} wants={} uploads={} manifests={} occ={}‰ rate={}‰ role={:?} colour={:?} reports={} noted={} conflicts={:?}",
                 s.tx_frames, s.rx_frames, s.rx_bad, s.cca_deferrals, s.discipline_waits, s.symbols_new, s.symbols_dup, s.nacks_sent, s.wants_sent, s.uploads_started, s.manifests_adopted,
-                n.node.occupancy(bulk_c), n.node.rate(bulk_c), n.node.role(bulk_c)))
+                n.node.occupancy(bulk_c), n.node.rate(bulk_c), n.node.role(bulk_c), n.node.colouring(), s.conflict_reports_sent, s.conflicts_noted, n.node.conflict_set());
+            (i, line)
         })
         .collect();
 
+    let per_node: Vec<(usize, u32, u64, u64, usize)> = eng
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(i, n)| {
+            let done = built.tracks.keys().filter(|id| m.completions.contains_key(&(i, **id))).count();
+            let (ok, lost) = m.per_node_bulk.get(i).copied().unwrap_or((0, 0));
+            (i, n.node.announcer_of(bulk_c).0, ok, lost, done)
+        })
+        .collect();
     let report = Report {
+        collided_meeting: m.collided_meeting,
+        collided_other: m.collided_other,
+        bulk_collision_kinds: m.bulk_collision_kinds,
+        bulk_sent_by: m.bulk_sent_by,
+        upload_same: m.upload_collision_same_object,
+        upload_other: m.upload_collision_other_object,
+        per_node,
         spec: spec.clone(),
         phys: built.phys.clone(),
         objects,
@@ -425,6 +452,8 @@ fn print_report(r: &Report, wall: std::time::Duration) {
     println!("\nframes: sent {} delivered {} collided {} half-duplex {} | bulk sent {} delivered {}",
         r.frames_sent, r.frames_delivered, r.frames_collided, r.frames_half_duplex, r.bulk_sent, r.bulk_delivered);
     println!("announcers at end: {:?} ({} role events)", r.announcers_final, r.role_events);
+    println!("collisions by frame type [beacon,bulk,gossip,announce,nack]: meeting dwell {:?}, other {:?}", &r.collided_meeting[1..], &r.collided_other[1..]);
+    println!("bulk sent by [others, announcers]: {:?}; bulk collisions [sender other/announcer][interferer other/announcer]: {:?}; upload-upload same object {} / other object {}", r.bulk_sent_by, r.bulk_collision_kinds, r.upload_same, r.upload_other);
     println!("bulk-channel occupancy at nodes: p50 {:.1} %, max {:.1} %", r.occupancy_p50_bulk, r.occupancy_max_bulk);
     println!("delivered to followers: {:.2} MB per hour per announcer", r.delivered_bytes_per_hour_per_announcer / 1e6);
     println!("\nairtime share per transmitting node, busiest first (control, bulk):");

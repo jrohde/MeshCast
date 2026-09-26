@@ -9,7 +9,7 @@ use crate::carousel::{Carousel, CarouselParams, Item};
 use crate::discipline::{Accounting, Verdict};
 use crate::election::{Election, Transition};
 use crate::fatsoen::Fatsoen;
-use crate::frame::{AnnounceEntry, Beacon, Bulk, CarrierKind, Class, Frame, FrameType, Gossip, ManifestAnnounce, Nack, MAX_ANNOUNCE_ENTRIES, MAX_GOSSIP_IDS, MAX_NACK_RANGES, SYMBOL_SIZE};
+use crate::frame::{AnnounceEntry, Beacon, Bulk, CarrierKind, Class, Frame, FrameType, Gossip, ManifestAnnounce, Nack, MAX_ANNOUNCE_ENTRIES, MAX_GOSSIP_IDS, MAX_NACK_RANGES, MAX_WANT, SYMBOL_SIZE};
 use crate::ids::{ChannelId, NodeId, ShortId};
 use crate::manifest::Manifest;
 use crate::object::{Mime, ObjectMeta};
@@ -97,6 +97,8 @@ pub struct Stats {
     pub wants_sent: u64,
     pub uploads_started: u64,
     pub manifests_adopted: u64,
+    pub conflict_reports_sent: u64,
+    pub conflicts_noted: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -106,6 +108,8 @@ struct Neighbor {
     score: u16,
     /// How well we hear this node (averaged RSSI of its frames).
     rssi: i16,
+    /// Colour last announced (announcers only).
+    colour: u8,
     haves: BTreeSet<ShortId>,
 }
 
@@ -154,6 +158,8 @@ struct CarrierRt {
     busy_until: Millis,
     pace_until: Millis,
     upload: Option<Upload>,
+    /// Further granted uploads, served one at a time after the active one.
+    upload_queue: VecDeque<Upload>,
     /// Dropped because a frame could never be legal on this carrier.
     dropped: u64,
     /// Last hop-cycle dwell index at which a dwell-start beacon was queued.
@@ -192,10 +198,23 @@ pub struct Node {
     next_score: Millis,
     want_refresh: bool,
     last_want_tx: Millis,
+    /// Earliest time for the next WANT frame; starts at a random phase so that followers that
+    /// booted together do not all ask at once.
+    next_want_at: Millis,
     have_cursor: usize,
     want_cursor: usize,
     announce_cursor: usize,
     progress: BTreeMap<ShortId, Progress>,
+    /// Announcers reported to be heard together with us by some follower (or heard by us):
+    /// our conflict set, with the time of the last report and the colour they announced.
+    conflicts: BTreeMap<NodeId, (Millis, u8)>,
+    /// A follower that just heard a new announcer reports the conflict once, soon.
+    report_due: bool,
+    last_report: Millis,
+    /// Announcer side: uploader granted per wanted object, with the time of the grant.
+    grants: BTreeMap<ShortId, (NodeId, Millis)>,
+    /// Holder side: offers we owe (object, announcer that asked, when to send).
+    offers: Vec<(ShortId, NodeId, Millis)>,
     pub stats: Stats,
 }
 
@@ -216,6 +235,7 @@ impl Node {
                 busy_until: 0,
                 pace_until: 0,
                 upload: None,
+                upload_queue: VecDeque::new(),
                 dropped: 0,
                 last_dwell: u64::MAX,
                 jittered: false,
@@ -246,10 +266,16 @@ impl Node {
             next_score: now,
             want_refresh: false,
             last_want_tx: 0,
+            next_want_at: now + Rng::new(seed ^ 0x5eed).below(p.t_want_min_ms.max(1)),
             have_cursor: 0,
             want_cursor: 0,
             announce_cursor: 0,
             progress: BTreeMap::new(),
+            conflicts: BTreeMap::new(),
+            report_due: false,
+            last_report: 0,
+            grants: BTreeMap::new(),
+            offers: Vec::new(),
             stats,
             cfg,
             now,
@@ -307,8 +333,9 @@ impl Node {
         self.channel_for(carrier, self.announcer_of(carrier), now)
     }
 
-    /// Channel of `ann`'s hop sequence at `now`, with the common meeting dwell every
-    /// `meet_every` dwells; a node following nobody scans slowly outside meeting dwells.
+    /// Channel of announcer `ann` at `now`. Outside the meeting dwell every announcer follows
+    /// one shared pseudo-random base sequence shifted by its colour, so announcers in conflict
+    /// (different colours) are never on the same channel. A node following nobody scans slowly.
     pub fn channel_for(&self, carrier: usize, ann: NodeId, now: Millis) -> u8 {
         let c = &self.carriers[carrier];
         let n = c.p.channels.len().max(1) as u64;
@@ -323,7 +350,64 @@ impl Node {
         if ann.is_none() {
             return ((now / (dwell * n)) % n) as u8;
         }
-        hop_channel(ann, di, n)
+        let colour = if ann == self.cfg.id { self.my_colour() } else { c.election.as_ref().and_then(|e| e.colour_of(ann)).unwrap_or(0) };
+        ((hop_channel(BASE_ID, di, n) as u64 + colour as u64) % n) as u8
+    }
+
+    /// A colour maps to a channel (`colour mod n`) and, when there are more colours than
+    /// channels, to a time slot on that channel (`colour div n`). Single-channel carriers are
+    /// simply `n = 1`: every colour is a slot.
+    fn slot_of(&self, carrier: usize, colour: u8) -> (u64, u64) {
+        let n = self.carriers[carrier].p.channels.len().max(1) as u64;
+        let colours = self.colours() as u64;
+        let slots = colours.div_ceil(n).max(1);
+        (colour as u64 / n, slots)
+    }
+
+    /// Our colour: greedy distributed colouring. Lower ids keep their colour; we take the
+    /// smallest colour not announced by any conflicting announcer with a lower id.
+    fn my_colour(&self) -> u8 {
+        let taken: Vec<u8> = self.conflicts.iter().filter(|(id, _)| id.0 < self.cfg.id.0).map(|(_, (_, c))| *c).collect();
+        (0u8..=254).find(|c| !taken.contains(c)).unwrap_or(255)
+    }
+
+    /// Number of colours in use around us: one more than the highest colour we know of.
+    fn colours(&self) -> u8 {
+        let max = self.conflicts.values().map(|(_, c)| *c).max().unwrap_or(0);
+        max.max(self.my_colour()).saturating_add(1)
+    }
+
+    fn note_conflict(&mut self, other: NodeId, colour: u8) {
+        if other != self.cfg.id && !other.is_none() {
+            self.conflicts.insert(other, (self.now, colour));
+            self.stats.conflicts_noted += 1;
+        }
+    }
+
+    fn expire_conflicts(&mut self) {
+        let from = self.now.saturating_sub(self.cfg.params.conflict_ttl_ms);
+        self.conflicts.retain(|_, (t, _)| *t >= from);
+    }
+
+    /// Announcers that share a channel take turns: our carousel runs only in our slot.
+    /// Returns when the next slot of ours starts, or None if it is ours now.
+    fn slot_wait(&self, carrier: usize, colour: u8, now: Millis) -> Option<Millis> {
+        let (mine, k) = self.slot_of(carrier, colour);
+        if k <= 1 {
+            return None;
+        }
+        let slot = self.cfg.params.t_slot_ms.max(1);
+        let cur = (now / slot) % k;
+        if cur == mine {
+            None
+        } else {
+            let cycle_start = (now / (slot * k)) * slot * k;
+            let mut t = cycle_start + mine * slot;
+            if t <= now {
+                t += slot * k;
+            }
+            Some(t)
+        }
     }
 
     fn is_meeting_dwell(&self, dwell_index: u64) -> bool {
@@ -372,6 +456,16 @@ impl Node {
 
     pub fn dropped(&self, carrier: usize) -> u64 {
         self.carriers[carrier].dropped
+    }
+
+    /// Our colour and the size of our conflict set (ourselves included).
+    pub fn colouring(&self) -> (u8, u8) {
+        (self.my_colour(), self.colours())
+    }
+
+    /// Conflict set as (id, colour) for diagnostics.
+    pub fn conflict_set(&self) -> Vec<(u32, u8)> {
+        self.conflicts.iter().map(|(id, (_, c))| (id.0, *c)).collect()
     }
 
     pub fn follow(&mut self, chan: ChannelId) {
@@ -426,6 +520,15 @@ impl Node {
             // Stall checks (WANT / NACK) are time-based; poll them at the stall granularity.
             d = d.min(self.now + self.cfg.params.t_nack_stall_ms);
         }
+        if let Some(t) = self.offers.iter().map(|(_, _, at)| *at).min() {
+            d = d.min(t);
+        }
+        if !self.is_announcing() {
+            d = d.min(self.last_report + self.cfg.params.conflict_ttl_ms / 2);
+            if self.report_due {
+                d = d.min((self.last_report + self.cfg.params.t_report_min_ms).max(self.now + 1));
+            }
+        }
         for c in &self.carriers {
             if let Some(e) = &c.election {
                 d = d.min(e.deadline());
@@ -467,9 +570,8 @@ impl Node {
 
     fn add_want(&mut self, id: ShortId) {
         if self.wants.insert(id) {
-            let now = self.now;
             let p = self.progress.entry(id).or_default();
-            p.last_progress = now;
+            p.last_progress = 0;
             p.last_want = 0;
             if self.is_announcing() {
                 self.gossip_soon();
@@ -496,6 +598,14 @@ impl Node {
         }
         if now >= self.next_score {
             self.expire_neighbors();
+            self.expire_conflicts();
+            // Announcers we hear directly are in conflict with us too.
+            let heard: Vec<(NodeId, u8)> = self.carriers.iter().filter_map(|c| c.election.as_ref()).flat_map(|e| e.heard_with_colour(now, self.cfg.id).collect::<Vec<_>>()).collect();
+            if self.is_announcing() {
+                for (id, colour) in heard {
+                    self.note_conflict(id, colour);
+                }
+            }
             self.score = self.compute_score();
             self.next_score = now + self.cfg.params.t_score_ms;
         }
@@ -527,6 +637,11 @@ impl Node {
                     if !self.carriers[i].queue.iter().any(|p| p.frame_type == FrameType::Beacon) {
                         let b = self.make_beacon(i);
                         self.enqueue(i, Frame::Beacon(b));
+                        // Announcers cannot hear each other, so spread their dwell-start
+                        // beacons over the first part of the dwell.
+                        let j = self.rng.below((self.cfg.params.dwell_ms / 10).max(1));
+                        let c = &mut self.carriers[i];
+                        c.pace_until = c.pace_until.max(now + j);
                     }
                 }
             }
@@ -544,6 +659,8 @@ impl Node {
             }
         }
         self.follower_want_check();
+        self.conflict_report_check();
+        self.offer_check();
         self.nack_check();
         for i in 0..self.carriers.len() {
             let busy = states.get(i).map(|s| s.busy).unwrap_or(false);
@@ -626,7 +743,7 @@ impl Node {
             round,
             utc: 0,
             time_quality: 0,
-            channel: self.channel(carrier, self.now),
+            colour: self.my_colour(),
             occupancy,
         }
     }
@@ -663,6 +780,7 @@ impl Node {
             c.busy_until = 0;
             c.pace_until = 0;
             c.upload = None;
+            c.upload_queue.clear();
         }
         self.neighbors.clear();
         self.next_beacon = now + p.election.t_beacon_ms;
@@ -670,7 +788,11 @@ impl Node {
         self.next_score = now;
         self.want_refresh = true;
         self.last_want_tx = 0;
+        self.next_want_at = now + self.rng.below(p.t_want_min_ms.max(1));
         self.progress.clear();
+        self.conflicts.clear();
+        self.grants.clear();
+        self.offers.clear();
         for id in self.own_objects.iter().chain(self.own_manifests.iter().map(|(_, s, _, _)| s)) {
             self.pending_ack.insert(*id);
         }
@@ -681,6 +803,54 @@ impl Node {
             Some(i) => self.announcer_of(i),
             None => NodeId::NONE,
         }
+    }
+
+    /// Colour of the announcer we follow (or our own).
+    fn announcer_colour_field(&self) -> u8 {
+        let Some(i) = self.primary_bulk() else { return 0 };
+        let ann = self.announcer_of(i);
+        if ann == self.cfg.id {
+            self.my_colour()
+        } else {
+            self.carriers[i].election.as_ref().and_then(|e| e.colour_of(ann)).unwrap_or(0)
+        }
+    }
+
+    /// Other announcers we hear on the cell carrier besides the one we follow (or besides
+    /// ourselves): the conflict report.
+    fn heard_field(&self) -> Vec<(NodeId, u8)> {
+        let Some(i) = self.primary_bulk() else { return Vec::new() };
+        let except = self.announcer_of(i);
+        match self.carriers[i].election.as_ref() {
+            Some(e) => e.heard_with_colour(self.now, except).filter(|(id, _)| *id != self.cfg.id).take(crate::frame::MAX_HEARD).collect(),
+            None => Vec::new(),
+        }
+    }
+
+    /// A follower that hears more than one announcer is the only node that knows they
+    /// conflict, so it says so: once when it first hears a new one, and again every half
+    /// conflict lifetime while the situation lasts, so that the announcers' colouring persists.
+    fn conflict_report_check(&mut self) {
+        if self.is_announcing() {
+            return;
+        }
+        let refresh = self.cfg.params.conflict_ttl_ms / 2;
+        let due = self.report_due || self.now >= self.last_report + refresh;
+        if !due || self.now < self.last_report + self.cfg.params.t_report_min_ms {
+            return;
+        }
+        let heard = self.heard_field();
+        if heard.is_empty() {
+            self.report_due = false;
+            self.last_report = self.now;
+            return;
+        }
+        let g = Gossip { node: self.cfg.id, announcer: self.gossip_announcer_field(), announcer_colour: self.announcer_colour_field(), heard, have: Vec::new(), want: Vec::new() };
+        let cell = self.cell_carrier();
+        self.enqueue(cell, Frame::Gossip(g));
+        self.stats.conflict_reports_sent += 1;
+        self.report_due = false;
+        self.last_report = self.now;
     }
 
     fn gossip_round(&mut self) {
@@ -699,7 +869,7 @@ impl Node {
         }
         let want = self.take_wants();
         if !have.is_empty() || !want.is_empty() {
-            let g = Gossip { node: self.cfg.id, announcer: self.gossip_announcer_field(), have, want };
+            let g = Gossip { node: self.cfg.id, announcer: self.gossip_announcer_field(), announcer_colour: self.announcer_colour_field(), heard: self.heard_field(), have, want };
             self.enqueue(self.cell_carrier(), Frame::Gossip(g));
         }
         let entries: Vec<AnnounceEntry> = if announcing {
@@ -733,19 +903,52 @@ impl Node {
         }
     }
 
-    fn take_wants(&mut self) -> Vec<ShortId> {
-        let ids: Vec<ShortId> = self.wants.iter().copied().collect();
+    /// Ask only for what is not coming: objects with a symbol in the last stall interval are
+    /// flowing and are left out. Each entry carries the granted uploader, if any.
+    fn take_wants(&mut self) -> Vec<(ShortId, NodeId)> {
+        let now = self.now;
+        let stall = self.cfg.params.t_nack_stall_ms;
+        let t_grant = self.cfg.params.t_grant_ms;
+        // A granted uploader that has not delivered anything loses the grant.
+        let progress = &self.progress;
+        self.grants.retain(|id, (_, t)| {
+            let p = progress.get(id).copied().unwrap_or_default();
+            now < *t + t_grant || p.last_progress > *t
+        });
+        let ids: Vec<ShortId> = self
+            .wants
+            .iter()
+            .filter(|id| {
+                let p = self.progress.get(id).copied().unwrap_or_default();
+                now >= p.last_progress + stall || p.last_progress == 0
+            })
+            .copied()
+            .collect();
         if ids.is_empty() {
             return Vec::new();
         }
-        let n = ids.len().min(MAX_GOSSIP_IDS);
+        // One object per granted holder at a time: a holder whose grant is flowing is busy, so
+        // other objects granted to it are not asked for now.
+        let busy_holders: Vec<NodeId> = self
+            .grants
+            .iter()
+            .filter(|(id, _)| {
+                let p = self.progress.get(id).copied().unwrap_or_default();
+                p.last_progress != 0 && now < p.last_progress + stall
+            })
+            .map(|(_, (h, _))| *h)
+            .collect();
+        let ids: Vec<ShortId> = ids.into_iter().filter(|id| !self.grants.get(id).map(|(h, _)| busy_holders.contains(h)).unwrap_or(false)).collect();
+        if ids.is_empty() {
+            return Vec::new();
+        }
+        let n = ids.len().min(MAX_WANT);
         let v: Vec<ShortId> = (0..n).map(|j| ids[(self.want_cursor + j) % ids.len()]).collect();
         self.want_cursor = (self.want_cursor + n) % ids.len();
-        let now = self.now;
         for id in &v {
             self.progress.entry(*id).or_default().last_want = now;
         }
-        v
+        v.into_iter().map(|id| (id, self.grants.get(&id).map(|(g, _)| *g).unwrap_or(NodeId::NONE))).collect()
     }
 
     /// Followers stay silent unless they have wants that the announcer is not serving.
@@ -763,14 +966,15 @@ impl Node {
             let p = self.progress.get(id).copied().unwrap_or_default();
             now >= p.last_progress.max(p.last_want) + stall
         });
-        if (self.want_refresh || stalled) && now >= self.last_want_tx + self.cfg.params.t_want_min_ms.min(stall) {
+        if (self.want_refresh || stalled) && now >= self.next_want_at {
             let want = self.take_wants();
-            let g = Gossip { node: self.cfg.id, announcer: self.gossip_announcer_field(), have: Vec::new(), want };
+            let g = Gossip { node: self.cfg.id, announcer: self.gossip_announcer_field(), announcer_colour: self.announcer_colour_field(), heard: self.heard_field(), have: Vec::new(), want };
             let cell = self.cell_carrier();
             self.enqueue(cell, Frame::Gossip(g));
             self.stats.wants_sent += 1;
             self.want_refresh = false;
             self.last_want_tx = now;
+            self.next_want_at = now + self.cfg.params.t_want_min_ms;
         }
     }
 
@@ -921,6 +1125,24 @@ impl Node {
             }
         };
         let airtime = self.carriers[i].p.airtime_ms(bytes.len());
+        let content_colour = match (&cand, self.carriers[i].upload.as_ref()) {
+            (Cand::Carousel(Item::Symbol { .. }), _) => Some(self.my_colour()),
+            (Cand::Upload(..), Some(u)) => Some(self.carriers[i].election.as_ref().and_then(|e| e.colour_of(u.to)).unwrap_or(0)),
+            _ => None,
+        };
+        if let Some(colour) = content_colour {
+            // The meeting dwell is control plane only, and announcers that share a channel take
+            // turns: content (carousel or upload) runs only in its announcer's slot.
+            let dwell = self.cfg.params.dwell_ms.max(1);
+            if self.carriers[i].p.channels.len() > 1 && self.is_meeting_dwell(now / dwell) {
+                self.carriers[i].pace_until = (now / dwell + 1) * dwell;
+                return;
+            }
+            if let Some(t) = self.slot_wait(i, colour, now) {
+                self.carriers[i].pace_until = t;
+                return;
+            }
+        }
         // Fresh content (first copy into the cell) has right of way over repetition.
         let fresh = match &cand {
             Cand::Upload(..) => true,
@@ -1004,7 +1226,7 @@ impl Node {
                     Some(list) => {
                         list.pop_front();
                         if list.is_empty() {
-                            self.carriers[i].upload = None;
+                            self.carriers[i].upload = self.carriers[i].upload_queue.pop_front();
                         }
                     }
                     None => {
@@ -1013,7 +1235,7 @@ impl Node {
                             u.esi = 0;
                             u.block += 1;
                             if self.store.block_k(&object, u.block).is_none() {
-                                self.carriers[i].upload = None;
+                                self.carriers[i].upload = self.carriers[i].upload_queue.pop_front();
                             }
                         }
                     }
@@ -1066,7 +1288,7 @@ impl Node {
 
     fn touch(&mut self, id: NodeId, rssi: i16) -> &mut Neighbor {
         let now = self.now;
-        let n = self.neighbors.entry(id).or_insert(Neighbor { last_heard: now, announcer: NodeId::NONE, score: 0, rssi, haves: BTreeSet::new() });
+        let n = self.neighbors.entry(id).or_insert(Neighbor { last_heard: now, announcer: NodeId::NONE, score: 0, rssi, colour: 0, haves: BTreeSet::new() });
         n.last_heard = now;
         n.rssi = ((n.rssi as i32 + rssi as i32) / 2) as i16;
         n
@@ -1097,27 +1319,29 @@ impl Node {
             let n = self.touch(b.announcer, rssi);
             n.score = b.score;
             n.announcer = b.announcer;
+            n.colour = b.colour;
         }
         let me = self.cfg.id;
         let score = self.score;
         let now = self.now;
         // Same cell: we hear this announcer at least as well as our typical neighbour.
         let near = rssi >= self.typical_neighbor_rssi(b.announcer);
-        let t = self.carriers[ti].election.as_mut().and_then(|e| e.on_beacon(now, b.announcer, b.score, b.next_ms, rssi, near, me, score));
+        // A follower that hears a new neighbouring announcer, or sees one change colour, is the
+        // only node that can tell the announcers: report soon.
+        let known_colour = self.carriers[ti].election.as_ref().and_then(|e| e.colour_of(b.announcer));
+        let changed = known_colour.map(|c| c != b.colour).unwrap_or(true);
+        if changed && !self.announcer_of(ti).is_none() {
+            self.report_due = true;
+        }
+        let t = self.carriers[ti].election.as_mut().and_then(|e| e.on_beacon(now, b.announcer, b.score, b.next_ms, rssi, b.colour, near, me, score));
         if let Some(t) = t {
             self.on_transition(ti, t, out);
         }
     }
 
     fn rx_bulk(&mut self, _carrier: usize, b: &Bulk, out: &mut Vec<Action>) {
-        // Someone else is sending this object: a pending upload of ours is redundant.
-        for c in self.carriers.iter_mut() {
-            if let Some(u) = &c.upload {
-                if u.object == b.object && u.start_at > self.now {
-                    c.upload = None;
-                }
-            }
-        }
+        // Someone is sending this object: any offer of ours for it is moot.
+        self.offers.retain(|(o, _, _)| *o != b.object);
         let interested = self.wants.contains(&b.object) || self.store.is_known(&b.object) || self.is_announcing();
         if !interested {
             return;
@@ -1212,12 +1436,27 @@ impl Node {
         let score = self.score;
         let now = self.now;
         let other_score = self.neighbors.get(&g.announcer).map(|n| n.score);
+        // Another holder offered the same objects: our pending offers are redundant.
+        if !g.have.is_empty() {
+            self.offers.retain(|(o, _, _)| !g.have.contains(o));
+        }
+        if self.is_announcing() {
+            // A follower of ours hears other announcers, or a follower of another announcer
+            // hears us: either way those announcers collide with us at that node.
+            if g.announcer == me {
+                for (h, colour) in &g.heard {
+                    self.note_conflict(*h, *colour);
+                }
+            } else if g.heard.iter().any(|(h, _)| *h == me) {
+                self.note_conflict(g.announcer, g.announcer_colour);
+            }
+        }
         for i in 0..self.carriers.len() {
             if self.role(i) != Role::Announcer {
                 continue;
             }
             let mut new_wants = Vec::new();
-            for w in &g.want {
+            for (w, _) in &g.want {
                 if let Some(car) = self.carriers[i].carousel.as_mut() {
                     car.on_want(*w, g.node, now);
                 }
@@ -1232,6 +1471,11 @@ impl Node {
                 if let Some(car) = self.carriers[i].carousel.as_mut() {
                     car.on_have(*h, g.node);
                 }
+                // An offer for something we want: grant the first holder that offers.
+                if self.wants.contains(h) && !self.grants.contains_key(h) {
+                    self.grants.insert(*h, (g.node, now));
+                    self.gossip_soon();
+                }
             }
             if !g.announcer.is_none() && g.announcer != me {
                 let t = self.carriers[i].election.as_mut().and_then(|e| e.on_conflict(now, g.announcer, other_score, me, score));
@@ -1241,7 +1485,7 @@ impl Node {
             }
         }
         // Holder side: an announcer (ours or a neighbouring cell's) tells us what it has and
-        // wants. Any holder may answer; a random wait plus suppression keeps it to one uploader.
+        // wants. An open ask is answered with an offer; only the holder it then grants uploads.
         let from_announcer = g.announcer == g.node;
         for i in 0..self.carriers.len() {
             if !self.carriers[i].p.kind.is_bulk() || self.role(i) == Role::Announcer {
@@ -1255,18 +1499,57 @@ impl Node {
             } else if !from_announcer {
                 continue;
             }
-            if self.carriers[i].upload.is_none() {
-                for w in &g.want {
-                    if self.store.has_complete(w) {
-                        let max = if own { self.cfg.params.upload_suppress_ms / 4 } else { self.cfg.params.upload_suppress_ms };
-                        let start_at = now + self.rng.below(max.max(1));
-                        self.carriers[i].upload = Some(Upload { object: *w, to: g.node, start_at, block: 0, esi: 0, list: None });
+            for (w, grant) in &g.want {
+                if !self.store.has_complete(w) {
+                    continue;
+                }
+                if *grant == self.cfg.id {
+                    // Granted: upload it, after whatever we are already uploading.
+                    let c = &mut self.carriers[i];
+                    let active = c.upload.as_ref().map(|u| u.object == *w && u.to == g.node).unwrap_or(false);
+                    let queued = c.upload_queue.iter().any(|u| u.object == *w && u.to == g.node);
+                    if !active && !queued {
+                        let u = Upload { object: *w, to: g.node, start_at: now, block: 0, esi: 0, list: None };
+                        if c.upload.is_none() {
+                            c.upload = Some(u);
+                        } else {
+                            c.upload_queue.push_back(u);
+                        }
                         self.stats.uploads_started += 1;
-                        break;
                     }
+                } else if grant.is_none() {
+                    // Open ask: offer, unless we are already uploading it to this announcer.
+                    let uploading = self.carriers[i].upload.as_ref().map(|u| u.object == *w && u.to == g.node).unwrap_or(false);
+                    if !uploading && !self.offers.iter().any(|(o, a, _)| o == w && *a == g.node) {
+                        let at = now + self.rng.below(self.cfg.params.t_offer_ms.max(1));
+                        self.offers.push((*w, g.node, at));
+                    }
+                } else {
+                    // Granted to someone else: any upload of ours to this announcer is redundant.
+                    let c = &mut self.carriers[i];
+                    if c.upload.as_ref().map(|u| u.object == *w && u.to == g.node).unwrap_or(false) {
+                        c.upload = None;
+                    }
+                    c.upload_queue.retain(|u| !(u.object == *w && u.to == g.node));
+                    self.offers.retain(|(o, a, _)| !(o == w && *a == g.node));
                 }
             }
         }
+    }
+
+    /// Send due offers: one small HAVE frame per (object, announcer), suppressed if another
+    /// holder's offer for the same object was heard meanwhile.
+    fn offer_check(&mut self) {
+        let now = self.now;
+        let due: Vec<(ShortId, NodeId)> = self.offers.iter().filter(|(_, _, at)| *at <= now).map(|(o, a, _)| (*o, *a)).collect();
+        if due.is_empty() {
+            return;
+        }
+        self.offers.retain(|(_, _, at)| *at > now);
+        let have: Vec<ShortId> = due.iter().map(|(o, _)| *o).take(MAX_GOSSIP_IDS).collect();
+        let g = Gossip { node: self.cfg.id, announcer: self.gossip_announcer_field(), announcer_colour: self.announcer_colour_field(), heard: self.heard_field(), have, want: Vec::new() };
+        let cell = self.cell_carrier();
+        self.enqueue(cell, Frame::Gossip(g));
     }
 
     fn rx_announce(&mut self, m: &ManifestAnnounce, rssi: i16) {
@@ -1316,8 +1599,16 @@ impl Node {
                 if let Some(car) = self.carriers[i].carousel.as_mut() {
                     car.on_nack(n.object, n.block, &n.missing, &self.store);
                 }
-            } else if self.announcer_of(i) == n.node || self.neighbors.get(&n.node).map(|nb| nb.announcer == n.node).unwrap_or(false) {
-                // An announcer is missing pieces of something we have: send exactly those.
+            } else {
+                // An announcer is missing pieces of an object we are its granted uploader for:
+                // send exactly those. Other holders stay silent; the announcer will re-ask if
+                // its uploader is gone.
+                let c = &mut self.carriers[i];
+                let granted = c.upload.as_ref().map(|u| u.object == n.object && u.to == n.node).unwrap_or(false)
+                    || c.upload_queue.iter().any(|u| u.object == n.object && u.to == n.node);
+                if !granted {
+                    continue;
+                }
                 let Some(k) = self.store.block_k(&n.object, n.block) else { continue };
                 let mut list: VecDeque<(u16, u16)> = VecDeque::new();
                 for &(start, count) in &n.missing {
@@ -1328,17 +1619,15 @@ impl Node {
                 if list.is_empty() {
                     continue;
                 }
-                match self.carriers[i].upload.as_mut() {
-                    Some(u) if u.object == n.object && u.list.is_some() => {
+                match c.upload.as_mut() {
+                    Some(u) if u.object == n.object && u.to == n.node && u.list.is_some() => {
                         u.list.as_mut().unwrap().extend(list);
                     }
-                    Some(u) if u.object == n.object => {
+                    Some(u) if u.object == n.object && u.to == n.node => {
                         // A full pass is in progress; it will cover these.
                     }
                     _ => {
-                        let start_at = self.now + self.rng.below((self.cfg.params.upload_suppress_ms / 4).max(1));
-                        self.carriers[i].upload = Some(Upload { object: n.object, to: n.node, start_at, block: n.block, esi: 0, list: Some(list) });
-                        self.stats.uploads_started += 1;
+                        c.upload_queue.push_front(Upload { object: n.object, to: n.node, start_at: self.now, block: n.block, esi: 0, list: Some(list) });
                     }
                 }
             }
@@ -1346,8 +1635,10 @@ impl Node {
     }
 }
 
-/// Announcer id used for the common meeting-dwell sequence.
+/// Key of the common meeting-dwell sequence.
 pub const MEETING_ID: NodeId = NodeId(0xFFFF_FFFF);
+/// Key of the shared base sequence that coloured announcers shift.
+pub const BASE_ID: NodeId = NodeId(0xFFFF_FFFE);
 
 /// Pseudo-random hop sequence per announcer (splitmix64 of announcer id and dwell index).
 /// Two announcers' sequences coincide on about one dwell in `n`, which is how they discover

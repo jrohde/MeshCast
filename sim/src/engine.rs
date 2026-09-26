@@ -114,7 +114,9 @@ impl Engine {
                 airtime_ms: vec![0; phys.len()],
             });
         }
-        let mut e = Engine { nodes, phys, heap: BinaryHeap::new(), seq: 0, tx_seq: 0, loss, reach, recent: HashMap::new(), txs: HashMap::new(), now: 0, metrics: Metrics::default(), verbose: false };
+        let mut metrics = Metrics::default();
+        metrics.per_node_bulk = vec![(0, 0); n];
+        let mut e = Engine { nodes, phys, heap: BinaryHeap::new(), seq: 0, tx_seq: 0, loss, reach, recent: HashMap::new(), txs: HashMap::new(), now: 0, metrics, verbose: false };
         for i in 0..n {
             e.schedule_wake(i, 1);
         }
@@ -278,6 +280,8 @@ impl Engine {
         self.metrics.frames_sent += 1;
         if frame_type == FrameType::Bulk {
             self.metrics.bulk_sent += 1;
+            let ann = self.nodes[from].node.role(carrier) == meshcast_core::node::Role::Announcer;
+            self.metrics.bulk_sent_by[ann as usize] += 1;
         }
         self.nodes[from].airtime_ms[carrier] += airtime_ms as u64;
         {
@@ -289,6 +293,11 @@ impl Engine {
         let mut candidates = Vec::new();
         let reach = std::mem::take(&mut self.reach[from][carrier]);
         let trace = self.verbose && std::env::var("MESHCAST_TRACE").is_ok();
+        if trace {
+            if let Ok(Frame::Gossip(g)) = Frame::decode(&bytes) {
+                eprintln!("t={} GOSSIP from {} ann={:?} have={:?} want={:?} heard={:?}", now, from, g.announcer, g.have, g.want, g.heard);
+            }
+        }
         for &(j, rx) in &reach {
             if !self.nodes[j].alive {
                 continue;
@@ -327,7 +336,7 @@ impl Engine {
         let now = self.now;
         // Prune the recent list for this (carrier, channel) and collect overlapping transmissions.
         let key = (tx.carrier, tx.channel);
-        let mut overlapping: Vec<(usize, Millis, Millis)> = Vec::new();
+        let mut overlapping: Vec<(usize, Millis, Millis, u64)> = Vec::new();
         if let Some(q) = self.recent.get_mut(&key) {
             q.retain(|other| *other == id || self.txs.get(other).map(|t| t.end + MAX_AIRTIME_MS >= now).unwrap_or(false));
             for other in q.iter() {
@@ -336,7 +345,7 @@ impl Engine {
                 }
                 if let Some(t) = self.txs.get(other) {
                     if t.start < tx.end && t.end > tx.start {
-                        overlapping.push((t.from, t.start, t.end));
+                        overlapping.push((t.from, t.start, t.end, *other));
                     }
                 }
             }
@@ -359,20 +368,53 @@ impl Engine {
                 continue;
             }
             let mut worst = f64::NEG_INFINITY;
-            for &(from2, _, _) in &overlapping {
+            let mut worst_from = usize::MAX;
+            let mut worst_id = 0u64;
+            for &(from2, _, _, id2) in &overlapping {
                 if from2 == j || from2 == tx.from {
                     continue;
                 }
                 let p = self.rx_dbm(from2, j, tx.carrier);
                 if p >= sens - 10.0 && p > worst {
                     worst = p;
+                    worst_from = from2;
+                    worst_id = id2;
                 }
             }
             if worst > f64::NEG_INFINITY && rx - worst < phy_capture {
                 self.metrics.frames_collided += 1;
+                if tx.frame_type == FrameType::Bulk {
+                    let a = self.nodes[tx.from].node.role(tx.carrier) == meshcast_core::node::Role::Announcer;
+                    let b = self.nodes[worst_from].node.role(tx.carrier) == meshcast_core::node::Role::Announcer;
+                    self.metrics.bulk_collision_kinds[a as usize][b as usize] += 1;
+                    if !a && !b {
+                        let same = match (&decoded, self.txs.get(&worst_id).and_then(|t| Frame::decode(&t.bytes).ok())) {
+                            (Some(Frame::Bulk(x)), Some(Frame::Bulk(y))) => x.object == y.object,
+                            _ => false,
+                        };
+                        if same {
+                            self.metrics.upload_collision_same_object += 1;
+                        } else {
+                            self.metrics.upload_collision_other_object += 1;
+                        }
+                    }
+                }
+                let meeting = (tx.start / 20_000) % 5 == 0;
+                let ft = tx.frame_type as usize;
+                if meeting {
+                    self.metrics.collided_meeting[ft] += 1;
+                } else {
+                    self.metrics.collided_other[ft] += 1;
+                }
+                if tx.frame_type == FrameType::Bulk {
+                    self.metrics.per_node_bulk[j].1 += 1;
+                }
                 continue;
             }
             delivered += 1;
+            if tx.frame_type == FrameType::Bulk {
+                self.metrics.per_node_bulk[j].0 += 1;
+            }
             let actions = match &decoded {
                 Some(f) => self.nodes[j].node.handle_frame(now, tx.carrier, f, rx.round() as i16),
                 None => self.nodes[j].node.handle(Event::Rx { now, carrier: tx.carrier, bytes: &tx.bytes, rssi_dbm: rx.round() as i16 }),
@@ -386,7 +428,7 @@ impl Engine {
         }
         // Later-ending frames that overlapped this one must still see it: keep an ended stub
         // (no payload, no candidates) until it is older than the longest possible frame.
-        let stub = Transmission { id: tx.id, from: tx.from, carrier: tx.carrier, channel: tx.channel, start: tx.start, end: tx.end, bytes: Vec::new(), frame_type: tx.frame_type, candidates: Vec::new() };
+        let stub = Transmission { id: tx.id, from: tx.from, carrier: tx.carrier, channel: tx.channel, start: tx.start, end: tx.end, bytes: tx.bytes.clone(), frame_type: tx.frame_type, candidates: Vec::new() };
         self.txs.insert(id, stub);
         self.recent.entry(key).or_default().push_back(id);
         let cutoff = now.saturating_sub(MAX_AIRTIME_MS);

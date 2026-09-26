@@ -180,12 +180,21 @@ announcer's carousel answers from its front queue; a holder whose upload the ann
 answers with exactly those symbols. Stall detection is time-based, not round-based, so it also
 works when the carousel is idle.
 
-**Who uploads.** Any node that holds an object complete may answer a WANT or NACK from *any*
-announcer it hears, its own or a neighbouring cell's; that is how content crosses cells whose
-followers do not overlap. To keep it to one uploader, a holder waits a random time (up to
-`T_suppress`, shorter for its own announcer) and gives up if it hears anyone else sending the
-object meanwhile: the suppression rule of reliable multicast. Uploads follow the asking
-announcer's hop sequence.
+**Who uploads: ask, offer, grant, send.** An announcer's WANT entry is either an *open ask*
+(`grant = NONE`) or a *grant* naming one uploader. Any node that holds the object, in the
+announcer's own cell or a neighbouring one, answers an open ask with an *offer*: one small GOSSIP
+carrying HAVE, after a random delay of up to `T_offer`, and not at all if it hears another
+holder's offer first. The announcer grants the first offer it hears and names that holder in its
+next WANT; only the named holder uploads, one object at a time (further grants queue), on the
+announcer's channel and in its slot. A grant lapses after `T_grant` without a symbol arriving,
+and the ask becomes open again. NACKs from an announcer are answered only by its granted
+uploader. This is the DHCP pattern, and it replaced "any holder answers after a random wait",
+which the simulator showed producing fourteen uploads per object per cell among holders that
+could not hear each other's suppression.
+
+**Ask only for what is not coming.** An announcer's WANT lists objects that have received no
+symbol for `T_nack_stall`; an object whose symbols are arriving is not asked for again, and a
+holder whose granted upload is flowing is not asked for a second object until it is done.
 
 **Fresh before repeated.** The first copy of an object into a cell (an upload, or the carousel's
 first pass) is worth more than its second and third pass. Fresh content is paced at the full
@@ -284,9 +293,23 @@ both pseudo-random (`channel = splitmix64(id, dwell_index) mod n`, dwell `T_dwel
   HAVE, manifest announcements) is timed to it, and so every cell hears every other cell's needs
   and offers.
 
-The announcer sends a beacon at every dwell start (2 ms) on whichever sequence is active, so a
-node with no announcer finds one by staying on one channel: any announcer visits it about once
-per cycle, and the meeting dwell brings all of them to the same channel regardless.
+The announcer sends a beacon at every dwell start (2 ms, with a small random offset so that
+announcers hidden from each other do not collide at the meeting dwell) on whichever sequence is
+active, so a node with no announcer finds one by staying on one channel: any announcer visits it
+about once per cycle, and the meeting dwell brings all of them to the same channel regardless.
+The meeting dwell carries control frames only; carousels pause for it.
+
+**Conflict colouring.** Two announcers whose carousels are both heard by some follower are *in
+conflict*; they usually cannot hear each other. The follower is the only node that knows, so it
+reports the announcers it hears besides its own, with the colour each announced, in its gossip:
+once when it first hears a new one or sees one change colour (within `T_report_min`), and every
+half `conflict_ttl` while the situation lasts. Each announcer keeps its conflict set and colours
+itself greedily: the lowest colour not announced by any conflicting announcer with a lower id
+(lower ids keep their colour, higher ids move). On a multi-channel carrier the content plane is
+one shared base sequence shifted by the colour, so conflicting announcers are never on the same
+channel; when there are more colours than channels, colour `c` also selects time slot
+`c div n` of `T_slot`, and single-channel carriers are simply `n = 1`: every colour is a slot.
+One mechanism, in frequency where possible and in time where necessary.
 
 EtherDiscipline's per-200 kHz accounting is unchanged: a random sequence spends about `1/n` of
 the airtime in each slice. (Sequences derived by a fixed offset per announcer never coincide and
@@ -351,7 +374,10 @@ arrives a few minutes later than it otherwise would. That is the entire user-vis
 | own share | `min(regulatory, occ_high_own / (announcers heard + 1))` | content pacing ceiling; derived, not configured |
 | `T_dwell` | 20 s | hop dwell on frequency-agile carriers |
 | `meet_every` | 5 | every fifth dwell is on the common control-plane sequence |
-| `T_suppress` | 20 s (5 s for own announcer) | random wait before answering a WANT, cancelled if someone else answers |
+| `T_offer` | 0–3 s | random delay before a holder offers on an open ask |
+| `T_grant` | 10 min | a grant without any symbol arriving lapses |
+| `T_slot` | 10 s | time slot when announcers in conflict share a channel |
+| `conflict_ttl`, `T_report_min` | 30 min, 60 s | conflict report lifetime and follower report rate limit |
 | `T_jitter` (tx) | 0–500 ms | random delay before control/metadata frames |
 | repair overhead (v1) | 10 % | RaptorQ repair symbols per block |
 | gossip cap | 12 have + 12 want | per frame |
@@ -370,8 +396,12 @@ arrives a few minutes later than it otherwise would. That is the entire user-vis
    bulk carrier per node so far.
 9. zsync-style delta transfer for updated objects (web bundles, firmware): the receiver compares
    the block lists of the old and new object and wants only the changed symbols.
-10. Overlapping cells on a carrier without duty cycle (ESP-NOW): announcers that cannot hear each
-    other collide at the followers between them, and fair-share pacing alone does not fix it
-    (FEASIBILITY.md §7.5.0). Candidate: announcers take turns in a cycle derived from the
-    beacons they and their followers hear (emergent time division), so that at most one carousel
-    is audible at any follower at a time.
+10. Overlapping cells on a carrier without duty cycle (ESP-NOW) remain the weakest case: with
+    conflict colouring and granted uploads a 50-node neighbourhood on 1 km² reaches 88 % of
+    follower-completions in 6 hours, against 100 % in 1.8 hours on band O, with a 24 % bulk
+    collision rate and about six uploads per object per cell instead of one (grants lapse when an
+    uploader's frames are lost, and the re-ask brings in another holder). The remaining problem
+    is pull-based cross-cell fetching among hidden nodes. Candidates: grants acknowledged by the
+    uploader so they do not lapse while queued; announcers pulling only from announcers they hear
+    at the meeting dwell rather than from arbitrary holders; or accepting that on 2.4 GHz a
+    sub-GHz carrier carries content between cells. See FEASIBILITY.md §7.5.0.

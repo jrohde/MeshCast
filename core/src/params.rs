@@ -113,6 +113,16 @@ pub struct Params {
     /// Holders wait a random time up to this before uploading to an announcer that asked, and
     /// give up if they hear someone else uploading the same object meanwhile.
     pub upload_suppress_ms: Millis,
+    /// Time slot on single-channel carriers when announcers in conflict take turns.
+    pub t_slot_ms: Millis,
+    /// A reported conflict between announcers is forgotten after this long.
+    pub conflict_ttl_ms: Millis,
+    /// Minimum interval between two conflict reports from the same follower.
+    pub t_report_min_ms: Millis,
+    /// A granted uploader that has not delivered a symbol within this time loses the grant.
+    pub t_grant_ms: Millis,
+    /// Holders answer an open ask with an offer after a random delay up to this.
+    pub t_offer_ms: Millis,
 }
 
 impl Default for Params {
@@ -136,6 +146,11 @@ impl Default for Params {
             tx_jitter_ms: 500,
             meet_every: 5,
             upload_suppress_ms: 20_000,
+            t_slot_ms: 10_000,
+            conflict_ttl_ms: 1_800_000,
+            t_report_min_ms: 60_000,
+            t_grant_ms: 600_000,
+            t_offer_ms: 3_000,
         }
     }
 }
