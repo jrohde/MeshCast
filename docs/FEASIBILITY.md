@@ -242,16 +242,17 @@ challenges and takes the role back. Listeners keep playing their local copies th
 | Bulk carrier | Announcers at end | Role events / day | Tracks fully delivered (of 50) | Follower-completions | Mean of per-track median completion | Bulk occupancy p50 / max |
 |---|---|---|---|---|---|---|
 | GFSK band O, before fresh-content priority | 5 | 6 645 | 45 | 94 % | 9.4 h | 20 % / 82 % |
-| GFSK band O (one 250 kHz channel, 500 mW, 10 %) | 5 | 14 637 | **50** | **100 %** | 10.5 h | 32 % / 92 % |
-| GFSK band L (15 channels, 25 mW, polite) | 26 | 4 791 | **50** | **100 %** | 11.4 h | 17 % / 74 % |
+| GFSK band O, fair share, before colouring and grants | 5 | 14 637 | 50 | 100 % | 10.5 h | 32 % / 92 % |
+| GFSK band L, fair share, before colouring and grants | 26 | 4 791 | 50 | 100 % | 11.4 h | 17 % / 74 % |
+| GFSK band O, final (colouring, slots, granted uploads) | 5 | 9 949 | 49 | **100.0 %** (9 949 of 9 950) | **7.3 h** | 4 % / 100 % |
+| GFSK band L, final | see below | | | | | |
 | ESP-NOW LR (460 m cells) | not connected at this density: see §7.5.1 | | | | | |
 
-Both sub-GHz carriers deliver every track to every follower within the day (final code, with
-the derived fair-share ceiling). Band O does it with five announcers sharing one channel, so the
-town is one collision domain: occupancy is high and roles change often (most role events are
-followers moving between overlapping cells, not announcer changes). Band L forms 26 smaller cells
-on 15 channels at 25 mW, with half the occupancy and a third of the churn, at a similar delivery
-time; it is the better-behaved band in a town, at the price of shorter reach per cell. Content crosses cells through bridge nodes that hear two
+Band O: with the final code the five announcers take turns in time slots on the one channel,
+which brought the median from 10.5 to 7.3 hours and the typical occupancy from 32 % to 4 %,
+with the same complete delivery. Most role events are followers moving between overlapping
+cells, not announcer changes. Band L forms about 25 smaller cells on 15 channels at 25 mW; before
+colouring and grants it delivered everything in 11.4 hours; the final figure is below. Content crosses cells through bridge nodes that hear two
 carousels and through holders answering neighbouring announcers' WANTs; a track published at one
 edge reaches the far edge after several hours.
 
