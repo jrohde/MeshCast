@@ -428,7 +428,8 @@ fn run(spec: ScenarioSpec, common: &Common, failover: Option<(f64, f64)>) {
             let s = &n.node.stats;
             let line = format!("tx[ctl/meta/content]={:?} rx={} bad={} cca_defer={} disc_wait={} sym_new={} sym_dup={} nacks={} wants={} uploads={} manifests={} occ={}‰ rate={}‰ role={:?} colour={:?} reports={} noted={} conflicts={:?}",
                 s.tx_frames, s.rx_frames, s.rx_bad, s.cca_deferrals, s.discipline_waits, s.symbols_new, s.symbols_dup, s.nacks_sent, s.wants_sent, s.uploads_started, s.manifests_adopted,
-                n.node.occupancy(bulk_c), n.node.rate(bulk_c), n.node.role(bulk_c), n.node.colouring(), s.conflict_reports_sent, s.conflicts_noted, n.node.conflict_set());
+                n.node.occupancy(bulk_c), n.node.rate(bulk_c), n.node.role(bulk_c), n.node.colouring(), s.conflict_reports_sent, s.conflicts_noted, n.node.conflict_set())
+                + &format!(" defer[meet/slot/reg/bucket/class/cca]={:?}", s.defer_ms);
             (i, line)
         })
         .collect();

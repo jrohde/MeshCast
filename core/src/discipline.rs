@@ -21,6 +21,10 @@ struct TxRecord {
     hi_slice: u16,
 }
 
+/// Gap up to which two frames on the same frequency count as one transmission rather than two.
+/// Below this a radio has not meaningfully left the air: it is turnaround, not a pause.
+const BURST_GAP_MS: Millis = 5;
+
 #[derive(Clone, Debug)]
 pub struct BandAccount {
     pub band: &'static Band,
@@ -64,10 +68,14 @@ impl Accounting {
         self.bands.get(band).map(|b| b.rule).unwrap_or(Access::None)
     }
 
+    /// The 200 kHz slices a transmission occupies. The upper edge is exclusive: a signal that
+    /// ends exactly on a slice boundary does not occupy the slice above it. (With inclusive
+    /// edges every channel was charged to two slices and every slice shared by two channels,
+    /// halving the usable budget of a channelised polite band.)
     fn slices(band: &Band, center_hz: u32, bw_hz: u32) -> (u16, u16) {
         let lo = center_hz.saturating_sub(bw_hz / 2).saturating_sub(band.low_hz);
-        let hi = (center_hz + bw_hz / 2).saturating_sub(band.low_hz);
-        ((lo / SLICE_HZ) as u16, (hi / SLICE_HZ) as u16)
+        let hi = (center_hz + bw_hz / 2).saturating_sub(band.low_hz).saturating_sub(1);
+        ((lo / SLICE_HZ) as u16, (hi / SLICE_HZ).max(lo / SLICE_HZ) as u16)
     }
 
     fn prune(&mut self, now: Millis) {
@@ -149,10 +157,19 @@ impl Accounting {
                 if dur_ms > ton_max_ms {
                     return Verdict::Never;
                 }
-                // Minimum off time on the same nominal frequency.
+                // A transmission may last up to Ton_max, and only after it ends does the
+                // minimum off time apply. Frames sent back to back (within a turnaround) are
+                // one transmission; sending a single frame and then pausing 100 ms would waste
+                // five sixths of the channel.
                 if let Some(last) = b.log.iter().rev().find(|r| r.center_hz == center_hz) {
                     let end = last.start + last.dur_ms as Millis;
-                    if now < end + toff_min_ms as Millis {
+                    if now <= end + BURST_GAP_MS {
+                        // Continuing the current transmission: only Ton_max limits it.
+                        let burst_start = Self::burst_start(b, center_hz, now);
+                        if now + dur_ms as Millis > burst_start + ton_max_ms as Millis {
+                            return Verdict::Wait(end + toff_min_ms as Millis - now);
+                        }
+                    } else if now < end + toff_min_ms as Millis {
                         return Verdict::Wait(end + toff_min_ms as Millis - now);
                     }
                 }
@@ -176,6 +193,36 @@ impl Accounting {
                 }
             }
         }
+    }
+
+    /// Start of the unbroken run of transmissions on `center_hz` that ends at `now`.
+    fn burst_start(b: &BandAccount, center_hz: u32, now: Millis) -> Millis {
+        let mut start = now;
+        for r in b.log.iter().rev().filter(|r| r.center_hz == center_hz) {
+            let end = r.start + r.dur_ms as Millis;
+            if end + BURST_GAP_MS < start {
+                break;
+            }
+            start = r.start;
+        }
+        start
+    }
+
+    /// On-time already accumulated in the transmission that would continue at `now`, and when
+    /// it started. Zero if a new transmission would begin.
+    pub fn burst_on_ms(&self, band: usize, center_hz: u32, now: Millis) -> u32 {
+        let Some(b) = self.bands.get(band) else { return 0 };
+        let mut total = 0u32;
+        let mut edge = now;
+        for r in b.log.iter().rev().filter(|r| r.center_hz == center_hz) {
+            let end = r.start + r.dur_ms as Millis;
+            if end + BURST_GAP_MS < edge {
+                break;
+            }
+            total += r.dur_ms;
+            edge = r.start;
+        }
+        total
     }
 
     pub fn record(&mut self, band: usize, start: Millis, dur_ms: u32, center_hz: u32, bw_hz: u32) {
@@ -230,6 +277,25 @@ mod tests {
     }
 
     #[test]
+    fn polite_burst_then_pause() {
+        let mut a = Accounting::new(&EU868, &[0, 1, 0, 0, 0, 0, 0]);
+        let (l, _) = EU868.band("L").unwrap();
+        let c = 865_100_000;
+        // Twenty-millisecond frames back to back form one transmission of up to Ton_max = 1 s.
+        let mut now = 0;
+        let mut frames = 0;
+        while let Verdict::Ok = a.may_transmit(l, now, 20, c, 200_000) {
+            a.record(l, now, 20, c, 200_000);
+            now += 20;
+            frames += 1;
+        }
+        assert_eq!(frames, 50, "a 1 s transmission holds fifty 20 ms frames");
+        // Then the channel must rest for Toff_min.
+        assert!(matches!(a.may_transmit(l, now, 20, c, 200_000), Verdict::Wait(w) if w == 100));
+        assert_eq!(a.may_transmit(l, now + 100, 20, c, 200_000), Verdict::Ok);
+    }
+
+    #[test]
     fn polite_band_l_per_slice() {
         let mut a = Accounting::new(&EU868, &[0, 1, 0, 0, 0, 0, 0]);
         let (l, _) = EU868.band("L").unwrap();
@@ -237,6 +303,7 @@ mod tests {
         assert_eq!(a.may_transmit(l, 0, 2000, c, 200_000), Verdict::Never); // > Ton_max
         assert_eq!(a.may_transmit(l, 0, 500, c, 200_000), Verdict::Ok);
         a.record(l, 0, 500, c, 200_000);
+        // 50 ms after that transmission ended: too soon for a new one, and too late to extend it.
         assert!(matches!(a.may_transmit(l, 550, 500, c, 200_000), Verdict::Wait(_))); // Toff_min
         // Another channel is free immediately.
         assert_eq!(a.may_transmit(l, 550, 500, c + 400_000, 200_000), Verdict::Ok);

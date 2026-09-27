@@ -180,6 +180,13 @@ announcer's carousel answers from its front queue; a holder whose upload the ann
 answers with exactly those symbols. Stall detection is time-based, not round-based, so it also
 works when the carousel is idle.
 
+**A repair is an ask.** A node can reach 95 % of an object by overhearing a neighbouring cell's
+carousel and then want the rest, although nobody was ever granted to it. So a NACK is answered by
+the granted uploader at once, and by any other holder after a wait: the wait grows with how many
+of its own neighbours the holder hears better than the asker, so **whoever hears the asker best
+answers first**, and hearing anyone send those symbols cancels an answer that has not begun.
+No absolute signal level enters into it; the rank is relative to the holder's own neighbourhood.
+
 **Who uploads: ask, offer, grant, send.** An announcer's WANT entry is either an *open ask*
 (`grant = NONE`) or a *grant* naming one uploader. Any node that holds the object, in the
 announcer's own cell or a neighbouring one, answers an open ask with an *offer*: one small GOSSIP
@@ -389,6 +396,7 @@ arrives a few minutes later than it otherwise would. That is the entire user-vis
 | `T_dwell` | 20 s | hop dwell on frequency-agile carriers |
 | `meet_every` | 5 | every fifth dwell is on the common control-plane sequence |
 | `T_offer` | 0–3 s | random delay before a holder offers on an open ask |
+| repair wait | `T_suppress × (neighbours heard better than the asker) / (all neighbours)` + jitter | ungranted NACK answer |
 | `T_grant` | 10 min | a grant without any symbol arriving lapses |
 | `T_slot` | 10 s | time slot when announcers in conflict share a channel |
 | `conflict_ttl`, `T_report_min` | 30 min, 60 s | conflict report lifetime and follower report rate limit |

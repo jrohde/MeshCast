@@ -99,6 +99,9 @@ pub struct Stats {
     pub manifests_adopted: u64,
     pub conflict_reports_sent: u64,
     pub conflicts_noted: u64,
+    /// Why a ready content frame was not sent, in milliseconds of deferral:
+    /// [meeting dwell, announcer slot, regulatory, token bucket, class gate, CCA].
+    pub defer_ms: [u64; 6],
     /// Bulk frames received for objects we do not want, know or serve: airtime spent on us for nothing.
     pub bulk_uninterested: u64,
 }
@@ -149,6 +152,18 @@ struct Progress {
     last_progress: Millis,
     last_nack: Millis,
     last_want: Millis,
+}
+
+impl CarrierRt {
+    /// Start an upload, or line it up behind the one in progress. Urgent work (a repair) goes to
+    /// the head of the queue. One place decides, so an upload can never be queued behind nothing.
+    fn add_upload(&mut self, u: Upload, urgent: bool) {
+        match (&self.upload, urgent) {
+            (None, _) => self.upload = Some(u),
+            (Some(_), true) => self.upload_queue.push_front(u),
+            (Some(_), false) => self.upload_queue.push_back(u),
+        }
+    }
 }
 
 struct CarrierRt {
@@ -1132,9 +1147,14 @@ impl Node {
 
     /// Share of airtime the bulk carrier may pace itself to. Two ceilings, the lower wins:
     /// the regulatory budget minus a reserve for control frames on the same band, and a fair
-    /// share of the channel's occupancy target among the announcers we can hear (ourselves
-    /// included). The second is what keeps eight ESP-NOW announcers on one channel from each
-    /// claiming half of it; on duty-cycled bands the first usually binds.
+    /// share of the channel's occupancy target among the announcers that share our airtime.
+    ///
+    /// After colouring, a conflicting announcer has a different colour, so it sits on another
+    /// channel or in another slot and does not share our airtime at all; only announcers that
+    /// colouring could not separate from us (same colour) divide the target. Dividing by every
+    /// announcer we hear, as an earlier version did, throttled well-separated announcers to a
+    /// fraction of a budget they were entitled to. What colouring has not yet covered is caught
+    /// by the reactive side of EtherFatsoen: the AIMD rate still halves on measured occupancy.
     fn budget_for(&self, carrier: usize) -> u16 {
         let c = &self.carriers[carrier];
         let reserve = 1000u32.saturating_sub(self.cfg.params.control_reserve as u32);
@@ -1148,8 +1168,9 @@ impl Node {
             },
             None => self.cfg.params.fatsoen.max_own_share,
         };
-        let heard = c.election.as_ref().map(|e| e.announcers_heard(self.now, self.cfg.id)).unwrap_or(0) as u32;
-        let fair = self.cfg.params.fatsoen.occ_high_own as u32 / (heard + 1);
+        let mine = self.my_colour();
+        let sharing = self.conflicts.values().filter(|(_, colour)| *colour == mine).count() as u32;
+        let fair = self.cfg.params.fatsoen.occ_high_own as u32 / (sharing + 1);
         regulatory.min(fair as u16).max(1)
     }
 
@@ -1174,7 +1195,12 @@ impl Node {
                 Some(Cand::Queue(best))
             } else if is_ann {
                 c.carousel.as_mut().and_then(|k| k.peek(&self.store, now)).map(Cand::Carousel)
-            } else if let Some(u) = c.upload.as_mut() {
+            } else if let Some(u) = {
+                if c.upload.is_none() {
+                    c.upload = c.upload_queue.pop_front();
+                }
+                c.upload.as_mut()
+            } {
                 if u.start_at > now {
                     return;
                 }
@@ -1247,10 +1273,13 @@ impl Node {
             // turns: content (carousel or upload) runs only in its announcer's slot.
             let dwell = self.cfg.params.dwell_ms.max(1);
             if self.carriers[i].p.channels.len() > 1 && self.is_meeting_dwell(now / dwell) {
-                self.carriers[i].pace_until = (now / dwell + 1) * dwell;
+                let t = (now / dwell + 1) * dwell;
+                self.stats.defer_ms[0] += t - now;
+                self.carriers[i].pace_until = t;
                 return;
             }
             if let Some(t) = self.slot_wait(i, colour, colours, now) {
+                self.stats.defer_ms[1] += t.saturating_sub(now);
                 self.carriers[i].pace_until = t;
                 return;
             }
@@ -1269,6 +1298,9 @@ impl Node {
         };
         if !self.carriers[i].fatsoen.allows(class, fresh) {
             self.carriers[i].pace_until = now + 1000;
+            if class == Class::Content {
+                self.stats.defer_ms[4] += 1000;
+            }
             return;
         }
         // Random jitter before control/metadata frames (see Params::tx_jitter_ms). Content is
@@ -1291,8 +1323,17 @@ impl Node {
             match self.discipline.may_transmit(band, now, airtime, center, bw) {
                 Verdict::Ok => {}
                 Verdict::Wait(w) => {
-                    self.carriers[i].pace_until = now + w.min(60_000);
+                    // Waiting is for a radio that has one channel. On a frequency-agile carrier
+                    // the next dwell is a different channel with its own budget, so never defer
+                    // past the end of this dwell.
+                    let mut w = w.min(60_000);
+                    if self.carriers[i].p.channels.len() > 1 {
+                        let dwell = self.cfg.params.dwell_ms.max(1);
+                        w = w.min((now / dwell + 1) * dwell - now);
+                    }
+                    self.carriers[i].pace_until = now + w;
                     self.stats.discipline_waits += 1;
+                    self.stats.defer_ms[2] += w;
                     return;
                 }
                 Verdict::Never => {
@@ -1304,14 +1345,34 @@ impl Node {
         }
         if class == Class::Content {
             let budget = self.budget_for(i);
+            // Politeness bounds a transmission before the law does. Under polite access every
+            // transmission costs a fixed pause afterwards, so a node that sends one frame at a
+            // time throws away most of the channel; but a node that transmits for the full
+            // second the law allows is deaf for that second, and an announcer must hear its
+            // uploaders. So a transmission lasts just long enough to earn its own pause at our
+            // allowed duty: burst = pause x p / (1 - p). Take what you need, not what you may.
+            if let Some(band) = self.carriers[i].p.band {
+                if let Access::Polite { ton_max_ms, toff_min_ms, .. } = self.discipline.rule(band) {
+                    let p = budget.min(999) as u64;
+                    let target = ((toff_min_ms as u64 * p) / (1000 - p)).clamp(airtime as u64, ton_max_ms as u64) as u32;
+                    let center = self.carriers[i].p.channels.get(channel as usize).copied().unwrap_or(0);
+                    if self.discipline.burst_on_ms(band, center, now) + airtime > target {
+                        self.carriers[i].pace_until = now + toff_min_ms as Millis;
+                        self.stats.defer_ms[2] += toff_min_ms as Millis;
+                        return;
+                    }
+                }
+            }
             if let Err(w) = self.carriers[i].fatsoen.take_airtime(now, airtime, budget, fresh) {
                 self.carriers[i].pace_until = now + w;
+                self.stats.defer_ms[3] += w;
                 return;
             }
         }
         if cca_busy {
-            self.carriers[i].fatsoen.cca_busy(now, &mut self.rng);
+            let until = self.carriers[i].fatsoen.cca_busy(now, &mut self.rng);
             self.stats.cca_deferrals += 1;
+            self.stats.defer_ms[5] += until.saturating_sub(now);
             return;
         }
         self.carriers[i].fatsoen.cca_clear();
@@ -1412,6 +1473,18 @@ impl Node {
         n
     }
 
+    /// How many of our neighbours we hear better than `rssi`, as a fraction in thousandths.
+    /// Zero means we hear this signal better than anyone else we know. It is a rank, so it needs
+    /// no absolute signal levels and works on any carrier.
+    fn rssi_rank(&self, rssi: i16) -> u64 {
+        let n = self.neighbors.len();
+        if n == 0 {
+            return 0;
+        }
+        let better = self.neighbors.values().filter(|nb| nb.rssi > rssi).count();
+        (better as u64 * 1000) / n as u64
+    }
+
     /// RSSI of our typical (median) neighbour: the yardstick for "same cell". A node that has
     /// heard nobody else considers any peer as close as its typical neighbour.
     fn typical_neighbor_rssi(&self, except: NodeId) -> i16 {
@@ -1458,8 +1531,13 @@ impl Node {
     }
 
     fn rx_bulk(&mut self, _carrier: usize, b: &Bulk, out: &mut Vec<Action>) {
-        // Someone is sending this object: any offer of ours for it is moot.
+        // Someone is sending this object: any offer of ours for it, and any answer we have not
+        // begun, is moot. This is what keeps an ungranted repair to one sender.
         self.offers.retain(|(o, _, _)| *o != b.object);
+        let now = self.now;
+        for c in self.carriers.iter_mut() {
+            c.upload_queue.retain(|u| !(u.object == b.object && u.start_at > now));
+        }
         let interested = self.wants.contains(&b.object) || self.store.is_known(&b.object) || self.is_announcing();
         if !interested {
             self.stats.bulk_uninterested += 1;
@@ -1648,12 +1726,7 @@ impl Node {
                     let active = c.upload.as_ref().map(|u| u.object == *w && u.to == g.node).unwrap_or(false);
                     let queued = c.upload_queue.iter().any(|u| u.object == *w && u.to == g.node);
                     if !active && !queued {
-                        let u = Upload { object: *w, to: g.node, start_at: now, block: 0, esi: 0, list: None };
-                        if c.upload.is_none() {
-                            c.upload = Some(u);
-                        } else {
-                            c.upload_queue.push_back(u);
-                        }
+                        c.add_upload(Upload { object: *w, to: g.node, start_at: now, block: 0, esi: 0, list: None }, false);
                         self.stats.uploads_started += 1;
                     }
                 } else if grant.is_none() {
@@ -1739,20 +1812,25 @@ impl Node {
                     car.on_nack(n.object, n.block, &n.missing, &self.store);
                 }
             } else {
-                // An announcer is missing pieces of an object we are its granted uploader for:
-                // send exactly those. Other holders stay silent; the announcer will re-ask if
-                // its uploader is gone.
+                // A NACK is an ask for a handful of symbols. Our granted uploader answers at
+                // once; any other holder answers after a random wait and gives up if it hears
+                // someone else sending them. A node can reach 95 % of an object by overhearing
+                // a neighbouring cell, and then nobody was ever granted for it: without this
+                // fallback that object would stall for ever, one NACK at a time.
                 let recently = self.granted_to_us.get(&(n.object, n.node)).map(|t| self.now < *t + self.cfg.params.neighbor_ttl_ms).unwrap_or(false);
                 if recently {
                     self.granted_to_us.insert((n.object, n.node), self.now);
                 }
+                // Whoever hears the asker best answers first and silences the rest: an ungranted
+                // repair waits in proportion to how many neighbours we hear better than the
+                // asker, plus a little jitter to separate equals.
+                let w = self.cfg.params.upload_suppress_ms.max(1);
+                let ungranted_delay = (w * self.rssi_rank(rssi)) / 1000 + self.rng.below(w / 10 + 1);
                 let c = &mut self.carriers[i];
                 let granted = recently
                     || c.upload.as_ref().map(|u| u.object == n.object && u.to == n.node).unwrap_or(false)
                     || c.upload_queue.iter().any(|u| u.object == n.object && u.to == n.node);
-                if !granted {
-                    continue;
-                }
+                let start_at = if granted { self.now } else { self.now + ungranted_delay };
                 let Some(k) = self.store.block_k(&n.object, n.block) else { continue };
                 let mut list: VecDeque<(u16, u16)> = VecDeque::new();
                 for &(start, count) in &n.missing {
@@ -1770,8 +1848,12 @@ impl Node {
                     Some(u) if u.object == n.object && u.to == n.node => {
                         // A full pass is in progress; it will cover these.
                     }
+                    _ if c.upload_queue.iter().any(|u| u.object == n.object && u.to == n.node) => {}
                     _ => {
-                        c.upload_queue.push_front(Upload { object: n.object, to: n.node, start_at: self.now, block: n.block, esi: 0, list: Some(list) });
+                        c.add_upload(Upload { object: n.object, to: n.node, start_at, block: n.block, esi: 0, list: Some(list) }, true);
+                        if !granted {
+                            self.stats.uploads_started += 1;
+                        }
                     }
                 }
             }

@@ -95,11 +95,13 @@ Draft parameters:
 
 **Two ceilings, the lower wins.** A node paces its content to the smaller of (a) the regulatory
 budget of the band minus a reserve for control frames, and (b) a fair share of the channel's
-occupancy target among the announcers it can hear, itself included: `occ_target / (heard + 1)`.
-On duty-cycled bands (a) usually binds; on carriers without a duty cycle (ESP-NOW, US 915 MHz) (b)
-is what stops eight announcers on one channel from each claiming half of it. The share is
-derived from what the node hears, never configured; when announcers leave, the survivors' share
-grows by itself.
+occupancy target among the announcers that actually share its airtime: `occ_target / (same
+colour + 1)`. After colouring, a conflicting announcer sits on another channel or in another slot
+and shares nothing with us, so it does not divide our budget; dividing by every announcer heard,
+as an earlier version did, throttled well-separated announcers to a fraction of what they were
+entitled to and cost band L three quarters of its capacity. What colouring has not yet arranged
+is caught by the reactive side: the AIMD rate still halves on measured occupancy. The share is
+derived from what the node hears, never configured.
 
 On a band shared by the control and bulk carriers (EU band O carries both the LoRa control
 channel and the GFSK bulk channel), the regulatory ceiling uses only `1 − control_reserve`
@@ -128,25 +130,43 @@ names one of them, and only that one sends. Suppression alone was tried first an
 that cannot hear each other do not suppress each other, and the simulator counted fourteen
 uploads per object per cell. A grant is explicit and costs two small frames.
 
-### 7. Colour, do not contend
+### 7. A transmission lasts as long as it needs, not as long as it may
+
+Under polite spectrum access every transmission is followed by a mandatory pause on that
+frequency (`Toff_min`, 100 ms in EU band L), and the law allows the transmission itself to last
+up to `Ton_max` (1 s). A node that sends one 20 ms frame and then waits 100 ms throws away five
+sixths of the channel; a node that transmits for the full second is deaf for that second, and an
+announcer that cannot hear is an announcer nobody can upload to. So a transmission is exactly as
+long as it must be to earn its own pause at the node's allowed share:
+
+```
+burst = Toff_min × p / (1 − p)      // p = our allowed fraction of the channel
+```
+
+At a 37 % share and a 100 ms pause that is about 60 ms, three frames: enough to reach the legal
+budget, short enough to keep listening. Frames sent back to back within a turnaround are one
+transmission; a gap longer than that starts a new one and owes a new pause.
+
+### 8. Colour, do not contend
 
 Announcers whose carousels overlap at some follower are told so by that follower, and colour
 themselves so that they never share a channel, or, when channels run out, share it in turns.
 See PROTOCOL.md §5.3. Contention (mechanism 1) is the fallback for what colouring did not
 foresee; colouring is the plan.
 
-### 8. Rarest-first
+### 9. Rarest-first
 
 The carousel orders objects by how few nodes report having them (from GOSSIP). Symbols named in
 NACKs go first. The emergent effect is that popular content spreads with the fewest transmissions
 and no node ever repeats what everyone already has. This is BitTorrent's piece-selection rule
 applied to broadcast.
 
-## The six mechanisms are now eight
+## The six mechanisms are now nine
 
-Mechanisms 6 and 7 were added in Phase 0 when the simulator showed content failing to cross
-between cells whose followers do not overlap, and overlapping cells colliding at the followers
-between them; the "six" in older text is a name, not a count.
+Mechanisms 6 to 8 were added during Phase 0 as the simulator showed content failing to cross
+between cells whose followers do not overlap, overlapping cells colliding at the followers
+between them, and a polite band spending five sixths of its capacity on mandatory pauses; the
+"six" in older text is a name, not a count.
 
 ## The one remaining hard problem: hidden nodes
 
