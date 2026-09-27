@@ -238,12 +238,12 @@ impl Election {
     }
 
     pub fn heard_ids(&self, now: Millis, except: NodeId) -> impl Iterator<Item = NodeId> + '_ {
-        self.heard_with_colour(now, except).map(|(id, _)| id)
+        self.heard_with_colour(now, except).map(|(id, _, _)| id)
     }
 
-    pub fn heard_with_colour(&self, now: Millis, except: NodeId) -> impl Iterator<Item = (NodeId, u8)> + '_ {
+    pub fn heard_with_colour(&self, now: Millis, except: NodeId) -> impl Iterator<Item = (NodeId, u8, u8)> + '_ {
         let fresh = self.p.t_beacon_ms * 2 + GRACE_MS;
-        self.heard.iter().filter(move |(id, h)| **id != except && h.last + fresh >= now).map(|(id, h)| (*id, h.colour))
+        self.heard.iter().filter(move |(id, h)| **id != except && h.last + fresh >= now).map(|(id, h)| (*id, h.colour, h.colours))
     }
 
     /// True if this announcer was not in our heard set before (a new neighbour announcer).

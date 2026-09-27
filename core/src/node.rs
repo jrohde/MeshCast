@@ -237,7 +237,7 @@ pub struct Node {
     progress: BTreeMap<ShortId, Progress>,
     /// Announcers reported to be heard together with us by some follower (or heard by us):
     /// our conflict set, with the time of the last report and the colour they announced.
-    conflicts: BTreeMap<NodeId, (Millis, u8)>,
+    conflicts: BTreeMap<NodeId, (Millis, u8, u8)>,
     /// A follower that just heard a new announcer reports the conflict once, soon.
     report_due: bool,
     last_report: Millis,
@@ -399,26 +399,32 @@ impl Node {
     /// Our colour: greedy distributed colouring. Lower ids keep their colour; we take the
     /// smallest colour not announced by any conflicting announcer with a lower id.
     fn my_colour(&self) -> u8 {
-        let taken: Vec<u8> = self.conflicts.iter().filter(|(id, _)| id.0 < self.cfg.id.0).map(|(_, (_, c))| *c).collect();
+        let taken: Vec<u8> = self.conflicts.iter().filter(|(id, _)| id.0 < self.cfg.id.0).map(|(_, (_, c, _))| *c).collect();
         (0u8..=254).find(|c| !taken.contains(c)).unwrap_or(255)
     }
 
-    /// Number of colours in use around us: one more than the highest colour we know of.
+    /// Length of the slot cycle: one more than the highest colour we know of, but never less
+    /// than what any announcer we conflict with believes. Announcers that take turns must agree
+    /// on the length of the cycle or their turns overlap, and each of them sees a different part
+    /// of the conflict graph, so the larger count is passed on until they agree.
     fn colours(&self) -> u8 {
-        let max = self.conflicts.values().map(|(_, c)| *c).max().unwrap_or(0);
-        max.max(self.my_colour()).saturating_add(1)
+        let mut k = self.my_colour().saturating_add(1);
+        for (_, (_, colour, colours)) in self.conflicts.iter() {
+            k = k.max(colour.saturating_add(1)).max(*colours);
+        }
+        k
     }
 
-    fn note_conflict(&mut self, other: NodeId, colour: u8) {
+    fn note_conflict(&mut self, other: NodeId, colour: u8, colours: u8) {
         if other != self.cfg.id && !other.is_none() {
-            self.conflicts.insert(other, (self.now, colour));
+            self.conflicts.insert(other, (self.now, colour, colours));
             self.stats.conflicts_noted += 1;
         }
     }
 
     fn expire_conflicts(&mut self) {
         let from = self.now.saturating_sub(self.cfg.params.conflict_ttl_ms);
-        self.conflicts.retain(|_, (t, _)| *t >= from);
+        self.conflicts.retain(|_, (t, _, _)| *t >= from);
     }
 
     /// Announcers that share a channel take turns: our carousel runs only in our slot.
@@ -511,7 +517,7 @@ impl Node {
 
     /// Conflict set as (id, colour) for diagnostics.
     pub fn conflict_set(&self) -> Vec<(u32, u8)> {
-        self.conflicts.iter().map(|(id, (_, c))| (id.0, *c)).collect()
+        self.conflicts.iter().map(|(id, (_, c, _))| (id.0, *c)).collect()
     }
 
     pub fn follow(&mut self, chan: ChannelId) {
@@ -735,10 +741,10 @@ impl Node {
             let ttl = self.cfg.params.neighbor_ttl_ms;
             self.granted_to_us.retain(|_, t| *t + ttl >= now);
             // Announcers we hear directly are in conflict with us too.
-            let heard: Vec<(NodeId, u8)> = self.carriers.iter().filter_map(|c| c.election.as_ref()).flat_map(|e| e.heard_with_colour(now, self.cfg.id).collect::<Vec<_>>()).collect();
+            let heard: Vec<(NodeId, u8, u8)> = self.carriers.iter().filter_map(|c| c.election.as_ref()).flat_map(|e| e.heard_with_colour(now, self.cfg.id).collect::<Vec<_>>()).collect();
             if self.is_announcing() {
-                for (id, colour) in heard {
-                    self.note_conflict(id, colour);
+                for (id, colour, colours) in heard {
+                    self.note_conflict(id, colour, colours);
                 }
             }
             self.score = self.compute_score();
@@ -956,11 +962,11 @@ impl Node {
 
     /// Other announcers we hear on the cell carrier besides the one we follow (or besides
     /// ourselves): the conflict report.
-    fn heard_field(&self) -> Vec<(NodeId, u8)> {
+    fn heard_field(&self) -> Vec<(NodeId, u8, u8)> {
         let Some(i) = self.primary_bulk() else { return Vec::new() };
         let except = self.announcer_of(i);
         match self.carriers[i].election.as_ref() {
-            Some(e) => e.heard_with_colour(self.now, except).filter(|(id, _)| *id != self.cfg.id).take(crate::frame::MAX_HEARD).collect(),
+            Some(e) => e.heard_with_colour(self.now, except).filter(|(id, _, _)| *id != self.cfg.id).take(crate::frame::MAX_HEARD).collect(),
             None => Vec::new(),
         }
     }
@@ -1202,7 +1208,7 @@ impl Node {
             None => self.cfg.params.fatsoen.max_own_share,
         };
         let mine = self.my_colour();
-        let sharing = self.conflicts.values().filter(|(_, colour)| *colour == mine).count() as u32;
+        let sharing = self.conflicts.values().filter(|(_, colour, _)| *colour == mine).count() as u32;
         let fair = self.cfg.params.fatsoen.occ_high_own as u32 / (sharing + 1);
         regulatory.min(fair as u16).max(1)
     }
@@ -1694,15 +1700,15 @@ impl Node {
             // A follower of ours hears other announcers, or a follower of another announcer
             // hears us: either way those announcers collide with us at that node.
             if g.announcer == me {
-                for (h, colour) in &g.heard {
-                    self.note_conflict(*h, *colour);
+                for (h, colour, colours) in &g.heard {
+                    self.note_conflict(*h, *colour, *colours);
                 }
-            } else if g.heard.iter().any(|(h, _)| *h == me) {
+            } else if g.heard.iter().any(|(h, _, _)| *h == me) {
                 // A follower of another announcer hears us: that announcer, and every other
                 // announcer it hears, collide with us at that node.
-                self.note_conflict(g.announcer, g.announcer_colour);
-                for (h, colour) in &g.heard {
-                    self.note_conflict(*h, *colour);
+                self.note_conflict(g.announcer, g.announcer_colour, g.announcer_colours);
+                for (h, colour, colours) in &g.heard {
+                    self.note_conflict(*h, *colour, *colours);
                 }
             }
         }
@@ -1847,14 +1853,19 @@ impl Node {
                     car.on_nack(n.object, n.block, &n.missing, &self.store);
                 }
             } else {
-                // A NACK is an ask for a handful of symbols. Our granted uploader answers at
-                // once; any other holder answers after a random wait and gives up if it hears
-                // someone else sending them. A node can reach 95 % of an object by overhearing
-                // a neighbouring cell, and then nobody was ever granted for it: without this
-                // fallback that object would stall for ever, one NACK at a time.
+                // A follower asks its announcer, whose carousel puts the missing symbols at the
+                // front of the next round; an announcer asks the neighbourhood, because no
+                // carousel serves it. So only an announcer's NACK is answered by arbitrary
+                // holders: its granted uploader at once, any other holder after a wait. Letting
+                // peers answer followers as well turned a 200-node town into a repair storm of
+                // nearly a million answers.
+                let asker_is_announcer = self.neighbors.get(&n.node).map(|nb| nb.announcer == n.node).unwrap_or(false);
                 let recently = self.granted_to_us.get(&(n.object, n.node)).map(|t| self.now < *t + self.cfg.params.neighbor_ttl_ms).unwrap_or(false);
                 if recently {
                     self.granted_to_us.insert((n.object, n.node), self.now);
+                }
+                if !recently && !asker_is_announcer {
+                    continue;
                 }
                 // Whoever hears the asker best answers first and silences the rest: an ungranted
                 // repair waits in proportion to how many neighbours we hear better than the

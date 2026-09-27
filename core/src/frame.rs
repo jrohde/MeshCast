@@ -102,9 +102,11 @@ pub struct Gossip {
     pub announcer: NodeId,
     pub announcer_colour: u8,
     pub announcer_colours: u8,
-    /// Other announcers this node also hears, with the colour each announced: the conflict
-    /// report that drives colouring.
-    pub heard: Vec<(NodeId, u8)>,
+    /// Other announcers this node also hears, each with the colour it announced and the number
+    /// of colours it believes are in use: the conflict report that drives colouring. The count
+    /// travels because a slot cycle only works if the announcers sharing it agree on its length,
+    /// and two announcers in conflict often cannot hear each other directly.
+    pub heard: Vec<(NodeId, u8, u8)>,
     pub have: Vec<ShortId>,
     /// Objects wanted, each with the node granted to upload it (NONE = open ask: holders
     /// answer with a HAVE offer and the announcer grants one of them).
@@ -212,9 +214,10 @@ impl Frame {
                 let nw = g.want.len().min(MAX_WANT);
                 out.push(nh as u8);
                 out.push(nw as u8);
-                for (id, colour) in &g.heard[..nheard] {
+                for (id, colour, colours) in &g.heard[..nheard] {
                     out.extend_from_slice(&id.0.to_le_bytes());
                     out.push(*colour);
+                    out.push(*colours);
                 }
                 for id in &g.have[..nh] {
                     out.extend_from_slice(&id.0);
@@ -312,7 +315,8 @@ impl Frame {
                 for _ in 0..nheard {
                     let id = NodeId(c.u32()?);
                     let colour = c.u8()?;
-                    heard.push((id, colour));
+                    let colours = c.u8()?;
+                    heard.push((id, colour, colours));
                 }
                 let mut have = Vec::with_capacity(nh);
                 for _ in 0..nh {
@@ -433,7 +437,7 @@ mod tests {
                 occupancy: [10, 20, 30, 40],
             }),
             Frame::Bulk(Bulk { object: ShortId([1; 8]), block: 2, esi: 3, k: 100, payload: vec![9u8; SYMBOL_SIZE] }),
-            Frame::Gossip(Gossip { node: NodeId(1), announcer: NodeId(2), announcer_colour: 1, announcer_colours: 4, heard: vec![(NodeId(7), 0), (NodeId(8), 1), (NodeId(9), 2)], have: vec![ShortId([3; 8]); 12], want: vec![(ShortId([4; 8]), NodeId(5)); 8] }),
+            Frame::Gossip(Gossip { node: NodeId(1), announcer: NodeId(2), announcer_colour: 1, announcer_colours: 4, heard: vec![(NodeId(7), 0, 3), (NodeId(8), 1, 3), (NodeId(9), 2, 3)], have: vec![ShortId([3; 8]); 12], want: vec![(ShortId([4; 8]), NodeId(5)); 8] }),
             Frame::ManifestAnnounce(ManifestAnnounce {
                 node: NodeId(5),
                 entries: vec![AnnounceEntry { channel: ChannelId([6; 8]), manifest: ShortId([7; 8]), seq: 9, len: 1234 }; 8],
