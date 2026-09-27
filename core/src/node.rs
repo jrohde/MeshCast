@@ -433,9 +433,22 @@ impl Node {
         }
     }
 
+    /// Whether this carrier hops: more than one channel means announcers can be separated in
+    /// frequency, and that every cell needs a common moment to hear the others.
+    fn hops(&self, carrier: usize) -> bool {
+        self.carriers.get(carrier).map(|c| c.p.channels.len() > 1).unwrap_or(false)
+    }
+
     fn is_meeting_dwell(&self, dwell_index: u64) -> bool {
         let m = self.cfg.params.meet_every.max(1);
         dwell_index % m == 0
+    }
+
+    /// Whether `now` falls in this carrier's rendezvous: the dwell on the common sequence, where
+    /// every cell is on one channel and can hear every other. A carrier that does not hop has no
+    /// rendezvous, because its cells never leave each other's channel in the first place.
+    fn in_rendezvous(&self, carrier: usize, now: Millis) -> bool {
+        self.hops(carrier) && self.is_meeting_dwell(now / self.cfg.params.dwell_ms.max(1))
     }
 
     /// Start of the next meeting dwell strictly after `now`.
@@ -447,11 +460,7 @@ impl Node {
         next * dwell
     }
 
-    /// Whether the cell carrier hops, in which case cell-wide control traffic is timed to the
-    /// meeting dwell so that every cell hears it.
-    fn agile(&self) -> bool {
-        self.carriers.get(self.cell_carrier()).map(|c| c.p.channels.len() > 1).unwrap_or(false)
-    }
+
 
     pub fn is_announcing(&self) -> bool {
         self.carriers.iter().any(|c| c.election.as_ref().map(|e| e.is_announcer()).unwrap_or(false))
@@ -624,7 +633,7 @@ impl Node {
         if !self.wants.is_empty() {
             // Stall checks (WANT / NACK) are time-based; poll them at the stall granularity.
             d = d.min(self.now + self.cfg.params.t_nack_stall_ms);
-            if self.is_announcing() && self.agile() {
+            if self.is_announcing() && self.hops(self.cell_carrier()) {
                 d = d.min(self.next_meeting_start(self.now) + 1);
             }
         }
@@ -657,6 +666,7 @@ impl Node {
                     d = d.min(due);
                 }
                 if c.p.channels.len() > 1 {
+                    // A hopping announcer beacons at every dwell start.
                     let dwell = self.cfg.params.dwell_ms.max(1);
                     d = d.min((self.now / dwell + 1) * dwell);
                 }
@@ -741,7 +751,7 @@ impl Node {
         }
         // Frequency-agile carriers: a beacon at every dwell start so scanners can find us.
         for i in 0..self.carriers.len() {
-            if self.carriers[i].p.channels.len() > 1 && self.role(i) == Role::Announcer {
+            if self.hops(i) && self.role(i) == Role::Announcer {
                 let d = now / self.cfg.params.dwell_ms.max(1);
                 if self.carriers[i].last_dwell != d {
                     self.carriers[i].last_dwell = d;
@@ -758,7 +768,8 @@ impl Node {
             }
         }
         if now >= self.next_gossip {
-            if self.agile() && !self.is_meeting_dwell(now / self.cfg.params.dwell_ms.max(1)) {
+            let cell = self.cell_carrier();
+            if self.hops(cell) && !self.in_rendezvous(cell, now) {
                 // Hold cell-wide gossip for the meeting dwell, when other cells listen too.
                 self.next_gossip = self.next_meeting_start(now) + self.rng.below(self.cfg.params.dwell_ms / 4);
             } else {
@@ -1108,7 +1119,8 @@ impl Node {
         }
         // An announcer's uploader may sit in another cell, on another hop sequence: on agile
         // carriers the announcer's NACKs go out in the meeting dwell, like its gossip.
-        if announcing && self.agile() && !self.is_meeting_dwell(self.now / self.cfg.params.dwell_ms.max(1)) {
+        let cell = self.cell_carrier();
+        if announcing && self.hops(cell) && !self.in_rendezvous(cell, self.now) {
             return;
         }
         let now = self.now;
@@ -1272,7 +1284,7 @@ impl Node {
             // The meeting dwell is control plane only, and announcers that share a channel take
             // turns: content (carousel or upload) runs only in its announcer's slot.
             let dwell = self.cfg.params.dwell_ms.max(1);
-            if self.carriers[i].p.channels.len() > 1 && self.is_meeting_dwell(now / dwell) {
+            if self.in_rendezvous(i, now) {
                 let t = (now / dwell + 1) * dwell;
                 self.stats.defer_ms[0] += t - now;
                 self.carriers[i].pace_until = t;
@@ -1327,7 +1339,7 @@ impl Node {
                     // the next dwell is a different channel with its own budget, so never defer
                     // past the end of this dwell.
                     let mut w = w.min(60_000);
-                    if self.carriers[i].p.channels.len() > 1 {
+                    if self.hops(i) {
                         let dwell = self.cfg.params.dwell_ms.max(1);
                         w = w.min((now / dwell + 1) * dwell - now);
                     }
