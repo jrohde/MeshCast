@@ -95,7 +95,10 @@ pub struct Stats {
     pub symbols_rejected: u64,
     pub nacks_sent: u64,
     pub wants_sent: u64,
+    /// Uploads that put at least one symbol on the air.
     pub uploads_started: u64,
+    /// Repair answers lined up; most are cancelled by hearing another holder answer first.
+    pub repairs_queued: u64,
     pub manifests_adopted: u64,
     pub conflict_reports_sent: u64,
     pub conflicts_noted: u64,
@@ -135,6 +138,8 @@ struct Upload {
     /// Suppression: do not start before this time, and give up if someone else is heard
     /// uploading the same object meanwhile.
     start_at: Millis,
+    /// Whether any symbol of it has reached the air.
+    started: bool,
     block: u16,
     esi: u16,
     list: Option<VecDeque<(u16, u16)>>,
@@ -163,6 +168,15 @@ impl CarrierRt {
             (Some(_), true) => self.upload_queue.push_front(u),
             (Some(_), false) => self.upload_queue.push_back(u),
         }
+    }
+
+    /// Drop everything we have lined up for `object` that has not begun. An upload that has
+    /// started is left alone: stopping halfway would waste what it already sent.
+    fn cancel_pending(&mut self, object: ShortId, now: Millis) {
+        if self.upload.as_ref().map(|u| u.object == object && u.start_at > now).unwrap_or(false) {
+            self.upload = self.upload_queue.pop_front();
+        }
+        self.upload_queue.retain(|u| !(u.object == object && u.start_at > now));
     }
 }
 
@@ -1048,7 +1062,14 @@ impl Node {
                 if !(now >= p.last_progress + stall || p.last_progress == 0) {
                     return false;
                 }
-                // Nearly complete objects are repaired by NACK, never re-asked in full.
+                // An object that is nearly complete is repaired by NACK rather than re-asked
+                // in full, but only once someone is responsible for it. The want list is where
+                // responsibility is assigned, and an object we collected by overhearing a
+                // neighbouring cell has no uploader at all: however complete it is, it belongs
+                // on the list until it has one.
+                if !self.grants.contains_key(id) {
+                    return true;
+                }
                 match self.store.entry(id).map(|e| e.progress()) {
                     Some((have, Some(total))) => (have as u64) * 1000 < thr * total as u64,
                     _ => true,
@@ -1268,6 +1289,12 @@ impl Node {
                 if !self.store.get_symbol(object, *block, *esi, &mut buf) {
                     self.carriers[i].upload = None;
                     return;
+                }
+                if let Some(u) = self.carriers[i].upload.as_mut() {
+                    if !u.started {
+                        u.started = true;
+                        self.stats.uploads_started += 1;
+                    }
                 }
                 (Frame::Bulk(Bulk { object: *object, block: *block, esi: *esi, k: *k, payload: buf }).encode(), Class::Content, FrameType::Bulk)
             }
@@ -1548,7 +1575,7 @@ impl Node {
         self.offers.retain(|(o, _, _)| *o != b.object);
         let now = self.now;
         for c in self.carriers.iter_mut() {
-            c.upload_queue.retain(|u| !(u.object == b.object && u.start_at > now));
+            c.cancel_pending(b.object, now);
         }
         let interested = self.wants.contains(&b.object) || self.store.is_known(&b.object) || self.is_announcing();
         if !interested {
@@ -1738,8 +1765,7 @@ impl Node {
                     let active = c.upload.as_ref().map(|u| u.object == *w && u.to == g.node).unwrap_or(false);
                     let queued = c.upload_queue.iter().any(|u| u.object == *w && u.to == g.node);
                     if !active && !queued {
-                        c.add_upload(Upload { object: *w, to: g.node, start_at: now, block: 0, esi: 0, list: None }, false);
-                        self.stats.uploads_started += 1;
+                        c.add_upload(Upload { object: *w, to: g.node, start_at: now, started: false, block: 0, esi: 0, list: None }, false);
                     }
                 } else if grant.is_none() {
                     // Open ask: offer, unless we are already uploading it to this announcer.
@@ -1749,12 +1775,9 @@ impl Node {
                         self.offers.push((*w, g.node, at));
                     }
                 } else {
-                    // Granted to someone else: any upload of ours to this announcer is redundant.
-                    let c = &mut self.carriers[i];
-                    if c.upload.as_ref().map(|u| u.object == *w && u.to == g.node).unwrap_or(false) {
-                        c.upload = None;
-                    }
-                    c.upload_queue.retain(|u| !(u.object == *w && u.to == g.node));
+                    // Granted to someone else: anything of ours for it that has not begun is
+                    // redundant.
+                    self.carriers[i].cancel_pending(*w, now);
                     self.offers.retain(|(o, a, _)| !(o == w && *a == g.node));
                 }
             }
@@ -1862,10 +1885,8 @@ impl Node {
                     }
                     _ if c.upload_queue.iter().any(|u| u.object == n.object && u.to == n.node) => {}
                     _ => {
-                        c.add_upload(Upload { object: n.object, to: n.node, start_at, block: n.block, esi: 0, list: Some(list) }, true);
-                        if !granted {
-                            self.stats.uploads_started += 1;
-                        }
+                        c.add_upload(Upload { object: n.object, to: n.node, start_at, started: false, block: n.block, esi: 0, list: Some(list) }, true);
+                        self.stats.repairs_queued += 1;
                     }
                 }
             }
