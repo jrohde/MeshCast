@@ -136,6 +136,29 @@ impl Engine {
         self.push(t, Ev::Revive(node));
     }
 
+    /// Switch a node off or on right now (battery dead, taken indoors, switched on again).
+    pub fn set_alive(&mut self, node: usize, alive: bool) {
+        if alive == self.nodes[node].alive {
+            return;
+        }
+        self.nodes[node].alive = alive;
+        self.nodes[node].next_wake = Millis::MAX;
+        if alive {
+            let now = self.now;
+            self.nodes[node].node.reboot(now);
+            self.schedule_wake(node, now + 1);
+        }
+    }
+
+    /// Replace a node by a newcomer: same hardware and place, nothing learned.
+    pub fn replace_with_newcomer(&mut self, node: usize) {
+        let now = self.now;
+        self.nodes[node].alive = true;
+        self.nodes[node].next_wake = Millis::MAX;
+        self.nodes[node].node.factory_reset(now);
+        self.schedule_wake(node, now + 1);
+    }
+
     fn schedule_wake(&mut self, i: usize, t: Millis) {
         let t = t.max(self.now + 1);
         if t >= self.nodes[i].next_wake {

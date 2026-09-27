@@ -384,11 +384,47 @@ Results, against the state before the pass:
 | Band L neighbourhood, 50 nodes on 1 km² | 79 % | 90 % |
 | Band L dynamics, 8 channels with churn | 83 % | **99.1 %** |
 | Band O dynamics | 99.1 % | 99.1 % |
+| Band L neighbourhood, second pass | 90 % | **100 %** |
+| Band L town, 200 nodes on 30 km², 24 h | 66 % | **91.9 %** |
+| Band O town, 200 nodes on 30 km², 24 h | 100 %, median 7.3 h | 93.9 %, median 10.2 h |
 | Clusters, density, failover, two-node cases | 100 % | 100 %, and faster |
 
-The remaining weak case is a dense neighbourhood in band L: two or three announcers in one square
-kilometre at 25 mW, each picking up most of the other's content by overhearing and repairing the
-last few per cent. It delivers 90 % in six hours at 37 % occupancy.
+Two of the nine were worth the whole pass on their own. Only announcers' NACKs may be answered by
+arbitrary holders, because a follower's missing symbols are exactly what its own announcer's
+carousel puts at the front of the next round; that one line took the band O town from 960 000
+queued repair answers and 70 % occupancy to 13 %. And announcers must agree on the length of
+their slot cycle: they had been computing it from their own view of the conflict graph and
+arriving at 4, 5 and 6 slots side by side, so their turns overlapped anyway. The count now
+travels with the conflict reports until they agree.
+
+Band O at town scale is the one number that did not come back: 93.9 % against the 100 % it
+reached before the pass, at a longer median. Five announcers sharing one 250 kHz channel is the
+hardest case MeshCast has, and it is now limited by something other than the repair storm. That
+is the next thing to measure, not to guess at.
+
+### 7.7.1 Nodes that come and go
+
+The dynamics scenario originally kept every node switched on for the whole run. It now also
+models nodes going away and returning (batteries, pockets, switches) and newcomers: a node
+replaced by one that has learned nothing, which then follows a few channels and must fetch
+everything from scratch.
+
+`meshcast-sim dynamics --nodes 50 --channels 8 --follows 3 --publish-h 24 --churn-h 6
+--node-churn-h 3 --newcomer-h 8 --hours 72`
+
+| Regime | Delivered within one publication period | Of the nodes on at the end, holding the full current window | Newcomers that fetched the catalogue that existed when they joined |
+|---|---|---|---|
+| Band O, no node churn | 99.1 % | 42 of 42 (100 %) | n/a |
+| Band O, a tenth toggling every 3 h | 86.5 % | 21 of 23 (91 %) | 7 of 8, mean 4.8 h, worst 22 h |
+| Band L, a tenth toggling every 3 h | 87.6 % | 20 of 23 (87 %) | 8 of 8, mean 0.4 h, worst 0.6 h |
+| Band O, a tenth toggling every hour, publishing every 12 h | 83.9 % | 17 of 21 (81 %) | 11 of 11, mean 2.6 h, worst 7.8 h |
+
+The first column counts a node as having missed a bulletin even when it was switched off for the
+whole period, which measures the batteries rather than the protocol; the second column is the
+steady-state question and is the one to read. A cold start costs well under an hour in band L,
+where a node has four times the airtime, and a few hours in band O. Nothing in the protocol had
+to change for any of this: a returning node reboots as a follower, a lapsed grant is reassigned,
+and a newcomer's first WANT is answered like any other.
 
 ### 7.8 What Phase 0 could not answer
 

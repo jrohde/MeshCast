@@ -122,6 +122,12 @@ enum Cmd {
         /// Hours between subscription changes; each time 10 % of nodes swap one channel.
         #[arg(long, default_value_t = 6.0)]
         churn_h: f64,
+        /// Hours between node comings and goings; each time 10 % of nodes switch off or on.
+        #[arg(long, default_value_t = 0.0)]
+        node_churn_h: f64,
+        /// Hours between newcomers: a node is replaced by one that has learned nothing.
+        #[arg(long, default_value_t = 0.0)]
+        newcomer_h: f64,
         #[command(flatten)]
         common: Common,
     },
@@ -258,8 +264,8 @@ fn main() {
             };
             run(spec, &common, None);
         }
-        Cmd::Dynamics { nodes, area_km2, stations, channels, follows, publish_h, bulletin_kb, window, churn_h, common } => {
-            run_dynamics(nodes, area_km2, stations, channels, follows, publish_h, bulletin_kb, window, churn_h, &common);
+        Cmd::Dynamics { nodes, area_km2, stations, channels, follows, publish_h, bulletin_kb, window, churn_h, node_churn_h, newcomer_h, common } => {
+            run_dynamics(nodes, area_km2, stations, channels, follows, publish_h, bulletin_kb, window, churn_h, node_churn_h, newcomer_h, &common);
         }
         Cmd::Failover { nodes, area_km2, kill_at_h, revive_at_h, common } => {
             let spec = ScenarioSpec {
@@ -535,7 +541,7 @@ struct DynamicsReport {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run_dynamics(nodes: usize, area_km2: f64, stations: usize, channels: usize, follows: usize, publish_h: f64, bulletin_kb: u32, window: usize, churn_h: f64, common: &Common) {
+fn run_dynamics(nodes: usize, area_km2: f64, stations: usize, channels: usize, follows: usize, publish_h: f64, bulletin_kb: u32, window: usize, churn_h: f64, node_churn_h: f64, newcomer_h: f64, common: &Common) {
     use meshcast_core::manifest::{Manifest, ScheduleEntry};
     use meshcast_core::rng::Rng;
     use meshcast_core::ids::ShortId;
@@ -602,7 +608,27 @@ fn run_dynamics(nodes: usize, area_km2: f64, stations: usize, channels: usize, f
         events.push((t, 1, 0));
         t += churn_ms;
     }
+    if node_churn_h > 0.0 {
+        let step = (node_churn_h * 3.6e6) as Millis;
+        let mut t = step;
+        while t < until {
+            events.push((t, 2, 0));
+            t += step;
+        }
+    }
+    if newcomer_h > 0.0 {
+        let step = (newcomer_h * 3.6e6) as Millis;
+        let mut t = step;
+        while t < until {
+            events.push((t, 3, 0));
+            t += step;
+        }
+    }
     events.sort();
+    let mut offline: Vec<usize> = Vec::new();
+    // Newcomer, when it joined, and the catalogue that existed at that moment: a cold start is
+    // measured against what was there to fetch, not against bulletins published later.
+    let mut newcomers: Vec<(usize, Millis, Vec<ShortId>)> = Vec::new();
     let t0 = std::time::Instant::now();
     let mut next_index: Vec<usize> = built.sources.iter().map(|s| s.objects.len()).collect();
     for (t, kind, c) in events {
@@ -625,6 +651,51 @@ fn run_dynamics(nodes: usize, area_km2: f64, stations: usize, channels: usize, f
                 let followers: Vec<usize> = (0..nodes).filter(|&i| subs[i].contains(&c)).collect();
                 built.tracks.insert(o.id.short(), TrackInfo { source: node, index: next_index[c] - 1, bytes: o.len, followers: followers.clone() });
                 pubs.push((o.id.short(), t, followers));
+            }
+            2 => {
+                // A tenth of the nodes go away or come back: batteries, pockets, switches.
+                let n_toggle = (nodes / 10).max(1);
+                for _ in 0..n_toggle {
+                    let i = rng.below(nodes as u64) as usize;
+                    if built.sources.iter().any(|s| s.node == i) {
+                        continue; // a publisher that vanishes has nothing to measure against
+                    }
+                    if let Some(pos) = offline.iter().position(|&x| x == i) {
+                        offline.remove(pos);
+                        built.engine.set_alive(i, true);
+                    } else {
+                        offline.push(i);
+                        built.engine.set_alive(i, false);
+                    }
+                }
+            }
+            3 => {
+                // Someone new joins: same place, nothing learned, follows a few channels.
+                let mut i = rng.below(nodes as u64) as usize;
+                let mut guard = 0;
+                while (built.sources.iter().any(|s| s.node == i) || offline.contains(&i)) && guard < 20 {
+                    i = rng.below(nodes as u64) as usize;
+                    guard += 1;
+                }
+                if built.sources.iter().any(|s| s.node == i) {
+                    continue;
+                }
+                built.engine.replace_with_newcomer(i);
+                subs[i].clear();
+                let mut choice: Vec<usize> = (0..channels).collect();
+                for k in (1..choice.len()).rev() {
+                    let j = rng.below(k as u64 + 1) as usize;
+                    choice.swap(k, j);
+                }
+                for &c in choice.iter().take(follows.min(channels)) {
+                    if built.sources[c].node != i {
+                        subs[i].push(c);
+                        built.engine.nodes[i].node.follow(built.sources[c].channel);
+                    }
+                }
+                built.engine.poke(i);
+                let at_join: Vec<ShortId> = subs[i].iter().flat_map(|&c| built.sources[c].objects.iter().map(|o| o.id.short()).collect::<Vec<_>>()).collect();
+                newcomers.push((i, t, at_join));
             }
             _ => {
                 let n_swap = (nodes / 10).max(1);
@@ -666,6 +737,37 @@ fn run_dynamics(nodes: usize, area_km2: f64, stations: usize, channels: usize, f
         within += lat.iter().filter(|&&l| l <= publish_h).count();
         p50.push(percentile(&lat, 0.5));
         p90.push(percentile(&lat, 0.9));
+    }
+    // A newcomer is caught up when it holds every object of every channel it follows.
+    let mut caught = 0usize;
+    let mut catch_h: Vec<f64> = Vec::new();
+    for (i, t_join, at_join) in &newcomers {
+        if at_join.is_empty() {
+            continue;
+        }
+        let times: Vec<Millis> = at_join.iter().filter_map(|id| eng.metrics.completions.get(&(*i, *id)).copied()).collect();
+        if times.len() == at_join.len() {
+            caught += 1;
+            if let Some(mx) = times.iter().max() {
+                catch_h.push(mx.saturating_sub(*t_join) as f64 / 3.6e6);
+            }
+        }
+    }
+    // A node that was switched off when something was published cannot have received it, and
+    // counting that as a failure measures the batteries, not the protocol. So also ask the
+    // steady-state question: of the nodes that are on at the end, how many hold the whole
+    // current window of every channel they follow?
+    let mut up_to_date = 0usize;
+    let mut online = 0usize;
+    for i in 0..nodes {
+        if !eng.nodes[i].alive || subs[i].is_empty() || built.sources.iter().any(|s| s.node == i) {
+            continue;
+        }
+        online += 1;
+        let ok = subs[i].iter().all(|&c| built.sources[c].objects.iter().all(|o| eng.nodes[i].node.store.has_complete(&o.id.short())));
+        if ok {
+            up_to_date += 1;
+        }
     }
     let wasted: u64 = eng.nodes.iter().map(|n| n.node.stats.bulk_uninterested).sum();
     let useful: u64 = eng.nodes.iter().map(|n| n.node.stats.symbols_new + n.node.stats.symbols_dup).sum();
@@ -711,6 +813,15 @@ fn run_dynamics(nodes: usize, area_km2: f64, stations: usize, channels: usize, f
     println!("bulk frames received by uninterested nodes: {:.1} % of all bulk receptions", report.wasted_bulk_fraction * 100.0);
     println!("orphaned objects per node at the end (no manifest references them): {:.1}", orphans);
     println!("uploads {}, announcers {}, role events {}", uploads, announcers_final, m.role_events.len());
+    if !newcomers.is_empty() {
+        let mean = if catch_h.is_empty() { 0.0 } else { catch_h.iter().sum::<f64>() / catch_h.len() as f64 };
+        let worst = catch_h.iter().cloned().fold(0.0f64, f64::max);
+        println!("newcomers: {} joined, {} fetched the whole catalogue that existed when they joined, mean {:.2} h, worst {:.2} h", newcomers.len(), caught, mean, worst);
+    }
+    println!("of the {} follower nodes on at the end, {} hold the current window of every channel they follow ({:.1} %)", online, up_to_date, if online > 0 { 100.0 * up_to_date as f64 / online as f64 } else { 0.0 });
+    if !offline.is_empty() {
+        println!("nodes offline at the end: {}", offline.len());
+    }
     println!("bulk airtime share, busiest nodes: {}", airtime.iter().map(|(i, a)| format!("{i}:{:.1}%", a * 100.0)).collect::<Vec<_>>().join(" "));
     if let Some(path) = &common.out {
         fs::write(path, serde_json::to_string_pretty(&report).unwrap()).expect("write report");

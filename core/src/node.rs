@@ -641,6 +641,23 @@ impl Node {
         self.gossip_soon();
     }
 
+    /// Wipe everything a node learned: a freshly flashed dongle, or the same hardware handed to
+    /// someone else. Keeps only its identity and its region profile.
+    pub fn factory_reset(&mut self, now: Millis) {
+        self.reboot(now);
+        self.store = MemStore::new(self.cfg.keep_bytes_below);
+        self.follows.clear();
+        self.manifests.clear();
+        self.own_manifests.clear();
+        self.own_objects.clear();
+        self.pending_ack.clear();
+        self.wants.clear();
+        self.grants.clear();
+        self.granted_to_us.clear();
+        self.offers.clear();
+        self.stats = Stats { tx_airtime_ms: alloc::vec![0; self.carriers.len()], ..Default::default() };
+    }
+
     /// Time at which the host should call `Tick` next.
     pub fn next_deadline(&self) -> Millis {
         let mut d = self.next_score;
