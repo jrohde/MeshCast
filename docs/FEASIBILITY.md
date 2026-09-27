@@ -355,7 +355,42 @@ ESP-NOW's, on a smaller scale.
 What this scenario does not model yet: nodes that follow nothing (pure relays), storage limits
 below the working set, and a source that publishes faster than its cell can carry.
 
-### 7.7 What Phase 0 could not answer
+### 7.7 A fresh measurement pass
+
+After the design had settled, a pass with one new instrument, a counter that records *why* a
+ready content frame was not sent, found nine faults. None of them was where we had been looking:
+time slots, which we suspected, cost nothing at all. Each fix replaces a rule that had drifted
+from its principle.
+
+| # | What the data said | The principle it restored |
+|---|---|---|
+| 1 | Announcers in band L were blocked by the airtime accounting 42 % of the time while using a quarter of their legal budget | A signal that ends exactly on a 200 kHz boundary does not occupy the slice above it. With inclusive edges every channel cost two slices and every slice was shared by two channels |
+| 2 | A blocked node sat still for up to 60 s, three dwells, on channels that had budget | Waiting is for a radio with one channel; a hopping radio hops |
+| 3 | Well-separated announcers were throttled to a fraction of their entitlement | Share the channel only with those colouring could not separate from you |
+| 4 | One 20 ms frame per mandatory 100 ms pause spent five sixths of a polite band on silence | A transmission lasts as long as it needs, not as long as it may: pause × p/(1 − p) |
+| 5 | An announcer sat at 95 % of an object and sent 1 223 unanswered NACKs | A node can reach 95 % by overhearing, so a NACK is an ask: any holder may answer it |
+| 6 | Repairs were queued and never sent | An upload queued behind nothing must start. One helper decides where an upload goes |
+| 7 | 93 000 repair answers in one cell, channel at 72 % occupancy | Cancelling a duplicate must also cancel the answer that has not begun, which was the common case |
+| 8 | An object picked up by overhearing never got an uploader assigned | The want list is where responsibility is assigned; an ownerless object belongs on it however complete it is |
+| 9 | Whoever answered first was whoever happened to draw the shortest delay | Whoever hears the asker best answers first, ranked against the holder's own neighbours so no absolute signal level is needed |
+
+Results, against the state before the pass:
+
+| Scenario | Before | After |
+|---|---|---|
+| ESP-NOW neighbourhood, 50 nodes on 1 km², 6 h | 86 % | **100 %** |
+| Band L, 100 nodes on 15 km², 12 h | 69 % | **100 %** |
+| Band O, 100 nodes on 15 km², 12 h | 45 %, occupancy 73 % | **100 %**, occupancy 24 % |
+| Band L neighbourhood, 50 nodes on 1 km² | 79 % | 90 % |
+| Band L dynamics, 8 channels with churn | 83 % | **99.1 %** |
+| Band O dynamics | 99.1 % | 99.1 % |
+| Clusters, density, failover, two-node cases | 100 % | 100 %, and faster |
+
+The remaining weak case is a dense neighbourhood in band L: two or three announcers in one square
+kilometre at 25 mW, each picking up most of the other's content by overhearing and repairing the
+last few per cent. It delivers 90 % in six hours at 37 % occupancy.
+
+### 7.8 What Phase 0 could not answer
 
 - Real GFSK sensitivity at 100 kbit/s (interpolated), real CCA behaviour, and real building
   loss: Phase 1.
