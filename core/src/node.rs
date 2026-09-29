@@ -429,7 +429,17 @@ impl Node {
 
     /// Announcers that share a channel take turns: our carousel runs only in our slot.
     /// Returns when the next slot of ours starts, or None if it is ours now.
+    ///
+    /// Taking turns is for carriers where nothing else bounds what everyone adds up to. Where
+    /// the regulator already caps every transmitter (a duty cycle, or polite access with its
+    /// cumulative limit), that cap is the bound, and adding turns on top only buys idle time:
+    /// in a town on one 250 kHz channel it cost five announcers eight ninths of their airtime.
     fn slot_wait(&self, carrier: usize, colour: u8, colours: u8, now: Millis) -> Option<Millis> {
+        if let Some(b) = self.carriers[carrier].p.band {
+            if matches!(self.discipline.rule(b), Access::DutyCycle { .. } | Access::Polite { .. }) {
+                return None;
+            }
+        }
         let (mine, k) = self.slot_of(carrier, colour, colours);
         self.turn_wait(mine, k, now)
     }

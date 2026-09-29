@@ -372,6 +372,8 @@ arrives a few minutes later than it otherwise would. That is the entire user-vis
   broadcast garbage. Mitigation: garbage never verifies against a manifest, so followers ignore it;
   a v1 option lets followers prefer announcers whose id appears in a followed manifest ("trusted
   stations").
+- Requests are not authenticated, and answering them costs far more than sending them. The full
+  inventory, with amplification factors and the rule it asks for, is in [ABUSE.md](ABUSE.md).
 
 ## 8. Parameters (draft, to be tuned in simulation)
 

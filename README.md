@@ -92,6 +92,7 @@ the simulator tests the code that ships. See [docs/ARCHITECTURE.md](docs/ARCHITE
 | [docs/ETHERFATSOEN.md](docs/ETHERFATSOEN.md) | Spectrum etiquette: the six mechanisms and the throttling algorithm |
 | [docs/ETHERDISCIPLINE.md](docs/ETHERDISCIPLINE.md) | Regulatory profiles worldwide, with sources, and firmware enforcement |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Node types, hardware, data flow, implementation stack |
+| [docs/ABUSE.md](docs/ABUSE.md) | Spam, flooding and other abuse: what holds, what does not, and the rule it asks for |
 | [docs/PRIOR-ART.md](docs/PRIOR-ART.md) | What we borrow from FLUTE, DTN, DVB carousels, Othernet, Bitswap, Nostr, and the mesh projects |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | Phases 0–3 with definitions of done |
 | [docs/GLOSSARY.md](docs/GLOSSARY.md) | Terms, including the two Dutch loanwords |
