@@ -441,11 +441,13 @@ worth stating because it is not obvious:
 > serves nothing and its cell starves. Letting it pass on the symbols it does hold was tried and
 > is worse: it repeats the same handful and duplicates rise to 80–94 %.
 
-So the prerequisite for fountain coding is not the codec. It is that every announcer completes an
-object before serving it, and in a cell with several announcers they do not, because they lean on
-overhearing each other rather than on being served. That is the same open question as the rest of
-this section, stated more sharply: **an announcer must be a first-class consumer, not an
-eavesdropper.** Solve that and the branch should merge; merge it first and a town stops working.
+The explanation first written here, that announcers fill up by overhearing each other and so
+never complete, was then measured and does not hold. On main an announcer is served: in a dense
+band L cell 57 and 97 % of the symbols its two announcers receive arrive for objects they asked
+for and had an uploader assigned to, on ESP-NOW 92 to 100 %, and they hold every object complete.
+On the branch the same announcers complete 4 and 8 of 22 objects. The branch combines the fountain
+carousel with a later partial-relay attempt that filled the channel with repeated symbols, so the
+cause is still open and the two are being measured separately.
 
 ### 7.7.2 Nodes that come and go
 
