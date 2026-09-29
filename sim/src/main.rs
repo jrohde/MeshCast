@@ -440,6 +440,13 @@ fn run(spec: ScenarioSpec, common: &Common, failover: Option<(f64, f64)>) {
                 s.tx_frames, s.rx_frames, s.rx_bad, s.cca_deferrals, s.discipline_waits, s.symbols_new, s.symbols_dup, s.nacks_sent, s.wants_sent, s.uploads_started, s.repairs_queued,
                 n.node.occupancy(bulk_c), n.node.rate(bulk_c), n.node.role(bulk_c), n.node.colouring(), s.conflict_reports_sent, s.conflicts_noted, n.node.conflict_set())
                 + &format!(" defer[meet/slot/reg/bucket/class/cca]={:?}", s.defer_ms);
+            let (known, done, short) = n.node.inventory();
+            let mut s2 = short.clone();
+            s2.sort_unstable();
+            let med = s2.get(s2.len() / 2).copied().unwrap_or(0);
+            let served = s.symbols_served + s.symbols_overheard;
+            let line = line + &format!(" holds={}/{} short_median={:.1}% served={:.0}%", done, known, med as f64 / 10.0,
+                if served > 0 { 100.0 * s.symbols_served as f64 / served as f64 } else { 0.0 });
             (i, line)
         })
         .collect();

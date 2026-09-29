@@ -104,6 +104,11 @@ pub struct Stats {
     pub manifests_adopted: u64,
     pub conflict_reports_sent: u64,
     pub conflicts_noted: u64,
+    /// New symbols that arrived for an object we had asked for and had an uploader assigned to,
+    /// against ones that simply came past. The split says whether a node is being served or is
+    /// living off what it overhears.
+    pub symbols_served: u64,
+    pub symbols_overheard: u64,
     /// Why a ready content frame was not sent, in milliseconds of deferral:
     /// [meeting dwell, announcer slot, regulatory, token bucket, class gate, CCA].
     pub defer_ms: [u64; 6],
@@ -527,6 +532,31 @@ impl Node {
 
     pub fn dropped(&self, carrier: usize) -> u64 {
         self.carriers[carrier].dropped
+    }
+
+    /// What this node holds: objects it knows of, objects it holds complete, and for the rest
+    /// how many symbols each still lacks as a fraction of the object in tenths of a per cent.
+    /// An announcer that is chronically a hair short of many objects is an announcer that is
+    /// filling up by overhearing rather than by being served.
+    pub fn inventory(&self) -> (usize, usize, Vec<u16>) {
+        let mut known = 0;
+        let mut complete = 0;
+        let mut short = Vec::new();
+        for id in self.store.ids() {
+            let Some(e) = self.store.entry(id) else { continue };
+            known += 1;
+            if e.is_complete() {
+                complete += 1;
+                continue;
+            }
+            if let (have, Some(total)) = e.progress() {
+                if total > 0 {
+                    let missing = total.saturating_sub(have);
+                    short.push(((missing as u64 * 1000) / total as u64).min(1000) as u16);
+                }
+            }
+        }
+        (known, complete, short)
     }
 
     /// Our colour and the size of our conflict set (ourselves included).
@@ -1641,6 +1671,11 @@ impl Node {
         match self.store.put_symbol(b.object, b.block, b.esi, b.k, &b.payload) {
             Put::New => {
                 self.stats.symbols_new += 1;
+                if self.grants.contains_key(&b.object) {
+                    self.stats.symbols_served += 1;
+                } else {
+                    self.stats.symbols_overheard += 1;
+                }
                 let now = self.now;
                 let stall = self.cfg.params.t_nack_stall_ms;
                 let p = self.progress.entry(b.object).or_default();
