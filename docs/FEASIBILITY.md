@@ -445,9 +445,30 @@ The explanation first written here, that announcers fill up by overhearing each 
 never complete, was then measured and does not hold. On main an announcer is served: in a dense
 band L cell 57 and 97 % of the symbols its two announcers receive arrive for objects they asked
 for and had an uploader assigned to, on ESP-NOW 92 to 100 %, and they hold every object complete.
-On the branch the same announcers complete 4 and 8 of 22 objects. The branch combines the fountain
-carousel with a later partial-relay attempt that filled the channel with repeated symbols, so the
-cause is still open and the two are being measured separately.
+On the branch the same announcers completed 4 and 8 of 22 objects.
+
+Measuring the two changes apart found the real cause: the upload path still let through only
+symbol ids below K, a leftover from when a repair always named source symbols. Every repair
+answer on the branch uses ids beyond the carousel passes, so all of them were silently dropped
+(9 000 queued, 50 sent). With that fixed, on the variant `experiment/fountain-only`, the full
+reference set against main:
+
+| Scenario | main | fountain only |
+|---|---|---|
+| Band O, one announcer, 50 nodes | 100 %, 1.09 h, 0 % dup, 94 k frames | 100 %, 1.04 h, 0 % dup, 100 k frames |
+| Band O, four announcers, 100 nodes | 100 %, 1.60 h, 62 % dup, 0.65 M frames | 100 %, 1.98 h, 67 % dup, 2.6 M frames |
+| Band L neighbourhood | 100 %, 1.46 h, 27 % dup | 97.2 %, 2.10 h, 29 % dup |
+| Band L, 100 nodes on 15 km² | 100 %, 3.91 h, 36 % dup | 72.7 %, 3.62 h, 65 % dup |
+| ESP-NOW neighbourhood | 99.1 %, 0.80 h, 30 % dup | 94.5 %, 0.70 h, 27 % dup |
+| Clusters, band L | 100 %, 0.66 h, 7 % dup | 86.0 %, 0.47 h, 24 % dup |
+
+**Verdict: not merged.** The branch is equal where one announcer serves a cell, which is where
+main already has no duplicates, and worse everywhere else. The comparison also corrects the
+premise: main's duplicates do not come from a carousel repeating its passes (a single announcer
+has none) but from a node hearing several announcers send the *same* symbols of the same object.
+A fountain in which every announcer starts from the same ids does nothing about that. The sharper
+hypothesis for a later attempt is a symbol range per announcer, so that two carousels a node
+hears at once are never redundant.
 
 ### 7.7.2 Nodes that come and go
 
