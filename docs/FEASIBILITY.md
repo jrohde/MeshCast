@@ -386,7 +386,7 @@ Results, against the state before the pass:
 | Band O dynamics | 99.1 % | 99.1 % |
 | Band L neighbourhood, second pass | 90 % | **100 %** |
 | Band L town, 200 nodes on 30 km², 24 h | 66 % | **91.9 %** |
-| Band O town, 200 nodes on 30 km², 24 h | 100 %, median 7.3 h | 93.9 %, median 10.2 h |
+| Band O town, 200 nodes on 30 km², 24 h | 100 %, median 7.3 h | **100 %**, median 9.9 h |
 | Clusters, density, failover, two-node cases | 100 % | 100 %, and faster |
 
 Two of the nine were worth the whole pass on their own. Only announcers' NACKs may be answered by
@@ -397,10 +397,19 @@ their slot cycle: they had been computing it from their own view of the conflict
 arriving at 4, 5 and 6 slots side by side, so their turns overlapped anyway. The count now
 travels with the conflict reports until they agree.
 
-Band O at town scale is the one number that did not come back: 93.9 % against the 100 % it
-reached before the pass, at a longer median. Five announcers sharing one 250 kHz channel is the
-hardest case MeshCast has, and it is now limited by something other than the repair storm. That
-is the next thing to measure, not to guess at.
+Band O at town scale was the one number that did not come back at first: 93.9 % against the
+100 % it reached before the pass. Measuring rather than guessing found it in one look. Of the
+time its announcers spent not transmitting, **1 325 hours were spent waiting for a time slot**
+against 369 on listen-before-talk and 13 on the occupancy gate; the five announcers had agreed
+on a cycle of nine slots, so each idled eight ninths of the time. Three tracks never entered the
+mesh at all.
+
+Taking turns is for carriers where nothing else bounds what everyone adds up to. In band O the
+duty cycle already caps every transmitter at 10 %, so five announcers cannot exceed half the
+channel however they are arranged, and listen-before-talk handles the rest. With slots used only
+where no regulatory cap exists, the band O town returned to **100 % at a 9.9 hour median**, and
+the three orphaned tracks were delivered as well. The channel is busier for it (33 % occupancy
+against 13 %), a little above EtherFatsoen's 30 % target, which is the next thing to look at.
 
 ### 7.7.1 Nodes that come and go
 
