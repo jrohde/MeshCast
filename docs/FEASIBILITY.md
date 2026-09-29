@@ -411,7 +411,43 @@ where no regulatory cap exists, the band O town returned to **100 % at a 9.9 hou
 the three orphaned tracks were delivered as well. The channel is busier for it (33 % occupancy
 against 13 %), a little above EtherFatsoen's 30 % target, which is the next thing to look at.
 
-### 7.7.1 Nodes that come and go
+### 7.7.1 Fountain coding: tried, measured, not merged
+
+Looking at where the airtime went turned up a larger waste than anything the pass had fixed:
+**62 % of the symbols a node receives it already had**, and 75 % at town scale. A carousel makes
+several passes of the same symbols, and every node catches an overlapping subset of each.
+Fountain coding (RaptorQ, RFC 6330) is the standard answer: send a different encoding symbol
+every time, and let a receiver finish as soon as it holds *enough* of them rather than the right
+ones. It was in the roadmap as v1; the number made it the first thing worth building.
+
+It is implemented on the branch `experiment/fountain-coding`: fresh symbol ids per pass, a block
+that completes on `K + 2` distinct symbols (or on all `K` source symbols, since the code is
+systematic), a NACK that asks "three more" instead of naming symbols, and a `store::Decoder` hook
+where the real codec goes in firmware.
+
+| Scenario | On main | With fountain coding |
+|---|---|---|
+| One announcer, band O neighbourhood | 100 %, 62 % duplicates | **100 %, 0 % duplicates** |
+| Four announcers on one channel, 100 nodes | 100 %, 62 % duplicates | 100 %, 39 % duplicates, median 1.6 → 1.3 h |
+| Two announcers, band L neighbourhood | 100 % | **26 %** |
+| Five announcers, ESP-NOW neighbourhood | 98 % | **33 %** |
+
+Where one announcer serves a cell it is everything one could ask for: the duplicate traffic goes
+away completely. Where several announcers serve the same objects it collapses, and the reason is
+worth stating because it is not obvious:
+
+> A fountain needs a source that can produce unlimited fresh symbols, and only a node that holds
+> the whole object can do that. An announcer that is still collecting can generate nothing, so it
+> serves nothing and its cell starves. Letting it pass on the symbols it does hold was tried and
+> is worse: it repeats the same handful and duplicates rise to 80–94 %.
+
+So the prerequisite for fountain coding is not the codec. It is that every announcer completes an
+object before serving it, and in a cell with several announcers they do not, because they lean on
+overhearing each other rather than on being served. That is the same open question as the rest of
+this section, stated more sharply: **an announcer must be a first-class consumer, not an
+eavesdropper.** Solve that and the branch should merge; merge it first and a town stops working.
+
+### 7.7.2 Nodes that come and go
 
 The dynamics scenario originally kept every node switched on for the whole run. It now also
 models nodes going away and returning (batteries, pockets, switches) and newcomers: a node

@@ -420,7 +420,13 @@ arrives a few minutes later than it otherwise would. That is the entire user-vis
    bulk carrier per node so far.
 9. zsync-style delta transfer for updated objects (web bundles, firmware): the receiver compares
    the block lists of the old and new object and wants only the changed symbols.
-10. Cross-cell fetching among cells that cannot hear each other is the weakest part of the
+10. An announcer is a first-class consumer, not an eavesdropper. Today one fills up largely by
+    overhearing its neighbours' carousels, which works but leaves it permanently a few symbols
+    short and starves its own cell. Fountain coding, which would remove the 62 % of received
+    symbols that are duplicates, cannot be merged until this is fixed: a node that does not hold
+    a whole object cannot generate fresh symbols of it (FEASIBILITY.md §7.7.1). Making an
+    announcer ask for and be granted what it lacks, like any other node, is the next design step.
+11. Cross-cell fetching among cells that cannot hear each other is the weakest part of the
     protocol, and the Phase 0 answer is mixed. Conflict colouring with granted uploads took band O
     at town scale from a 10.5-hour to a 7.3-hour median at the same complete delivery, and the
     ESP-NOW neighbourhood from 78 % to 86–91 %; but it took band L at town scale from 100 % in
