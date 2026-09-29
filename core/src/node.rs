@@ -1326,8 +1326,10 @@ impl Node {
                 match &mut u.list {
                     Some(list) => loop {
                         match list.front().copied() {
+                            // Any valid encoding symbol id will do, not only the source symbols:
+                            // a repair answer deliberately uses ids beyond every carousel pass.
                             Some((block, esi)) => match self.store.block_k(&u.object, block) {
-                                Some(k) if esi < k => break Some(Cand::Upload(u.object, block, esi, k)),
+                                Some(k) if (esi as u32) < k as u32 * crate::store::ESI_SPAN => break Some(Cand::Upload(u.object, block, esi, k)),
                                 _ => {
                                     list.pop_front();
                                 }
@@ -1656,12 +1658,17 @@ impl Node {
     }
 
     fn rx_bulk(&mut self, _carrier: usize, b: &Bulk, out: &mut Vec<Action>) {
-        // Someone is sending this object: any offer of ours for it, and any answer we have not
-        // begun, is moot. This is what keeps an ungranted repair to one sender.
-        self.offers.retain(|(o, _, _)| *o != b.object);
+        // Someone else is answering: any answer of ours that has not begun is moot. That is what
+        // keeps an ungranted repair to one sender. But only an answer silences an answer. A
+        // carousel pass carries the same object to its own followers on its own channel and
+        // says nothing about whether the asker got what it needs; carousel passes and repairs
+        // use separate ranges of symbol ids, so the id tells them apart.
         let now = self.now;
-        for c in self.carriers.iter_mut() {
-            c.cancel_pending(b.object, now);
+        if b.esi >= CAROUSEL_PASSES.saturating_mul(b.k) {
+            self.offers.retain(|(o, _, _)| *o != b.object);
+            for c in self.carriers.iter_mut() {
+                c.cancel_pending(b.object, now);
+            }
         }
         let interested = self.wants.contains(&b.object) || self.store.is_known(&b.object) || self.is_announcing();
         if !interested {

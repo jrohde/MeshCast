@@ -143,11 +143,8 @@ impl Carousel {
         });
     }
 
-    /// Worth putting on the air: we hold something of it that somebody wants. A fountain code
-    /// makes every symbol we hold useful to someone who lacks it, so an announcer that is itself
-    /// still collecting can pass on what it has instead of serving nothing at all.
     fn eligible(&self, id: &ShortId, store: &MemStore) -> bool {
-        if store.held(id) == 0 {
+        if !store.has_complete(id) {
             return false;
         }
         let Some(w) = self.wants.get(id) else { return false };
@@ -183,7 +180,7 @@ impl Carousel {
         let include_always = self.always_due(now) || !wanted.is_empty();
         if include_always {
             for id in &self.always {
-                if store.held(id) > 0 {
+                if store.has_complete(id) {
                     scored.push((usize::MAX, *id));
                 }
             }
@@ -214,8 +211,8 @@ impl Carousel {
         while let Some(&(object, block, count)) = self.front.front() {
             if count > 0 {
                 if let Some(k) = store.block_k(&object, block) {
-                    if let Some(esi) = store.held_esi_from(&object, block, self.repair_esi(k)) {
-                        return Some(Item::Symbol { object, block, esi, k });
+                    if store.has_complete(&object) {
+                        return Some(Item::Symbol { object, block, esi: self.repair_esi(k), k });
                     }
                 }
             }
@@ -235,12 +232,9 @@ impl Carousel {
             }
             let object = self.set[self.idx];
             match store.block_k(&object, self.block) {
-                Some(k) => {
-                    let from = self.pass_offset(&object, k).saturating_add(self.esi);
-                    if let Some(esi) = store.held_esi_from(&object, self.block, from) {
-                        return Some(Item::Symbol { object, block: self.block, esi, k });
-                    }
-                    self.finish_object(now);
+                Some(k) if store.has_complete(&object) => {
+                    let esi = self.pass_offset(&object, k).saturating_add(self.esi);
+                    return Some(Item::Symbol { object, block: self.block, esi, k });
                 }
                 _ => self.finish_object(now),
             }
