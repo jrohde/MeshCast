@@ -34,8 +34,10 @@ pub struct Carousel {
     esi: u16,
     pub round: u16,
     at_round_start: bool,
+    /// Repairs owed: object, block, and how many more symbols were asked for.
     front: VecDeque<(ShortId, u16, u16)>,
-    front_set: BTreeSet<(ShortId, u16, u16)>,
+    /// Rolling id used to pick repair symbols nobody has heard yet.
+    repair_seq: u16,
     wants: BTreeMap<ShortId, BTreeMap<NodeId, Millis>>,
     always: BTreeSet<ShortId>,
     /// Completed passes and the time the last pass ended.
@@ -55,7 +57,7 @@ impl Carousel {
             round: 0,
             at_round_start: false,
             front: VecDeque::new(),
-            front_set: BTreeSet::new(),
+            repair_seq: 0,
             wants: BTreeMap::new(),
             always: BTreeSet::new(),
             passes: BTreeMap::new(),
@@ -77,22 +79,31 @@ impl Carousel {
         }
     }
 
-    pub fn on_nack(&mut self, id: ShortId, block: u16, ranges: &[(u16, u16)], store: &MemStore) {
+    /// Someone needs more symbols of an object we hold: owe them that many, once. A second ask
+    /// for the same block replaces the first rather than adding to it, because the asker is
+    /// telling us what it still lacks, not what to add.
+    pub fn on_nack(&mut self, id: ShortId, need: &[(u16, u16)], store: &MemStore) {
         if !store.has_complete(&id) {
             return;
         }
-        let Some(k) = store.block_k(&id, block) else { return };
-        for &(start, count) in ranges {
-            for esi in start..start.saturating_add(count).min(k) {
-                if self.front.len() >= MAX_FRONT {
-                    return;
-                }
-                let key = (id, block, esi);
-                if self.front_set.insert(key) {
-                    self.front.push_back(key);
-                }
+        for &(block, count) in need {
+            if store.block_k(&id, block).is_none() || count == 0 {
+                continue;
+            }
+            let room = self.front.len() < MAX_FRONT;
+            match self.front.iter_mut().find(|(o, b, _)| *o == id && *b == block) {
+                Some(entry) => entry.2 = entry.2.max(count),
+                None if room => self.front.push_back((id, block, count)),
+                None => {}
             }
         }
+    }
+
+    /// A repair symbol id nobody is likely to hold: beyond every carousel pass, and moving on.
+    fn repair_esi(&self, k: u16) -> u16 {
+        let base = crate::frame::CAROUSEL_PASSES.saturating_mul(k);
+        let room = (crate::store::ESI_SPAN as u16).saturating_sub(crate::frame::CAROUSEL_PASSES).max(1) * k;
+        base.saturating_add(self.repair_seq % room.max(1))
     }
 
     pub fn set_always(&mut self, id: ShortId) {
@@ -132,8 +143,11 @@ impl Carousel {
         });
     }
 
+    /// Worth putting on the air: we hold something of it that somebody wants. A fountain code
+    /// makes every symbol we hold useful to someone who lacks it, so an announcer that is itself
+    /// still collecting can pass on what it has instead of serving nothing at all.
     fn eligible(&self, id: &ShortId, store: &MemStore) -> bool {
-        if !store.has_complete(id) {
+        if store.held(id) == 0 {
             return false;
         }
         let Some(w) = self.wants.get(id) else { return false };
@@ -169,7 +183,7 @@ impl Carousel {
         let include_always = self.always_due(now) || !wanted.is_empty();
         if include_always {
             for id in &self.always {
-                if store.has_complete(id) {
+                if store.held(id) > 0 {
                     scored.push((usize::MAX, *id));
                 }
             }
@@ -187,16 +201,25 @@ impl Carousel {
         self.esi = 0;
     }
 
+    /// The encoding symbol id offset for the pass this object is on: every pass sends symbols
+    /// nobody has heard yet, so a node that missed a third of one pass completes on the next
+    /// instead of waiting to hear exactly the pieces it lacks.
+    fn pass_offset(&self, id: &ShortId, k: u16) -> u16 {
+        let pass = self.passes.get(id).map(|p| p.0).unwrap_or(0) % crate::frame::CAROUSEL_PASSES;
+        pass.saturating_mul(k)
+    }
+
     /// Next item to transmit, or None if the carousel is idle.
     pub fn peek(&mut self, store: &MemStore, now: Millis) -> Option<Item> {
-        while let Some(&(object, block, esi)) = self.front.front() {
-            if let Some(k) = store.block_k(&object, block) {
-                if store.has_complete(&object) {
-                    return Some(Item::Symbol { object, block, esi, k });
+        while let Some(&(object, block, count)) = self.front.front() {
+            if count > 0 {
+                if let Some(k) = store.block_k(&object, block) {
+                    if let Some(esi) = store.held_esi_from(&object, block, self.repair_esi(k)) {
+                        return Some(Item::Symbol { object, block, esi, k });
+                    }
                 }
             }
             self.front.pop_front();
-            self.front_set.remove(&(object, block, esi));
         }
         loop {
             if self.idx >= self.set.len() {
@@ -212,8 +235,12 @@ impl Carousel {
             }
             let object = self.set[self.idx];
             match store.block_k(&object, self.block) {
-                Some(k) if store.has_complete(&object) => {
-                    return Some(Item::Symbol { object, block: self.block, esi: self.esi, k });
+                Some(k) => {
+                    let from = self.pass_offset(&object, k).saturating_add(self.esi);
+                    if let Some(esi) = store.held_esi_from(&object, self.block, from) {
+                        return Some(Item::Symbol { object, block: self.block, esi, k });
+                    }
+                    self.finish_object(now);
                 }
                 _ => self.finish_object(now),
             }
@@ -233,8 +260,12 @@ impl Carousel {
 
     /// Advance past the item last returned by `peek` (it was transmitted).
     pub fn advance(&mut self, store: &MemStore, now: Millis) {
-        if let Some(key) = self.front.pop_front() {
-            self.front_set.remove(&key);
+        if let Some(entry) = self.front.front_mut() {
+            entry.2 = entry.2.saturating_sub(1);
+            self.repair_seq = self.repair_seq.wrapping_add(1);
+            if entry.2 == 0 {
+                self.front.pop_front();
+            }
             return;
         }
         if self.at_round_start {

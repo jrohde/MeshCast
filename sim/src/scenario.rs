@@ -11,7 +11,25 @@ use meshcast_core::params::Params;
 use meshcast_core::rng::Rng;
 use serde::Serialize;
 
+use std::collections::HashMap;
+use std::sync::Mutex;
+
 use crate::engine::Engine;
+
+/// The simulator's stand-in for a decoder: every object it publishes is recorded here, so a node
+/// that has collected enough encoding symbols can be handed the bytes exactly as RaptorQ would
+/// hand them to real firmware. Only objects small enough to be kept verbatim need it.
+static PUBLISHED: Mutex<Option<HashMap<[u8; 8], Vec<u8>>>> = Mutex::new(None);
+
+pub fn publish_bytes(id: ShortId, bytes: Vec<u8>) {
+    let mut g = PUBLISHED.lock().unwrap();
+    g.get_or_insert_with(HashMap::new).insert(id.0, bytes);
+}
+
+fn decode(id: &ShortId, len: u32) -> Option<Vec<u8>> {
+    let g = PUBLISHED.lock().unwrap();
+    g.as_ref().and_then(|m| m.get(&id.0)).map(|b| b[..b.len().min(len as usize)].to_vec())
+}
 use crate::radio::{bulk_phy, control_phy, profile_for, region_for, BulkPreset, Phy, Propagation};
 
 #[derive(Clone, Debug, Serialize)]
@@ -131,6 +149,7 @@ pub fn build(spec: &ScenarioSpec, params: Params) -> Built {
             params,
             seed: spec.seed.wrapping_add(i as u64 * 7919),
             keep_bytes_below: 4096,
+            decoder: Some(decode),
         })
         .collect();
 
@@ -155,6 +174,8 @@ pub fn build(spec: &ScenarioSpec, params: Params) -> Built {
         }
         let schedule: Vec<ScheduleEntry> = objects.iter().enumerate().map(|(t, o)| ScheduleEntry { object: o.id.short(), start: 3600 * (t as u64 + 1), repeat: 0 }).collect();
         let m = Manifest::sign(&key, 1, &format!("Channel of node {s}"), objects.clone(), schedule, None);
+        let (mm, mb) = m.as_object();
+        publish_bytes(mm.id.short(), mb);
         let chan = m.channel_id();
         engine.nodes[s].node.publish(&m, &metas);
         let mut followers = Vec::new();

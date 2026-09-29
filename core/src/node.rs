@@ -9,7 +9,7 @@ use crate::carousel::{Carousel, CarouselParams, Item};
 use crate::discipline::{Accounting, Verdict};
 use crate::election::{Election, Transition};
 use crate::fatsoen::Fatsoen;
-use crate::frame::{AnnounceEntry, Beacon, Bulk, CarrierKind, Class, Frame, FrameType, Gossip, ManifestAnnounce, Nack, MAX_ANNOUNCE_ENTRIES, MAX_GOSSIP_IDS, MAX_NACK_RANGES, MAX_WANT, SYMBOL_SIZE};
+use crate::frame::{AnnounceEntry, Beacon, Bulk, CarrierKind, Class, Frame, FrameType, Gossip, ManifestAnnounce, Nack, CAROUSEL_PASSES, MAX_ANNOUNCE_ENTRIES, MAX_GOSSIP_IDS, MAX_NACK_BLOCKS, MAX_WANT, SYMBOL_SIZE};
 use crate::ids::{ChannelId, NodeId, ShortId};
 use crate::manifest::Manifest;
 use crate::object::{Mime, ObjectMeta};
@@ -52,6 +52,8 @@ pub struct NodeConfig {
     pub params: Params,
     pub seed: u64,
     pub keep_bytes_below: usize,
+    /// Turns enough encoding symbols back into an object; see [`crate::store::Decoder`].
+    pub decoder: Option<crate::store::Decoder>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -157,6 +159,10 @@ struct Progress {
     last_progress: Millis,
     last_nack: Millis,
     last_want: Millis,
+    /// Symbols that arrived in the window beginning at `window_start`: the rate at which this
+    /// object is coming in.
+    window_start: Millis,
+    window_count: u32,
 }
 
 impl CarrierRt {
@@ -280,7 +286,10 @@ impl Node {
         let seed = cfg.seed ^ (cfg.id.0 as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
         let p = cfg.params;
         Node {
-            store: MemStore::new(cfg.keep_bytes_below),
+            store: match cfg.decoder {
+                Some(d) => MemStore::with_decoder(cfg.keep_bytes_below, d),
+                None => MemStore::new(cfg.keep_bytes_below),
+            },
             follows: BTreeSet::new(),
             manifests: BTreeMap::new(),
             own_manifests: Vec::new(),
@@ -655,7 +664,10 @@ impl Node {
     /// someone else. Keeps only its identity and its region profile.
     pub fn factory_reset(&mut self, now: Millis) {
         self.reboot(now);
-        self.store = MemStore::new(self.cfg.keep_bytes_below);
+        self.store = match self.cfg.decoder {
+            Some(d) => MemStore::with_decoder(self.cfg.keep_bytes_below, d),
+            None => MemStore::new(self.cfg.keep_bytes_below),
+        };
         self.follows.clear();
         self.manifests.clear();
         self.own_manifests.clear();
@@ -685,7 +697,8 @@ impl Node {
             }
         }
         if let Some(t) = self.offers.iter().map(|(_, _, at)| *at).min() {
-            d = d.min(t);
+            let cell = self.cell_carrier();
+            d = d.min(if self.hops(cell) { t.max(self.next_meeting_start(self.now)) } else { t });
         }
         if !self.is_announcing() {
             d = d.min(self.last_report + self.cfg.params.conflict_ttl_ms / 2);
@@ -1074,8 +1087,35 @@ impl Node {
         }
     }
 
-    /// Ask only for what is not coming: objects with a symbol in the last stall interval are
-    /// flowing and are left out. Each entry carries the granted uploader, if any.
+    /// Whether an object belongs on the want list. Two questions, and either one is enough.
+    ///
+    /// Is it coming in time? An object whose symbols are arriving fast enough to finish within
+    /// one stall interval needs no help. Merely arriving is not enough: a node overhearing a
+    /// neighbouring cell picks up a useful trickle for ever, and with a fountain code every one
+    /// of those symbols counts as progress, so "is anything arriving" would keep it quiet while
+    /// it needed days.
+    ///
+    /// Is anyone responsible for it? The want list is where an uploader is assigned. An object
+    /// that is nearly complete is normally repaired by a NACK rather than re-asked in full, but
+    /// only once it has an uploader: one collected by overhearing has none, however complete it
+    /// is, so it belongs on the list until it gets one.
+    fn worth_asking_for(&self, id: &ShortId, now: Millis, stall: Millis, thr: u64) -> bool {
+        let p = self.progress.get(id).copied().unwrap_or_default();
+        let rate = if now >= p.window_start + stall { 0 } else { p.window_count };
+        let short = self.store.entry(id).map(|e| e.short_by()).unwrap_or(u32::MAX);
+        if short > 0 && short <= rate {
+            return false;
+        }
+        if !self.grants.contains_key(id) {
+            return true;
+        }
+        match self.store.entry(id).map(|e| e.progress()) {
+            Some((have, Some(total))) => (have as u64) * 1000 < thr * total as u64,
+            _ => true,
+        }
+    }
+
+    /// Ask for what will not arrive in time. Each entry carries the granted uploader, if any.
     fn take_wants(&mut self) -> Vec<(ShortId, NodeId)> {
         let now = self.now;
         let stall = self.cfg.params.t_nack_stall_ms;
@@ -1090,24 +1130,7 @@ impl Node {
         let ids: Vec<ShortId> = self
             .wants
             .iter()
-            .filter(|id| {
-                let p = self.progress.get(id).copied().unwrap_or_default();
-                if !(now >= p.last_progress + stall || p.last_progress == 0) {
-                    return false;
-                }
-                // An object that is nearly complete is repaired by NACK rather than re-asked
-                // in full, but only once someone is responsible for it. The want list is where
-                // responsibility is assigned, and an object we collected by overhearing a
-                // neighbouring cell has no uploader at all: however complete it is, it belongs
-                // on the list until it has one.
-                if !self.grants.contains_key(id) {
-                    return true;
-                }
-                match self.store.entry(id).map(|e| e.progress()) {
-                    Some((have, Some(total))) => (have as u64) * 1000 < thr * total as u64,
-                    _ => true,
-                }
-            })
+            .filter(|id| self.worth_asking_for(id, now, stall, thr))
             .copied()
             .collect();
         if ids.is_empty() {
@@ -1180,7 +1203,7 @@ impl Node {
         let now = self.now;
         let thr = self.cfg.params.nack_threshold_permille as u64;
         let stall = self.cfg.params.t_nack_stall_ms;
-        let mut to_send: Option<(ShortId, u16, Vec<(u16, u16)>)> = None;
+        let mut to_send: Option<(ShortId, Vec<(u16, u16)>)> = None;
         for id in self.wants.iter() {
             let Some(e) = self.store.entry(id) else { continue };
             let (have, total) = e.progress();
@@ -1189,24 +1212,24 @@ impl Node {
                 continue;
             }
             let p = self.progress.get(id).copied().unwrap_or_default();
-            if now < p.last_progress + stall || now < p.last_nack + stall {
+            if now < p.last_nack + stall {
                 continue;
             }
-            for block in 0..e.known_blocks() {
-                let missing = self.store.missing(id, block);
-                if !missing.is_empty() {
-                    to_send = Some((*id, block, compress_ranges(&missing)));
-                    break;
-                }
+            let rate = if now >= p.window_start + stall { 0 } else { p.window_count };
+            let short = e.short_by();
+            if short <= rate && short > 0 {
+                continue; // arriving fast enough to finish within the interval
             }
-            if to_send.is_some() {
+            let need = self.store.short_blocks(id);
+            if !need.is_empty() {
+                to_send = Some((*id, need.into_iter().take(MAX_NACK_BLOCKS).collect()));
                 break;
             }
         }
-        if let Some((id, block, ranges)) = to_send {
+        if let Some((id, need)) = to_send {
             self.progress.entry(id).or_default().last_nack = now;
             let cell = self.cell_carrier();
-            self.enqueue(cell, Frame::Nack(Nack { node: self.cfg.id, object: id, block, missing: ranges }));
+            self.enqueue(cell, Frame::Nack(Nack { node: self.cfg.id, object: id, need }));
             self.stats.nacks_sent += 1;
         }
     }
@@ -1619,7 +1642,14 @@ impl Node {
             Put::New => {
                 self.stats.symbols_new += 1;
                 let now = self.now;
-                self.progress.entry(b.object).or_default().last_progress = now;
+                let stall = self.cfg.params.t_nack_stall_ms;
+                let p = self.progress.entry(b.object).or_default();
+                p.last_progress = now;
+                if now >= p.window_start + stall {
+                    p.window_start = now;
+                    p.window_count = 0;
+                }
+                p.window_count += 1;
             }
             Put::Complete => {
                 self.stats.symbols_new += 1;
@@ -1821,6 +1851,13 @@ impl Node {
     /// holder's offer for the same object was heard meanwhile.
     fn offer_check(&mut self) {
         let now = self.now;
+        let cell = self.cell_carrier();
+        // An offer answers an announcer that may be in another cell, on another hop sequence.
+        // Like every other frame meant to cross cells it goes out in the rendezvous, or it
+        // arrives on a channel the asker is not listening to.
+        if self.hops(cell) && !self.in_rendezvous(cell, now) {
+            return;
+        }
         let due: Vec<(ShortId, NodeId)> = self.offers.iter().filter(|(_, _, at)| *at <= now).map(|(o, a, _)| (*o, *a)).collect();
         if due.is_empty() {
             return;
@@ -1877,7 +1914,7 @@ impl Node {
             }
             if self.role(i) == Role::Announcer {
                 if let Some(car) = self.carriers[i].carousel.as_mut() {
-                    car.on_nack(n.object, n.block, &n.missing, &self.store);
+                    car.on_nack(n.object, &n.need, &self.store);
                 }
             } else {
                 // A follower asks its announcer, whose carousel puts the missing symbols at the
@@ -1904,16 +1941,22 @@ impl Node {
                     || c.upload.as_ref().map(|u| u.object == n.object && u.to == n.node).unwrap_or(false)
                     || c.upload_queue.iter().any(|u| u.object == n.object && u.to == n.node);
                 let start_at = if granted { self.now } else { self.now + ungranted_delay };
-                let Some(k) = self.store.block_k(&n.object, n.block) else { continue };
+                // Owe exactly as many symbols as were asked for, on ids beyond every carousel
+                // pass so that they are new to the asker whatever it already holds.
                 let mut list: VecDeque<(u16, u16)> = VecDeque::new();
-                for &(start, count) in &n.missing {
-                    for esi in start..start.saturating_add(count).min(k) {
-                        list.push_back((n.block, esi));
+                for &(block, count) in &n.need {
+                    let Some(k) = self.store.block_k(&n.object, block) else { continue };
+                    let base = CAROUSEL_PASSES.saturating_mul(k);
+                    let room = (crate::store::ESI_SPAN as u16).saturating_sub(CAROUSEL_PASSES).max(1) * k;
+                    for j in 0..count.min(k) {
+                        let spread = self.cfg.id.0 as u16 % room.max(1);
+                        list.push_back((block, base.saturating_add((spread + j) % room.max(1))));
                     }
                 }
                 if list.is_empty() {
                     continue;
                 }
+                let first_block = n.need.first().map(|(b, _)| *b).unwrap_or(0);
                 match c.upload.as_mut() {
                     Some(u) if u.object == n.object && u.to == n.node && u.list.is_some() => {
                         u.list.as_mut().unwrap().extend(list);
@@ -1923,7 +1966,7 @@ impl Node {
                     }
                     _ if c.upload_queue.iter().any(|u| u.object == n.object && u.to == n.node) => {}
                     _ => {
-                        c.add_upload(Upload { object: n.object, to: n.node, start_at, started: false, block: n.block, esi: 0, list: Some(list) }, true);
+                        c.add_upload(Upload { object: n.object, to: n.node, start_at, started: false, block: first_block, esi: 0, list: Some(list) }, true);
                         self.stats.repairs_queued += 1;
                     }
                 }
@@ -1946,29 +1989,4 @@ pub fn hop_channel(announcer: NodeId, dwell_index: u64, n: u64) -> u8 {
     z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
     z ^= z >> 31;
     (z % n.max(1)) as u8
-}
-
-fn compress_ranges(missing: &[u16]) -> Vec<(u16, u16)> {
-    let mut out: Vec<(u16, u16)> = Vec::new();
-    for &m in missing {
-        match out.last_mut() {
-            Some((start, count)) if *start + *count == m => *count += 1,
-            _ => {
-                if out.len() >= MAX_NACK_RANGES {
-                    break;
-                }
-                out.push((m, 1));
-            }
-        }
-    }
-    out
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn ranges() {
-        assert_eq!(compress_ranges(&[0, 1, 2, 5, 7, 8]), alloc::vec![(0, 3), (5, 1), (7, 2)]);
-    }
 }

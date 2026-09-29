@@ -161,6 +161,8 @@ struct Report {
     role_events: usize,
     airtime_share: Vec<(usize, Vec<f64>)>,
     occupancy_p50_bulk: f64,
+    occupancy_mean_bulk: f64,
+    occupancy_p90_bulk: f64,
     occupancy_max_bulk: f64,
     delivered_bytes_per_hour_per_announcer: f64,
     failover: Option<FailoverReport>,
@@ -385,6 +387,8 @@ fn run(spec: ScenarioSpec, common: &Common, failover: Option<(f64, f64)>) {
     let mut occ: Vec<f64> = m.occupancy_samples.iter().filter(|s| s.2 == bulk_c).map(|s| s.3 as f64 / 10.0).collect();
     occ.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let occ_p50 = percentile(&occ, 0.5).unwrap_or(0.0);
+    let occ_p90 = percentile(&occ, 0.9).unwrap_or(0.0);
+    let occ_mean = if occ.is_empty() { 0.0 } else { occ.iter().sum::<f64>() / occ.len() as f64 };
     let occ_max = occ.last().copied().unwrap_or(0.0);
 
     // Delivered bytes per announcer-hour: unique (node, object) completions × bytes / announcer hours.
@@ -471,6 +475,8 @@ fn run(spec: ScenarioSpec, common: &Common, failover: Option<(f64, f64)>) {
         role_events: m.role_events.len(),
         airtime_share,
         occupancy_p50_bulk: occ_p50,
+        occupancy_mean_bulk: occ_mean,
+        occupancy_p90_bulk: occ_p90,
         occupancy_max_bulk: occ_max,
         delivered_bytes_per_hour_per_announcer: dbph,
         failover: fo,
@@ -494,7 +500,15 @@ fn print_report(r: &Report, wall: std::time::Duration) {
     println!("announcers at end: {:?} ({} role events)", r.announcers_final, r.role_events);
     println!("collisions by frame type [beacon,bulk,gossip,announce,nack]: meeting dwell {:?}, other {:?}", &r.collided_meeting[1..], &r.collided_other[1..]);
     println!("bulk sent by [others, announcers]: {:?}; bulk collisions [sender other/announcer][interferer other/announcer]: {:?}; upload-upload same object {} / other object {}", r.bulk_sent_by, r.bulk_collision_kinds, r.upload_same, r.upload_other);
-    println!("bulk-channel occupancy at nodes: p50 {:.1} %, max {:.1} %", r.occupancy_p50_bulk, r.occupancy_max_bulk);
+    println!("bulk-channel occupancy at nodes: mean {:.1} %, p50 {:.1} %, p90 {:.1} %, max {:.1} %", r.occupancy_mean_bulk, r.occupancy_p50_bulk, r.occupancy_p90_bulk, r.occupancy_max_bulk);
+    println!("symbols received: {} new, {} duplicate ({:.0} % of everything a node hears it already had)",
+        r.core_stats.iter().map(|(_, s)| s.split("sym_new=").nth(1).and_then(|x| x.split_whitespace().next()).and_then(|x| x.parse::<u64>().ok()).unwrap_or(0)).sum::<u64>(),
+        r.core_stats.iter().map(|(_, s)| s.split("sym_dup=").nth(1).and_then(|x| x.split_whitespace().next()).and_then(|x| x.parse::<u64>().ok()).unwrap_or(0)).sum::<u64>(),
+        {
+            let n: u64 = r.core_stats.iter().map(|(_, s)| s.split("sym_new=").nth(1).and_then(|x| x.split_whitespace().next()).and_then(|x| x.parse::<u64>().ok()).unwrap_or(0)).sum();
+            let d: u64 = r.core_stats.iter().map(|(_, s)| s.split("sym_dup=").nth(1).and_then(|x| x.split_whitespace().next()).and_then(|x| x.parse::<u64>().ok()).unwrap_or(0)).sum();
+            if n + d > 0 { 100.0 * d as f64 / (n + d) as f64 } else { 0.0 }
+        });
     println!("delivered to followers: {:.2} MB per hour per announcer", r.delivered_bytes_per_hour_per_announcer / 1e6);
     println!("\nairtime share per transmitting node, busiest first (control, bulk):");
     for (i, s) in r.airtime_share.iter().take(12) {
@@ -645,6 +659,8 @@ fn run_dynamics(nodes: usize, area_km2: f64, stations: usize, channels: usize, f
                 src.seq += 1;
                 let schedule: Vec<ScheduleEntry> = src.objects.iter().enumerate().map(|(k, o)| ScheduleEntry { object: o.id.short(), start: t / 1000 + 3600 * k as u64, repeat: 0 }).collect();
                 let m = Manifest::sign(&src.key, src.seq, &format!("Channel {c}"), src.objects.clone(), schedule, None);
+                let (mm, mb) = m.as_object();
+                scenario::publish_bytes(mm.id.short(), mb);
                 let node = src.node;
                 built.engine.nodes[node].node.publish(&m, &[(o.meta(), None)]);
                 built.engine.poke(node);

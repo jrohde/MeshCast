@@ -24,30 +24,65 @@ pub enum Put {
     Rejected,
 }
 
+/// How far beyond the source symbols encoding symbol ids may run. A carousel sends fresh
+/// symbols on every pass, so the ids of one block span several multiples of K.
+pub const ESI_SPAN: u32 = 8;
+
+/// How many distinct encoding symbols decode a block of K source symbols. RaptorQ (RFC 6330)
+/// needs K + 2 for a failure probability below one in a million; the source symbols themselves
+/// are the first K, so receiving all of those costs nothing extra.
+pub fn needed(k: u16) -> u16 {
+    if k > 4 {
+        k + 2
+    } else {
+        k
+    }
+}
+
 #[derive(Clone, Debug)]
 struct Block {
     k: u16,
+    /// Which encoding symbol ids we hold, over `k * ESI_SPAN` ids. Source symbols are the
+    /// first `k`; the rest are repair symbols, each as good as any other.
     have: Vec<u64>,
     count: u16,
+    source_count: u16,
 }
 
 impl Block {
     fn new(k: u16) -> Self {
-        Block { k, have: vec![0u64; (k as usize + 63) / 64], count: 0 }
+        let span = k as usize * ESI_SPAN as usize;
+        Block { k, have: vec![0u64; span.div_ceil(64)], count: 0, source_count: 0 }
+    }
+    fn span(&self) -> u32 {
+        self.k as u32 * ESI_SPAN
     }
     fn has(&self, esi: u16) -> bool {
-        esi < self.k && (self.have[esi as usize / 64] >> (esi % 64)) & 1 == 1
+        (esi as u32) < self.span() && (self.have[esi as usize / 64] >> (esi % 64)) & 1 == 1
     }
     fn set(&mut self, esi: u16) -> bool {
-        if self.has(esi) {
+        if (esi as u32) >= self.span() || self.has(esi) {
             return false;
         }
         self.have[esi as usize / 64] |= 1u64 << (esi % 64);
         self.count += 1;
+        if esi < self.k {
+            self.source_count += 1;
+        }
         true
     }
-    fn complete(&self) -> bool {
-        self.count == self.k
+    /// How many more encoding symbols this block needs. What comes back will be repair symbols,
+    /// which count towards decoding and not towards completing the source set, so this is the
+    /// decoding shortfall. Asking for the smaller "source symbols I still lack" would leave the
+    /// block short again on arrival and cost another round of asking.
+    fn short_by(&self) -> u16 {
+        needed(self.k).saturating_sub(self.count)
+    }
+    /// A systematic code costs nothing when the source symbols all arrive: they are the object.
+    /// Otherwise a codec turns any `needed(k)` distinct symbols into it, and a node without one
+    /// has to keep waiting for the source symbols themselves.
+    fn complete(&self, decoder: bool) -> bool {
+        self.source_count == self.k || (decoder && self.count >= needed(self.k))
     }
 }
 
@@ -81,20 +116,48 @@ impl Entry {
         let total = self.len().map(crate::object::total_symbols);
         (have, total)
     }
+
+    /// How many more encoding symbols this object needs in total.
+    pub fn short_by(&self) -> u32 {
+        let Some(len) = self.len() else { return u32::MAX };
+        (0..blocks(len))
+            .map(|b| match self.blocks.get(b as usize).and_then(|x| x.as_ref()) {
+                Some(blk) => blk.short_by() as u32,
+                None => needed(block_k(len, b)) as u32,
+            })
+            .sum()
+    }
     pub fn known_blocks(&self) -> u16 {
         self.blocks.len() as u16
     }
 }
 
-#[derive(Clone, Debug)]
+/// Turns enough encoding symbols back into the object. Core does the bookkeeping of which
+/// symbols exist and how many are enough; producing the bytes is arithmetic that belongs
+/// elsewhere: RaptorQ (RFC 6330) in firmware, a lookup in the simulator. A store without one
+/// can only finish an object whose source symbols it holds in full.
+pub type Decoder = fn(&ShortId, u32) -> Option<Vec<u8>>;
+
+#[derive(Clone)]
 pub struct MemStore {
     entries: BTreeMap<ShortId, Entry>,
     keep_bytes_below: usize,
+    decoder: Option<Decoder>,
+}
+
+impl core::fmt::Debug for MemStore {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("MemStore").field("entries", &self.entries.len()).finish()
+    }
 }
 
 impl MemStore {
     pub fn new(keep_bytes_below: usize) -> Self {
-        MemStore { entries: BTreeMap::new(), keep_bytes_below }
+        MemStore { entries: BTreeMap::new(), keep_bytes_below, decoder: None }
+    }
+
+    pub fn with_decoder(keep_bytes_below: usize, decoder: Decoder) -> Self {
+        MemStore { entries: BTreeMap::new(), keep_bytes_below, decoder: Some(decoder) }
     }
 
     pub fn entry(&self, id: &ShortId) -> Option<&Entry> {
@@ -133,6 +196,7 @@ impl MemStore {
     pub fn ensure(&mut self, meta: ObjectMeta) {
         let short = meta.id.short();
         let keep = (meta.len as usize) <= self.keep_bytes_below;
+        let decoder = self.decoder;
         let e = self.entries.entry(short).or_insert_with(|| Entry {
             short,
             meta: None,
@@ -151,13 +215,14 @@ impl MemStore {
                 e.bytes = Some(vec![0u8; nb * K_MAX as usize * SYMBOL_SIZE]);
             }
             // A provisional entry may already be complete for all its blocks.
-            Self::recheck(e);
+            Self::recheck(e, decoder);
         }
     }
 
     /// Register an object by short id with a length hint (from MANIFEST_ANNOUNCE).
     pub fn ensure_hint(&mut self, short: ShortId, len: u32, mime: Mime) {
         let keep = (len as usize) <= self.keep_bytes_below;
+        let decoder = self.decoder;
         let e = self.entries.entry(short).or_insert_with(|| Entry {
             short,
             meta: None,
@@ -178,7 +243,7 @@ impl MemStore {
             if keep && e.bytes.is_none() {
                 e.bytes = Some(vec![0u8; nb * K_MAX as usize * SYMBOL_SIZE]);
             }
-            Self::recheck(e);
+            Self::recheck(e, decoder);
         }
     }
 
@@ -212,10 +277,11 @@ impl MemStore {
     }
 
     pub fn put_symbol(&mut self, short: ShortId, block: u16, esi: u16, k: u16, payload: &[u8]) -> Put {
-        if k == 0 || k > K_MAX || esi >= k {
+        if k == 0 || k > K_MAX || (esi as u32) >= k as u32 * ESI_SPAN {
             return Put::Rejected;
         }
         let keep_below = self.keep_bytes_below;
+        let decoder = self.decoder;
         let e = self.entries.entry(short).or_insert_with(|| Entry {
             short,
             meta: None,
@@ -259,7 +325,7 @@ impl MemStore {
         } else if e.len().map(|l| (l as usize) <= keep_below).unwrap_or(false) {
             // Should not happen: ensure() allocates. Ignore.
         }
-        Self::recheck(e);
+        Self::recheck(e, decoder);
         if e.complete {
             Put::Complete
         } else {
@@ -267,15 +333,30 @@ impl MemStore {
         }
     }
 
-    fn recheck(e: &mut Entry) {
+    fn recheck(e: &mut Entry, decoder: Option<Decoder>) {
         let Some(len) = e.len() else { return };
         let nb = blocks(len) as usize;
         if e.blocks.len() < nb {
             return;
         }
-        let all = (0..nb).all(|b| e.blocks[b].as_ref().map(|x| x.complete() && x.k == block_k(len, b as u16)).unwrap_or(false));
+        let can_decode = e.bytes.is_none() || decoder.is_some();
+        let all = (0..nb).all(|b| e.blocks[b].as_ref().map(|x| x.complete(can_decode) && x.k == block_k(len, b as u16)).unwrap_or(false));
         if !all {
             return;
+        }
+        // Bytes we keep and did not receive in full: the decoder turns what we did receive back
+        // into the object.
+        if let (Some(d), Some(bytes)) = (decoder, e.bytes.as_mut()) {
+            let holes = (0..nb).any(|b| e.blocks[b].as_ref().map(|x| x.source_count != x.k).unwrap_or(true));
+            if holes {
+                match d(&e.short, len) {
+                    Some(decoded) => {
+                        let n = decoded.len().min(bytes.len());
+                        bytes[..n].copy_from_slice(&decoded[..n]);
+                    }
+                    None => return,
+                }
+            }
         }
         e.complete = true;
         e.verified = match (e.meta, e.bytes.as_ref()) {
@@ -291,11 +372,16 @@ impl MemStore {
         }
     }
 
-    /// Copy symbol `esi` of `block` into `buf` (must be `SYMBOL_SIZE`). Returns false if absent.
+    /// Copy encoding symbol `esi` of `block` into `buf` (must be `SYMBOL_SIZE`). A node that
+    /// holds the object can produce any symbol of it, source or repair: having decoded it once,
+    /// it can encode it again. A node that is still collecting can only pass on what it holds.
     pub fn get_symbol(&self, short: &ShortId, block: u16, esi: u16, buf: &mut [u8]) -> bool {
         let Some(e) = self.entries.get(short) else { return false };
         let Some(Some(b)) = e.blocks.get(block as usize) else { return false };
-        if !b.has(esi) {
+        if (esi as u32) >= b.span() {
+            return false;
+        }
+        if !e.complete && !b.has(esi) {
             return false;
         }
         match e.bytes.as_ref() {
@@ -312,6 +398,22 @@ impl MemStore {
         true
     }
 
+    /// The lowest encoding symbol id of this block that we hold and that is at least `from`.
+    /// A node may pass on what it holds even when it does not hold all of it.
+    pub fn held_esi_from(&self, short: &ShortId, block: u16, from: u16) -> Option<u16> {
+        let e = self.entries.get(short)?;
+        let b = e.blocks.get(block as usize)?.as_ref()?;
+        if e.complete {
+            return if (from as u32) < b.span() { Some(from) } else { None };
+        }
+        (from as u32..b.span()).map(|x| x as u16).find(|&esi| b.has(esi))
+    }
+
+    /// How many encoding symbols of this object we hold, complete or not.
+    pub fn held(&self, short: &ShortId) -> u32 {
+        self.entries.get(short).map(|e| e.blocks.iter().flatten().map(|b| b.count as u32).sum()).unwrap_or(0)
+    }
+
     pub fn block_k(&self, short: &ShortId, block: u16) -> Option<u16> {
         let e = self.entries.get(short)?;
         if let Some(len) = e.len() {
@@ -321,13 +423,31 @@ impl MemStore {
         e.blocks.get(block as usize).and_then(|b| b.as_ref().map(|b| b.k))
     }
 
-    pub fn missing(&self, short: &ShortId, block: u16) -> Vec<u16> {
-        let Some(e) = self.entries.get(short) else { return Vec::new() };
-        let Some(k) = self.block_k(short, block) else { return Vec::new() };
+    /// How many more encoding symbols a block needs, and the lowest id we do not hold (which a
+    /// sender without a codec uses to pick a useful symbol).
+    pub fn block_short_by(&self, short: &ShortId, block: u16) -> u16 {
+        let Some(e) = self.entries.get(short) else { return 0 };
+        let Some(k) = self.block_k(short, block) else { return 0 };
         match e.blocks.get(block as usize) {
-            Some(Some(b)) => (0..k).filter(|&i| !b.has(i)).collect(),
-            _ => (0..k).collect(),
+            Some(Some(b)) => b.short_by(),
+            _ => needed(k),
         }
+    }
+
+    /// The blocks of this object that still need symbols, with how many each needs.
+    pub fn short_blocks(&self, short: &ShortId) -> Vec<(u16, u16)> {
+        let Some(e) = self.entries.get(short) else { return Vec::new() };
+        let Some(len) = e.len() else { return Vec::new() };
+        (0..blocks(len))
+            .filter_map(|b| {
+                let n = self.block_short_by(short, b);
+                if n > 0 {
+                    Some((b, n))
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     /// Full bytes of a complete object whose bytes were retained.
@@ -385,7 +505,32 @@ mod tests {
         let bad = [6u8; SYMBOL_SIZE];
         assert_eq!(st.put_symbol(short, 0, 2, 3, &bad), Put::New); // completed but failed verification
         assert!(!st.has_complete(&short));
-        assert_eq!(st.missing(&short, 0).len(), 3);
+        assert_eq!(st.block_short_by(&short, 0), 3);
+    }
+
+    #[test]
+    fn any_enough_symbols_decode() {
+        // 600 bytes is three source symbols; with a codec any three distinct encoding symbols
+        // do, whichever they are, so a receiver that missed two of the first pass completes on
+        // the next without asking for anything by name.
+        let meta = ObjectMeta { id: ObjectId::of(&[7u8; 600]), len: 600, mime: Mime::Audio };
+        let mut st = MemStore::new(0); // keeps no bytes: a node with a codec
+        st.ensure(meta);
+        let short = meta.id.short();
+        assert_eq!(st.put_symbol(short, 0, 0, 3, &[0; SYMBOL_SIZE]), Put::New);
+        assert_eq!(st.block_short_by(&short, 0), 2);
+        // Two repair symbols from a later pass finish it; symbols 1 and 2 were never heard.
+        assert_eq!(st.put_symbol(short, 0, 4, 3, &[0; SYMBOL_SIZE]), Put::New);
+        assert_eq!(st.put_symbol(short, 0, 7, 3, &[0; SYMBOL_SIZE]), Put::Complete);
+        assert_eq!(st.block_short_by(&short, 0), 0);
+        assert!(st.has_complete(&short));
+        // A node that keeps the bytes has no codec and needs the source symbols themselves.
+        let mut verbatim = MemStore::new(1 << 20);
+        verbatim.ensure(meta);
+        verbatim.put_symbol(short, 0, 0, 3, &[0; SYMBOL_SIZE]);
+        verbatim.put_symbol(short, 0, 4, 3, &[0; SYMBOL_SIZE]);
+        verbatim.put_symbol(short, 0, 7, 3, &[0; SYMBOL_SIZE]);
+        assert!(!verbatim.has_complete(&short));
     }
 
     #[test]

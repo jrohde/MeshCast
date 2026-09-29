@@ -7,13 +7,18 @@ use crate::crc::crc16;
 use crate::ids::{ChannelId, NodeId, ShortId};
 
 pub const VERSION: u8 = 0;
+/// Encoding symbol ids a carousel pass uses: pass `p` of a block of `k` source symbols sends
+/// ids `p*k .. (p+1)*k`, so every pass carries symbols nobody has heard before.
+pub const CAROUSEL_PASSES: u16 = 3;
+
 /// Symbol size `T` in bytes. One symbol per BULK frame.
 pub const SYMBOL_SIZE: usize = 200;
 pub const MAX_GOSSIP_IDS: usize = 12;
 /// WANT entries carry a granted uploader (12 bytes each), so fewer fit.
 pub const MAX_WANT: usize = 8;
 pub const MAX_ANNOUNCE_ENTRIES: usize = 8;
-pub const MAX_NACK_RANGES: usize = 40;
+/// Blocks one NACK may ask about.
+pub const MAX_NACK_BLOCKS: usize = 40;
 pub const MAX_HEARD: usize = 3;
 pub const MAX_FRAME: usize = 250;
 
@@ -131,9 +136,9 @@ pub struct ManifestAnnounce {
 pub struct Nack {
     pub node: NodeId,
     pub object: ShortId,
-    pub block: u16,
-    /// Missing source symbols as `(first_esi, count)` ranges.
-    pub missing: Vec<(u16, u16)>,
+    /// Per block, how many more encoding symbols are needed. With a fountain code the asker does
+    /// not care which ones it gets, so it never has to name them.
+    pub need: Vec<(u16, u16)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -245,11 +250,10 @@ impl Frame {
                 out.push(0);
                 out.extend_from_slice(&n.node.0.to_le_bytes());
                 out.extend_from_slice(&n.object.0);
-                out.extend_from_slice(&n.block.to_le_bytes());
-                let nr = n.missing.len().min(MAX_NACK_RANGES);
+                let nr = n.need.len().min(MAX_NACK_BLOCKS);
                 out.push(nr as u8);
-                for (start, count) in &n.missing[..nr] {
-                    out.extend_from_slice(&start.to_le_bytes());
+                for (block, count) in &n.need[..nr] {
+                    out.extend_from_slice(&block.to_le_bytes());
                     out.extend_from_slice(&count.to_le_bytes());
                 }
             }
@@ -351,21 +355,20 @@ impl Frame {
             5 => {
                 let node = NodeId(c.u32()?);
                 let object = c.short()?;
-                let block = c.u16()?;
                 let nr = c.u8()? as usize;
-                if nr > MAX_NACK_RANGES {
+                if nr > MAX_NACK_BLOCKS {
                     return Err(DecodeError::BadLength);
                 }
-                let mut missing = Vec::with_capacity(nr);
+                let mut need = Vec::with_capacity(nr);
                 for _ in 0..nr {
-                    let start = c.u16()?;
+                    let block = c.u16()?;
                     let count = c.u16()?;
                     if count == 0 {
                         return Err(DecodeError::BadValue);
                     }
-                    missing.push((start, count));
+                    need.push((block, count));
                 }
-                Frame::Nack(Nack { node, object, block, missing })
+                Frame::Nack(Nack { node, object, need })
             }
             _ => return Err(DecodeError::BadType),
         };
@@ -442,7 +445,7 @@ mod tests {
                 node: NodeId(5),
                 entries: vec![AnnounceEntry { channel: ChannelId([6; 8]), manifest: ShortId([7; 8]), seq: 9, len: 1234 }; 8],
             }),
-            Frame::Nack(Nack { node: NodeId(8), object: ShortId([2; 8]), block: 0, missing: vec![(0, 3), (10, 1)] }),
+            Frame::Nack(Nack { node: NodeId(8), object: ShortId([2; 8]), need: vec![(0, 3), (10, 1)] }),
         ];
         for f in frames {
             let bytes = f.encode();
