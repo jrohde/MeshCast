@@ -150,18 +150,21 @@ and fetch them through bridge nodes.
 
 | Offset | Size | Field |
 |---|---|---|
+| 1 | 1 | flags: bulk carrier kind (3 bits) |
 | 2 | 4 | `announcer_id` (first 4 bytes of the node's public key hash) |
 | 6 | 2 | `score` (see §5) |
 | 8 | 2 | `next_ms` — milliseconds until the next beacon from this announcer |
-| 10 | 2 | `epoch` — carousel epoch, increments when the carousel set changes |
+| 10 | 2 | `round` — carousel round counter |
 | 12 | 8 | `utc` — UTC seconds if known, else 0 |
 | 20 | 1 | `time_quality` — 0 none, 1 mesh-derived, 2 phone/NTP, 3 GPS |
-| 21 | 1 | `channel_map` — which bulk channels of the profile this announcer uses |
-| 22 | 4 | `occupancy` — measured channel occupancy per bulk channel, 4 × u8 percent ("spectrum weather") |
-| 26 | 2 | CRC |
+| 21 | 1 | `colour` — this announcer's rank in its conflict set: its channel offset, or its time slot on a single-channel carrier |
+| 22 | 1 | `colours` — colours in use around it: how many slots the cycle has |
+| 23 | 1 | `upload_phases` — how many phases its listening time is divided into for uploads (§4); 1 means none |
+| 24 | 4 | `occupancy` — measured channel occupancy per bulk channel, 4 × u8 percent ("spectrum weather") |
+| 28 | 2 | CRC-16 |
 
-28 bytes. Sent on the control carrier at `T_beacon` (draft 60 s) and also embedded as the first
-frame of every carousel round on the bulk carrier.
+30 bytes. Sent on the bulk carrier every `T_beacon` (draft 60 s), at every dwell start on a
+hopping carrier, and as the first frame of every carousel round.
 
 ### 3.2 `BULK`
 
@@ -170,25 +173,40 @@ frame of every carousel round on the bulk carrier.
 | 2 | 8 | `object_short_id` |
 | 10 | 2 | `block` — source block index |
 | 12 | 2 | `esi` — encoding symbol id; `< K` is a source symbol, `>= K` a repair symbol (v1) |
-| 14 | 2 | `k` — K for this block, so a receiver can allocate without the manifest |
-| 16 | T | payload |
-| 16+T | 2 | CRC |
+| 14 | 4 | `len` — the object's length in bytes |
+| 18 | T | payload |
+| 18+T | 2 | CRC |
 
-With `T = 200`: 218 bytes. Fits SX126x and ESP-NOW.
+With `T = 200`: 220 bytes. Fits SX126x and ESP-NOW.
+
+**A symbol carries what it takes to use it.** The object's length fixes its number of blocks
+and each block's K, so a node that hears any symbol can register the object, place the symbol and
+complete the object from symbols alone, before or without its manifest. ALC, under FLUTE, can do
+the same: its EXT_FTI header extension carries the FEC Object Transmission Information in the
+packets themselves (RFC 5775 §4.2), and for RaptorQ that information starts with the transfer
+length (RFC 6330 §3.3.2). The manifest, when it arrives, is still the authority: its signed id verifies the
+bytes, and if it gives a different length the entry is reset. The field replaces an earlier `k`
+(K of this block), which the length determines; the frame grew by 2 bytes, 0.9 %. Without the
+length, a node that had heard every symbol of an object but not its metadata could never complete
+it, and a want for such an object was granted and answered over and over; FEASIBILITY.md §9.6.
 
 ### 3.3 `GOSSIP`
 
 | Offset | Size | Field |
 |---|---|---|
+| 1 | 1 | flags: `n_heard` |
 | 2 | 4 | `node_id` |
-| 6 | 4 | `announcer_id` — the announcer this node currently follows (0 if none heard) |
-| 10 | 1 | `n_have`, complete objects listed |
-| 11 | 1 | `n_want` |
-| 12 | 8 × n_have | short ids the node has completely |
-| … | 8 × n_want | short ids the node wants (from followed manifests) |
-| … | 2 | CRC |
+| 6 | 4 | `announcer_id` — the announcer this node currently follows (its own id if it announces, 0 if none heard) |
+| 10 | 1 | `announcer_colour` — that announcer's colour, so holders can reach it without having heard its beacon |
+| 11 | 1 | `announcer_colours` — the number of colours in its cycle |
+| 12 | 1 | `n_have`, complete objects listed |
+| 13 | 1 | `n_want` |
+| 14 | 6 × n_heard | other announcers this node hears: id (4), colour (1), colours (1); the conflict report (§5) |
+| … | 8 × n_have | short ids the node has completely |
+| … | 13 × n_want | wants: short id (8), granted holder (4; 0 = open ask), upload phase of the grant (1; §4) |
+| … | 2 | CRC-16 |
 
-Draft cap: 12 have + 12 want per frame, 206 bytes. For larger libraries a node rotates through
+Draft cap: 3 heard + 12 have + 8 want per frame, 234 bytes. For larger libraries a node rotates through
 its list across gossip rounds, most recently completed and most wanted first. Followers that are
 not sources send GOSSIP only when they have something new to offer that the announcer lacks (the
 "upload" case) or, rarely, a WANT for an object the announcer has never included; the default is
@@ -200,11 +218,24 @@ silence.
 
 ### 3.5 `NACK` (v0 repair)
 
-`object_short_id` (8) + `block` (2) + a bitmap of missing source symbols, run-length encoded,
-max 200 bytes, + CRC. Sent by a follower only when the object is at least 80 % complete and the
-carousel has not offered the missing symbols for two rounds. The announcer merges NACKs into its
-next round. This is the whole repair mechanism in v0; it costs one small control frame per object
-per follower at most, which is negligible next to the object itself.
+| Offset | Size | Field |
+|---|---|---|
+| 1 | 1 | flags: the upload phase answers use (low 4 bits; §4), set by an announcer |
+| 2 | 4 | `node_id` of the asker |
+| 6 | 8 | `object_short_id` |
+| 14 | 2 | `block` |
+| 16 | 4 | `answerer` — the holder an announcer names to answer (0: any holder, after a wait) |
+| 20 | 1 | `n_ranges` |
+| 21 | 4 × n_ranges | missing source symbols as (first `esi` u16, count u16) runs |
+| … | 2 | CRC-16 |
+
+Draft cap 40 ranges, 183 bytes. Sent by a node that is nearly complete on an object (draft 80 %)
+and has seen no progress for `T_nack_stall`. A follower's NACK goes to its announcer, whose
+carousel puts the missing symbols at the front of the next round. An announcer's NACK names
+who answers, and in which phase: its granted uploader if the object has one, otherwise the holder
+of the object it hears best (holders say what they have in GOSSIP HAVE). The named holder answers
+at once; only if the announcer knows no holder does any holder answer, after a wait. This is the whole repair mechanism in v0; it costs one small control frame per object
+per asker at most, which is negligible next to the object itself.
 
 v1 replaces most NACKs with RaptorQ repair symbols (`esi >= K`) generated by the announcer at a
 configurable overhead (draft 10 %), so that receivers that missed any `≤ 10 %` of a block recover
@@ -261,10 +292,53 @@ announcer grants the first offer it hears and names that holder in its next WANT
 holder uploads, one object at a time (further grants queue), on the announcer's channel and in
 its slot. A grant lapses after `T_grant` without a symbol arriving, counted from the grant or
 from the last symbol, whichever is later, and the ask becomes open again: an uploader that
-delivered once and then fell silent is no more responsible than one that never started. NACKs from an announcer are answered only by its granted
-uploader. This is the DHCP pattern, and it replaced "any holder answers after a random wait",
+delivered once and then fell silent is no more responsible than one that never started. An
+announcer's NACK names who answers (§3.5). **An announcer's HAVE is not an offer**: it lists what
+its carousel serves, and announcers do not upload. So only a node that follows someone else can
+be granted, and only its HAVE silences other holders' offers. Before this rule an announcer could
+grant another announcer, which never sent, and the followers that would have offered fell silent
+because they had heard the other announcer's HAVE; FEASIBILITY.md §9.6. This is the DHCP pattern, and it replaced "any holder answers after a random wait",
 which the simulator showed producing fourteen uploads per object per cell among holders that
 could not hear each other's suppression.
+
+**The receiver divides its listening time.** Holders on opposite sides of a cell cannot hear
+each other, so carrier sensing cannot make them take turns, and their uploads collide at the
+announcer. The announcer, the only one that can tell, divides its listening time among those it
+asks to speak. Each grant carries a phase: the lowest one no running grant uses, in the WANT
+entry that names the holder. The announcer's beacon carries `upload_phases`, K = the highest
+phase in use + 1. A phase lasts `T_upload_phase` (1 s, one permitted transmission under polite
+access), and an uploader transmits only in its own phase of each cycle of K phases; an uploader
+that has not yet heard the new K after a grant uses its phase + 1. One running upload has K = 1
+and all the time. K follows the number of running uploads, so as many may run at once as before,
+and none overlaps another. When a grant ends its phase is free for the next one, and K shrinks
+once the highest phase is released. An announcer grants at most 16 uploads at once; a holder
+that offers when all phases are taken is granted on a later WANT. The cost is one byte in the
+beacon and one per WANT entry. Hashing object and holder to a phase instead needed K = 16 far too
+often (the birthday problem), and fixed phases cut the airtime but made a bulletin 50 % slower;
+FEASIBILITY.md §9.6.
+
+An announcer divides its listening time only under polite access, and announces K = 1 elsewhere.
+Under polite access every transmission is at most `Ton_max` and followed by a pause, so an upload
+is spread over minutes and hidden uploaders overlap. Under a duty cycle budgeted per hour, or on a
+carrier without a limit, an upload is a burst of seconds at the full rate that rarely meets
+another; holding it to one phase in K made it K times slower (a median upload of 39 s instead of
+4 s in band O) and the bulletin a third to two fifths slower. This is the rule for time slots
+(§5.3) turned around: slots are for carriers the regulator does not cap, phases for the one where
+its cap makes uploads long.
+
+**Every upload to an announcer runs in a phase the announcer named, by the holder it named.** A
+grant names both in the WANT. An announcer's NACK names both too (§3.5): the granted uploader and
+its phase if the object has one, otherwise the holder it hears best and a phase reserved for
+repairs of that object until it completes or `T_grant` passes without a symbol. Answers that
+nobody named, from holders that cannot hear each other, were nearly all the collisions left in
+band L after grants had phases; FEASIBILITY.md §9.6.
+
+**A grant ends with the announcer's role.** Grants belong to the announcer role: a node that
+stops announcing drops them, and it never names a holder in the WANT it sends as a follower. A
+holder stops every upload to a node, and forgets that node's grants, as soon as it hears that
+node say it follows someone else (any GOSSIP whose `announcer_id` is not its sender). Before this
+rule, a third of all upload frames in a living band L network went to nodes that had stopped
+announcing; FEASIBILITY.md §9.6.
 
 **Ask only for what is not coming.** An announcer's WANT lists objects that have received no
 symbol for `T_nack_stall`; an object whose symbols are arriving is not asked for again, and a
@@ -401,7 +475,10 @@ itself greedily: the lowest colour not announced by any conflicting announcer wi
 one shared base sequence shifted by the colour, so conflicting announcers are never on the same
 channel; when there are more colours than channels, colour `c` also selects time slot
 `c div n` of `T_slot`, and single-channel carriers are simply `n = 1`: every colour is a slot.
-One mechanism, in frequency where possible and in time where necessary.
+One mechanism, in frequency where possible and in time where necessary. Time slots apply only on
+carriers the regulator does not cap: under a duty cycle or polite access the cap already bounds
+what every announcer adds up to, and slots on top of it only added idle time (FEASIBILITY.md
+§7.7).
 
 EtherDiscipline's per-200 kHz accounting is unchanged: a random sequence spends about `1/n` of
 the airtime in each slice. (Sequences derived by a fixed offset per announcer never coincide and
@@ -470,6 +547,7 @@ arrives a few minutes later than it otherwise would. That is the entire user-vis
 | `meet_every` | 5 | every fifth dwell is on the common control-plane sequence |
 | `T_offer` | 0–3 s | random delay before a holder offers on an open ask |
 | repair wait | `T_suppress × (neighbours heard better than the asker) / (all neighbours)` + jitter | ungranted NACK answer |
+| `T_upload_phase` | 1 s | one upload phase: uploaders to one announcer take turns this long each |
 | `T_grant` | 10 min | a grant lapses this long after its last symbol (or after the grant, if none came) |
 | `T_slot` | 10 s | time slot when announcers in conflict share a channel |
 | `conflict_ttl`, `T_report_min` | 30 min, 60 s | conflict report lifetime and follower report rate limit |

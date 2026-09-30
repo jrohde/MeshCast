@@ -50,3 +50,18 @@ The report prints per-object completion times over followers (p50, p90, max), co
 announcers at the end, occupancy percentiles on the bulk channel, airtime share per transmitting
 node, and per-node core counters (frames by class, CCA deferrals, discipline waits, NACKs, WANTs,
 uploads). Results and their interpretation are in `docs/FEASIBILITY.md` §7.
+
+## Looking inside one world
+
+`--seeds N` runs N worlds and reports their spread; compare designs on that, not on one run
+(`docs/FEASIBILITY.md` §9.1). To look inside one of them:
+
+- `MESHCAST_ONLY_SEED=6` with `--seed 1 --seeds 8` runs only the sixth world of that ensemble
+  and prints its full report. For scenarios that generate their own positions (`clusters`) this
+  is not the same world as `--seed 6`: the ensemble keeps the positions of its first seed.
+- `MESHCAST_TRACE_GRANTS=1` writes one line per event to stderr: `GA` open ask, `GT` grant, `GH`
+  grant heard by its holder, `OF` offer, `UP` upload frame sent, `UO` upload frame received by
+  its announcer, `UC` upload frame collided there, `BO` other symbol of an object an announcer
+  wants, `MA` manifest announcement, `OC` object completed, and at the end `MISSING` for every
+  object a follower lacks and `NOLEN` for every want whose length the wanter does not know.
+- `MESHCAST_DEBUG_WANTS=1` traces each announcer's want list.

@@ -22,6 +22,15 @@ pub struct Metrics {
     /// Who broke collided upload frames: [uploader to the same announcer, uploader to another,
     /// an announcer, anything else].
     pub upload_interferer: [u64; 4],
+    /// Upload-upload collisions at one announcer by cause: [a sender's phase count was stale,
+    /// a sender had no grant, a sender never heard a phase count, phases were current].
+    pub upload_collision_cause: [u64; 4],
+    /// Uploads sent while the announcer was on another channel, by cause: [it is no longer an
+    /// announcer, the sender's idea of its colour was stale, the sender did not know it, other].
+    pub upload_wrong_channel: [u64; 4],
+    /// Grants (WANT entries naming a holder) sent to a node that was announcing at the time:
+    /// announcers do not upload, so each of these waits out `T_grant` for nothing.
+    pub grants_to_announcers: u64,
     /// (node index, object) -> completion time.
     pub completions: BTreeMap<(usize, ShortId), Millis>,
     pub role_events: Vec<RoleEvent>,

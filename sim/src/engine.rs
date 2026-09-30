@@ -5,6 +5,7 @@ use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, VecDeque};
 
 use meshcast_core::frame::{Frame, FrameType};
+use meshcast_core::ids::NodeId;
 use meshcast_core::node::{Action, CarrierState, Event, Node, NodeConfig};
 use meshcast_core::rng::Rng;
 use meshcast_core::Millis;
@@ -40,6 +41,8 @@ struct Transmission {
     candidates: Vec<(usize, f64)>,
     /// For an upload: the node index it is meant for.
     upload_to: Option<usize>,
+    /// For an upload: (phase count the sender believed, the announcer's actual count, granted).
+    upload_phase_view: (u8, u8, bool),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -66,6 +69,7 @@ pub struct Engine {
     pub now: Millis,
     pub metrics: Metrics,
     pub verbose: bool,
+    trace_grants: bool,
     next_sample: Millis,
 }
 
@@ -118,7 +122,7 @@ impl Engine {
         }
         let mut metrics = Metrics::default();
         metrics.per_node_bulk = vec![(0, 0); n];
-        let mut e = Engine { nodes, phys, heap: BinaryHeap::new(), seq: 0, tx_seq: 0, loss, reach, recent: HashMap::new(), txs: HashMap::new(), now: 0, metrics, verbose: false, next_sample: 0 };
+        let mut e = Engine { nodes, phys, heap: BinaryHeap::new(), seq: 0, tx_seq: 0, loss, reach, recent: HashMap::new(), txs: HashMap::new(), now: 0, metrics, verbose: false, trace_grants: std::env::var("MESHCAST_TRACE_GRANTS").is_ok(), next_sample: 0 };
         for i in 0..n {
             e.schedule_wake(i, 1);
         }
@@ -294,8 +298,11 @@ impl Engine {
     fn apply(&mut self, i: usize, actions: Vec<Action>) {
         for a in actions {
             match a {
-                Action::Tx { carrier, channel, bytes, airtime_ms, class: _, frame_type } => self.tx_start(i, carrier, channel, bytes, airtime_ms, frame_type),
+                Action::Tx { carrier, channel, bytes, airtime_ms, class: _, frame_type, upload_to } => self.tx_start(i, carrier, channel, bytes, airtime_ms, frame_type, upload_to),
                 Action::ObjectComplete { id, now } => {
+                    if self.trace_grants {
+                        eprintln!("OC {} {} {:?} {:?} role={:?}", now, i, id, self.nodes[i].node.object_kind(&id), self.nodes[i].node.role(self.phys.len() - 1));
+                    }
                     self.metrics.completions.entry((i, id)).or_insert(now);
                 }
                 Action::Role { carrier, role, announcer, now } => {
@@ -309,7 +316,7 @@ impl Engine {
         }
     }
 
-    fn tx_start(&mut self, from: usize, carrier: usize, channel: u8, bytes: Vec<u8>, airtime_ms: u32, frame_type: FrameType) {
+    fn tx_start(&mut self, from: usize, carrier: usize, channel: u8, bytes: Vec<u8>, airtime_ms: u32, frame_type: FrameType, target: Option<NodeId>) {
         let now = self.now;
         let end = now + airtime_ms as Millis;
         self.tx_seq += 1;
@@ -328,11 +335,17 @@ impl Engine {
         }
         // An upload frame: which announcer is it for, and can it hear it at all?
         let mut upload_to = None;
-        if frame_type == FrameType::Bulk && self.nodes[from].node.role(carrier) != meshcast_core::node::Role::Announcer {
-            if let Some(t) = self.nodes[from].node.upload_target(carrier) {
+        let mut upload_phase_view = (0u8, 0u8, false);
+        if frame_type == FrameType::Bulk {
+            if let Some(t) = target {
                 let j = (t.0 as usize).wrapping_sub(1);
                 if j < self.nodes.len() {
                     upload_to = Some(j);
+                    let granted = match Frame::decode(&bytes) {
+                        Ok(Frame::Bulk(b)) => self.nodes[from].node.upload_granted(&b.object, t),
+                        _ => false,
+                    };
+                    upload_phase_view = (self.nodes[from].node.upload_phases_believed(t), self.nodes[j].node.upload_phases_now(), granted);
                     let reach = &self.reach[from][carrier];
                     let rx = reach.iter().find(|(k, _)| *k == j).map(|(_, r)| *r);
                     let outcome = if !self.nodes[j].alive {
@@ -340,6 +353,11 @@ impl Engine {
                     } else if rx.map(|r| r < self.phys[carrier].sensitivity_dbm).unwrap_or(true) {
                         Some(4)
                     } else if self.nodes[j].node.channel(carrier, now) != channel {
+                        let target_ann = self.nodes[j].node.role(carrier) == meshcast_core::node::Role::Announcer;
+                        let believed = self.nodes[from].node.colour_believed(carrier, t);
+                        let actual = self.nodes[j].node.own_colour();
+                        let k = if !target_ann { 0 } else if believed.is_none() { 2 } else if believed != Some(actual) { 1 } else { 3 };
+                        self.metrics.upload_wrong_channel[k] += 1;
                         Some(3)
                     } else {
                         None // decided at the end of the frame
@@ -350,9 +368,44 @@ impl Engine {
                 }
             }
         }
+        if let Ok(Frame::Gossip(g)) = Frame::decode(&bytes) {
+            for (_, h, _) in &g.want {
+                let k = (h.0 as usize).wrapping_sub(1);
+                if !h.is_none() && k < self.nodes.len() && self.nodes[k].node.role(carrier) == meshcast_core::node::Role::Announcer {
+                    self.metrics.grants_to_announcers += 1;
+                }
+            }
+        }
         let phy = &self.phys[carrier];
         let mut candidates = Vec::new();
         let reach = std::mem::take(&mut self.reach[from][carrier]);
+        if self.trace_grants {
+            match Frame::decode(&bytes) {
+                Ok(Frame::Gossip(g)) if g.announcer == g.node => {
+                    let meet = self.nodes[from].node.in_meeting(carrier, now);
+                    for (o, h, p) in &g.want {
+                        if !h.is_none() {
+                            eprintln!("GT {} {} {} {:?} {} meet={}", now, from, h.0 - 1, o, p, meet);
+                        } else {
+                            eprintln!("GA {} {} {:?} meet={} ch={}", now, from, o, meet, channel);
+                        }
+                    }
+                }
+                Ok(Frame::ManifestAnnounce(m)) => {
+                    eprintln!("MA {} {} n={} meet={} ch={}", now, from, m.entries.len(), self.nodes[from].node.in_meeting(carrier, now), channel);
+                }
+                Ok(Frame::Gossip(g)) if !g.have.is_empty() => {
+                    for o in &g.have {
+                        eprintln!("OF {} {} {:?} meet={} ch={}", now, from, o, self.nodes[from].node.in_meeting(carrier, now), channel);
+                    }
+                }
+                Ok(Frame::Bulk(b)) if upload_to.is_some() => {
+                    let a = upload_to.unwrap();
+                    eprintln!("UP {} {} {} {:?} b={} esi={} k={} ann_holds={} ann_wants={}", now, from, a, b.object, b.block, b.esi, b.k(), self.nodes[a].node.holds(&b.object), self.nodes[a].node.wants_object(&b.object));
+                }
+                _ => {}
+            }
+        }
         let trace = self.verbose && std::env::var("MESHCAST_TRACE").is_ok();
         if trace {
             if let Ok(Frame::Gossip(g)) = Frame::decode(&bytes) {
@@ -383,7 +436,7 @@ impl Engine {
         }
         self.reach[from][carrier] = reach;
         self.recent.entry((carrier, channel)).or_default().push_back(id);
-        self.txs.insert(id, Transmission { id, from, carrier, channel, start: now, end, bytes, frame_type, candidates, upload_to });
+        self.txs.insert(id, Transmission { id, from, carrier, channel, start: now, end, bytes, frame_type, candidates, upload_to, upload_phase_view });
         self.push(end, Ev::TxEnd(id));
     }
 
@@ -457,6 +510,23 @@ impl Engine {
                         _ => 3,
                     };
                     self.metrics.upload_interferer[k] += 1;
+                    if self.trace_grants {
+                        let o = other.map(|t| (t.start, t.end, t.frame_type)).unwrap_or((0, 0, FrameType::Bulk));
+                        eprintln!("UC {} {} {} kind={} tx=[{},{}] other=[{},{}] {:?} from {}", now, tx.from, j, k, tx.start, tx.end, o.0, o.1, o.2, worst_from);
+                    }
+                    if k == 0 {
+                        let views = [tx.upload_phase_view, other.map(|t| t.upload_phase_view).unwrap_or((0, 0, false))];
+                        let cause = if views.iter().any(|v| v.0 == 0) {
+                            2
+                        } else if views.iter().any(|v| !v.2) {
+                            1
+                        } else if views.iter().any(|v| v.0 != v.1) {
+                            0
+                        } else {
+                            3
+                        };
+                        self.metrics.upload_collision_cause[cause] += 1;
+                    }
                 }
                 if tx.frame_type == FrameType::Bulk {
                     let a = self.nodes[tx.from].node.role(tx.carrier) == meshcast_core::node::Role::Announcer;
@@ -489,9 +559,34 @@ impl Engine {
             delivered += 1;
             if tx.upload_to == Some(j) {
                 self.metrics.upload_outcome[0] += 1;
+                if self.trace_grants {
+                    if let Some(Frame::Bulk(b)) = &decoded {
+                        eprintln!("UO {} {} {} {:?} esi={} k={} before={:?}", now, tx.from, j, b.object, b.esi, b.k(), self.nodes[j].node.object_progress(&b.object));
+                    }
+                }
+            }
+            if self.trace_grants {
+                if let Some(Frame::Gossip(g)) = &decoded {
+                    if g.announcer == g.node {
+                        for (o, h, p) in &g.want {
+                            if h.0 as usize == j + 1 {
+                                let (up, q) = self.nodes[j].node.upload_state(tx.carrier);
+                                let has = self.nodes[j].node.holds(o);
+                                eprintln!("GH {} {} {} {:?} {} has={} role={:?} follows={:?} up={:?} q={}", now, tx.from, j, o, p, has, self.nodes[j].node.role(tx.carrier), self.nodes[j].node.announcer_of(tx.carrier), up, q);
+                            }
+                        }
+                    }
+                }
             }
             if tx.frame_type == FrameType::Bulk {
                 self.metrics.per_node_bulk[j].0 += 1;
+            }
+            if self.trace_grants && tx.upload_to != Some(j) {
+                if let Some(Frame::Bulk(b)) = &decoded {
+                    if self.nodes[j].node.wants_object(&b.object) && self.nodes[j].node.role(tx.carrier) == meshcast_core::node::Role::Announcer {
+                        eprintln!("BO {} {} {} {:?} esi={} k={} before={:?}", now, tx.from, j, b.object, b.esi, b.k(), self.nodes[j].node.object_progress(&b.object));
+                    }
+                }
             }
             let actions = match &decoded {
                 Some(f) => self.nodes[j].node.handle_frame(now, tx.carrier, f, rx.round() as i16),
@@ -506,7 +601,7 @@ impl Engine {
         }
         // Later-ending frames that overlapped this one must still see it: keep an ended stub
         // (no payload, no candidates) until it is older than the longest possible frame.
-        let stub = Transmission { id: tx.id, from: tx.from, carrier: tx.carrier, channel: tx.channel, start: tx.start, end: tx.end, bytes: tx.bytes.clone(), frame_type: tx.frame_type, candidates: Vec::new(), upload_to: tx.upload_to };
+        let stub = Transmission { id: tx.id, from: tx.from, carrier: tx.carrier, channel: tx.channel, start: tx.start, end: tx.end, bytes: tx.bytes.clone(), frame_type: tx.frame_type, candidates: Vec::new(), upload_to: tx.upload_to, upload_phase_view: tx.upload_phase_view };
         self.txs.insert(id, stub);
         self.recent.entry(key).or_default().push_back(id);
         let cutoff = now.saturating_sub(MAX_AIRTIME_MS);

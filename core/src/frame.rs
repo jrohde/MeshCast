@@ -80,6 +80,9 @@ pub struct Beacon {
     pub colour: u8,
     /// Number of colours in use around this announcer: how many slots the cycle has.
     pub colours: u8,
+    /// How many phases this announcer's listening time is divided into for uploads: each running
+    /// upload transmits only in its own phase (PROTOCOL.md §4). 1 means no division.
+    pub upload_phases: u8,
     /// Spectrum weather: measured occupancy (percent) on up to four bulk channels.
     pub occupancy: [u8; 4],
 }
@@ -90,8 +93,17 @@ pub struct Bulk {
     pub block: u16,
     /// Encoding symbol id. `< k` is a source symbol; `>= k` a repair symbol (v1).
     pub esi: u16,
-    pub k: u16,
+    /// The object's length in bytes: it fixes the number of blocks and each block's K, so any
+    /// symbol is usable without the object's metadata (PROTOCOL.md §3.2).
+    pub len: u32,
     pub payload: Vec<u8>,
+}
+
+impl Bulk {
+    /// K of this symbol's block.
+    pub fn k(&self) -> u16 {
+        crate::object::block_k(self.len, self.block)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -109,8 +121,9 @@ pub struct Gossip {
     pub heard: Vec<(NodeId, u8, u8)>,
     pub have: Vec<ShortId>,
     /// Objects wanted, each with the node granted to upload it (NONE = open ask: holders
-    /// answer with a HAVE offer and the announcer grants one of them).
-    pub want: Vec<(ShortId, NodeId)>,
+    /// answer with a HAVE offer and the announcer grants one of them) and, for a grant, the
+    /// phase of the announcer's listening time the upload uses (PROTOCOL.md §4).
+    pub want: Vec<(ShortId, NodeId, u8)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -132,6 +145,10 @@ pub struct Nack {
     pub node: NodeId,
     pub object: ShortId,
     pub block: u16,
+    /// The holder an announcer names to answer; NONE lets any holder answer after a wait.
+    pub answerer: NodeId,
+    /// The upload phase answers use (PROTOCOL.md §4); set by an announcer, 0 otherwise.
+    pub phase: u8,
     /// Missing source symbols as `(first_esi, count)` ranges.
     pub missing: Vec<(u16, u16)>,
 }
@@ -188,6 +205,7 @@ impl Frame {
                 out.push(b.time_quality);
                 out.push(b.colour);
                 out.push(b.colours);
+                out.push(b.upload_phases);
                 out.extend_from_slice(&b.occupancy);
             }
             Frame::Bulk(b) => {
@@ -196,7 +214,7 @@ impl Frame {
                 out.extend_from_slice(&b.object.0);
                 out.extend_from_slice(&b.block.to_le_bytes());
                 out.extend_from_slice(&b.esi.to_le_bytes());
-                out.extend_from_slice(&b.k.to_le_bytes());
+                out.extend_from_slice(&b.len.to_le_bytes());
                 let mut payload = [0u8; SYMBOL_SIZE];
                 let n = b.payload.len().min(SYMBOL_SIZE);
                 payload[..n].copy_from_slice(&b.payload[..n]);
@@ -222,9 +240,10 @@ impl Frame {
                 for id in &g.have[..nh] {
                     out.extend_from_slice(&id.0);
                 }
-                for (id, grant) in &g.want[..nw] {
+                for (id, grant, phase) in &g.want[..nw] {
                     out.extend_from_slice(&id.0);
                     out.extend_from_slice(&grant.0.to_le_bytes());
+                    out.push(*phase);
                 }
             }
             Frame::ManifestAnnounce(m) => {
@@ -242,10 +261,11 @@ impl Frame {
             }
             Frame::Nack(n) => {
                 out.push((VERSION << 4) | FrameType::Nack as u8);
-                out.push(0);
+                out.push(n.phase & 0x0f);
                 out.extend_from_slice(&n.node.0.to_le_bytes());
                 out.extend_from_slice(&n.object.0);
                 out.extend_from_slice(&n.block.to_le_bytes());
+                out.extend_from_slice(&n.answerer.0.to_le_bytes());
                 let nr = n.missing.len().min(MAX_NACK_RANGES);
                 out.push(nr as u8);
                 for (start, count) in &n.missing[..nr] {
@@ -284,21 +304,22 @@ impl Frame {
                 let time_quality = c.u8()?;
                 let colour = c.u8()?;
                 let colours = c.u8()?;
+                let upload_phases = c.u8()?;
                 let occ = c.bytes(4)?;
                 let mut occupancy = [0u8; 4];
                 occupancy.copy_from_slice(occ);
-                Frame::Beacon(Beacon { carrier, announcer, score, next_ms, round, utc, time_quality, colour, colours, occupancy })
+                Frame::Beacon(Beacon { carrier, announcer, score, next_ms, round, utc, time_quality, colour, colours, upload_phases, occupancy })
             }
             2 => {
                 let object = c.short()?;
                 let block = c.u16()?;
                 let esi = c.u16()?;
-                let k = c.u16()?;
+                let len = c.u32()?;
                 let payload = c.bytes(SYMBOL_SIZE)?.to_vec();
-                if k == 0 {
+                if crate::object::block_k(len, block) == 0 {
                     return Err(DecodeError::BadValue);
                 }
-                Frame::Bulk(Bulk { object, block, esi, k, payload })
+                Frame::Bulk(Bulk { object, block, esi, len, payload })
             }
             3 => {
                 let nheard = (flags & 0x03) as usize;
@@ -326,7 +347,8 @@ impl Frame {
                 for _ in 0..nw {
                     let id = c.short()?;
                     let grant = NodeId(c.u32()?);
-                    want.push((id, grant));
+                    let phase = c.u8()?;
+                    want.push((id, grant, phase));
                 }
                 Frame::Gossip(Gossip { node, announcer, announcer_colour, announcer_colours, heard, have, want })
             }
@@ -352,6 +374,7 @@ impl Frame {
                 let node = NodeId(c.u32()?);
                 let object = c.short()?;
                 let block = c.u16()?;
+                let answerer = NodeId(c.u32()?);
                 let nr = c.u8()? as usize;
                 if nr > MAX_NACK_RANGES {
                     return Err(DecodeError::BadLength);
@@ -365,7 +388,7 @@ impl Frame {
                     }
                     missing.push((start, count));
                 }
-                Frame::Nack(Nack { node, object, block, missing })
+                Frame::Nack(Nack { node, object, block, answerer, phase: flags & 0x0f, missing })
             }
             _ => return Err(DecodeError::BadType),
         };
@@ -434,15 +457,16 @@ mod tests {
                 time_quality: 2,
                 colour: 3,
                 colours: 5,
+                upload_phases: 3,
                 occupancy: [10, 20, 30, 40],
             }),
-            Frame::Bulk(Bulk { object: ShortId([1; 8]), block: 2, esi: 3, k: 100, payload: vec![9u8; SYMBOL_SIZE] }),
-            Frame::Gossip(Gossip { node: NodeId(1), announcer: NodeId(2), announcer_colour: 1, announcer_colours: 4, heard: vec![(NodeId(7), 0, 3), (NodeId(8), 1, 3), (NodeId(9), 2, 3)], have: vec![ShortId([3; 8]); 12], want: vec![(ShortId([4; 8]), NodeId(5)); 8] }),
+            Frame::Bulk(Bulk { object: ShortId([1; 8]), block: 2, esi: 3, len: 500_000, payload: vec![9u8; SYMBOL_SIZE] }),
+            Frame::Gossip(Gossip { node: NodeId(1), announcer: NodeId(2), announcer_colour: 1, announcer_colours: 4, heard: vec![(NodeId(7), 0, 3), (NodeId(8), 1, 3), (NodeId(9), 2, 3)], have: vec![ShortId([3; 8]); 12], want: vec![(ShortId([4; 8]), NodeId(5), 2); 8] }),
             Frame::ManifestAnnounce(ManifestAnnounce {
                 node: NodeId(5),
                 entries: vec![AnnounceEntry { channel: ChannelId([6; 8]), manifest: ShortId([7; 8]), seq: 9, len: 1234 }; 8],
             }),
-            Frame::Nack(Nack { node: NodeId(8), object: ShortId([2; 8]), block: 0, missing: vec![(0, 3), (10, 1)] }),
+            Frame::Nack(Nack { node: NodeId(8), object: ShortId([2; 8]), block: 0, answerer: NodeId(3), phase: 5, missing: vec![(0, 3), (10, 1)] }),
         ];
         for f in frames {
             let bytes = f.encode();
@@ -454,10 +478,10 @@ mod tests {
 
     #[test]
     fn sizes() {
-        let b = Frame::Beacon(Beacon { carrier: CarrierKind::GfskBulk, announcer: NodeId(1), score: 0, next_ms: 0, round: 0, utc: 0, time_quality: 0, colour: 0, colours: 1, occupancy: [0; 4] });
-        assert_eq!(b.encode().len(), 29);
-        let k = Frame::Bulk(Bulk { object: ShortId([0; 8]), block: 0, esi: 0, k: 1, payload: vec![] });
-        assert_eq!(k.encode().len(), 218);
+        let b = Frame::Beacon(Beacon { carrier: CarrierKind::GfskBulk, announcer: NodeId(1), score: 0, next_ms: 0, round: 0, utc: 0, time_quality: 0, colour: 0, colours: 1, upload_phases: 1, occupancy: [0; 4] });
+        assert_eq!(b.encode().len(), 30);
+        let k = Frame::Bulk(Bulk { object: ShortId([0; 8]), block: 0, esi: 0, len: 1, payload: vec![] });
+        assert_eq!(k.encode().len(), 220);
     }
 
     #[test]

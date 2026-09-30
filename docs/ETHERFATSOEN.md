@@ -41,6 +41,13 @@ measured occupancy is below a stricter threshold than the other classes, and onl
 throttled rate of mechanism 4; fresh content is admitted like metadata and paced at the full
 budget. One copy per cell is cheap; the repetitions are where the airtime goes.
 
+**Content waits on its own clock.** Content pauses for many reasons: the rendezvous, a time slot
+shared with other announcers, an upload phase, its token bucket, the pause after a burst. None of
+them may hold back a control or metadata frame queued behind it. When they did, an announcer whose
+carousel had paused for the meeting dwell sent its WANT only after that dwell, on its own channel,
+where no other cell listens; in one simulated world a cell never received a manifest published
+three hours before the end (FEASIBILITY.md §9.6).
+
 **Polite to strangers, fair among ourselves.** The node separates occupancy into energy it could
 decode as MeshCast frames and energy it could not. Foreign energy (LoRaWAN, Helium, anything
 else) is judged strictly: MeshCast yields to everything it does not understand. Occupancy caused
@@ -146,6 +153,12 @@ burst = Toff_min × p / (1 − p)      // p = our allowed fraction of the channe
 At a 37 % share and a 100 ms pause that is about 60 ms, three frames: enough to reach the legal
 budget, short enough to keep listening. Frames sent back to back within a turnaround are one
 transmission; a gap longer than that starts a new one and owes a new pause.
+
+The exception is an upload phase (PROTOCOL.md §4). There the announcer has set its listening
+time aside for one uploader and nobody else speaks to it, so the uploader uses the phase as one
+transmission of up to `Ton_max`, spending the budget it saved over the rest of the cycle. Held to
+short bursts inside a one-second phase it used less than half of it, and a bulletin took 7.6
+minutes instead of 6.0 (FEASIBILITY.md §9.6).
 
 ### 8. Colour, do not contend
 

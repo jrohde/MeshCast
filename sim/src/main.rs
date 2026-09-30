@@ -371,8 +371,8 @@ fn budget(exponent: f64) {
             BulkPreset::GfskUs => 0.5,
             BulkPreset::LoraBulk => 0.10,
         };
-        // Effective payload rate: 200 B payload per 218 B frame plus overhead.
-        let frame_ms = p.to_core().airtime_ms(218) as f64;
+        // Effective payload rate: 200 B payload per 220 B frame plus overhead.
+        let frame_ms = p.to_core().airtime_ms(220) as f64;
         let payload_kbps = SYMBOL_SIZE as f64 * 8.0 / frame_ms;
         rows.push((p.name.clone(), p.tx_dbm, p.sensitivity_dbm, range_m(&p, &prop), raw, payload_kbps * share));
     }
@@ -394,7 +394,8 @@ fn run(spec: ScenarioSpec, common: &Common, failover: Option<(f64, f64)>) {
         }
         return;
     }
-    let seeds: Vec<u64> = (0..common.seeds).map(|i| spec.seed + i).collect();
+    let only: Option<u64> = std::env::var("MESHCAST_ONLY_SEED").ok().and_then(|v| v.parse().ok());
+    let seeds: Vec<u64> = (0..common.seeds).map(|i| spec.seed + i).filter(|s| only.map(|o| o == *s).unwrap_or(true)).collect();
     let next = std::sync::atomic::AtomicUsize::new(0);
     let results = std::sync::Mutex::new(Vec::new());
     let workers = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).min(seeds.len());
@@ -413,6 +414,11 @@ fn run(spec: ScenarioSpec, common: &Common, failover: Option<(f64, f64)>) {
     });
     let mut reports = results.into_inner().unwrap();
     reports.sort_by_key(|r| r.spec.seed);
+    if only.is_some() {
+        for r in &reports {
+            print_report(r, t0.elapsed());
+        }
+    }
     let ensemble = Ensemble::of(&reports);
     ensemble.print(t0.elapsed());
     if let Some(path) = &common.out {
@@ -933,6 +939,7 @@ fn run_dynamics(nodes: usize, area_km2: f64, stations: usize, channels: usize, f
     // counting that as a failure measures the batteries, not the protocol. So also ask the
     // steady-state question: of the nodes that are on at the end, how many hold the whole
     // current window of every channel they follow?
+    let bulk_c_early = eng.phys.iter().position(|p| p.kind != CarrierKind::LoraControl).unwrap_or(1);
     let mut up_to_date = 0usize;
     let mut online = 0usize;
     for i in 0..nodes {
@@ -941,6 +948,21 @@ fn run_dynamics(nodes: usize, area_km2: f64, stations: usize, channels: usize, f
         }
         online += 1;
         let ok = subs[i].iter().all(|&c| built.sources[c].objects.iter().all(|o| eng.nodes[i].node.store.has_complete(&o.id.short())));
+        if !ok && std::env::var("MESHCAST_TRACE_GRANTS").is_ok() {
+            for &c in &subs[i] {
+                for o in &built.sources[c].objects {
+                    let id = o.id.short();
+                    if !eng.nodes[i].node.store.has_complete(&id) {
+                        let ann = eng.nodes[i].node.announcer_of(bulk_c_early);
+                        let aj = (ann.0 as usize).wrapping_sub(1);
+                        let ann_has = eng.nodes.get(aj).map(|n| n.node.holds(&id));
+                        let ch = &built.sources[c].channel;
+                        eprintln!("  manifest: node {:?} ann {:?} source {:?} (seq {})", eng.nodes[i].node.manifest_state(ch), eng.nodes.get(aj).and_then(|n| n.node.manifest_state(ch)), eng.nodes[built.sources[c].node].node.manifest_state(ch), built.sources[c].seq);
+                        eprintln!("MISSING node {} obj {:?} kind {:?} len {} progress {:?} wants {} follows {:?} ann_has {:?} ann_wants {:?} source {} src_has {}", i, id, o.kind, o.len, eng.nodes[i].node.object_progress(&id), eng.nodes[i].node.wants_object(&id), ann, ann_has, eng.nodes.get(aj).map(|n| n.node.wants_object(&id)), built.sources[c].node, eng.nodes[built.sources[c].node].node.holds(&id));
+                    }
+                }
+            }
+        }
         if ok {
             up_to_date += 1;
         }
@@ -991,6 +1013,22 @@ fn run_dynamics(nodes: usize, area_km2: f64, stations: usize, channels: usize, f
     println!("uploads {}, announcers {}, role events {}", uploads, announcers_final, m.role_events.len());
     let sum = |f: fn(&meshcast_core::node::Stats) -> u64| eng.nodes.iter().map(|n| f(&n.node.stats)).sum::<u64>();
     println!("  of the uploads, repair answers {}; grants given {}, lapsed {}", sum(|s| s.repairs_started), sum(|s| s.grants_given), sum(|s| s.grants_lapsed));
+    {
+        let mut n = 0;
+        let mut kinds = std::collections::BTreeMap::new();
+        for (i, en) in eng.nodes.iter().enumerate() {
+            for id in en.node.wants_without_length() {
+                n += 1;
+                let k = eng.nodes.iter().find_map(|o| o.node.object_kind(&id)).map(|k| format!("{:?}", k)).unwrap_or("unknown".into());
+                *kinds.entry(k).or_insert(0) += 1;
+                if std::env::var("MESHCAST_TRACE_GRANTS").is_ok() {
+                    eprintln!("NOLEN node {} role {:?} wants {:?}", i, en.node.role(1.min(eng.phys.len() - 1)), id);
+                }
+            }
+        }
+        println!("  wants whose length the wanter does not know at the end: {} {:?}", n, kinds);
+    }
+    println!("  lapsed grants: holder follows another announcer {}, never brought a symbol {}; grants heard by their holder {}", sum(|s| s.grants_lapsed_foreign), sum(|s| s.grants_lapsed_unstarted), sum(|s| s.grants_received));
     let (gc, gl) = (sum(|s| s.grants_completed).max(1) as f64, sum(|s| s.grants_lapsed).max(1) as f64);
     let rc: i64 = eng.nodes.iter().map(|n| n.node.stats.grant_rssi_completed).sum();
     let rl: i64 = eng.nodes.iter().map(|n| n.node.stats.grant_rssi_lapsed).sum();
@@ -998,8 +1036,12 @@ fn run_dynamics(nodes: usize, area_km2: f64, stations: usize, channels: usize, f
     let ut = uo.iter().sum::<u64>().max(1) as f64;
     println!("  upload frames at their announcer: delivered {:.0} %, collided {:.0} %, announcer transmitting {:.0} %, announcer on another channel {:.0} %, too weak {:.0} %, announcer off {:.0} % (of {})",
         uo[0] as f64 * 100.0 / ut, uo[1] as f64 * 100.0 / ut, uo[2] as f64 * 100.0 / ut, uo[3] as f64 * 100.0 / ut, uo[4] as f64 * 100.0 / ut, uo[5] as f64 * 100.0 / ut, uo.iter().sum::<u64>());
+    let uw = eng.metrics.upload_wrong_channel;
+    println!("  uploads on the wrong channel: target no longer announcer {}, stale colour {}, unknown colour {}, other {}", uw[0], uw[1], uw[2], uw[3]);
     let ui = eng.metrics.upload_interferer;
     println!("  collided uploads broken by: an uploader to the same announcer {}, an uploader to another {}, an announcer {}, other {}", ui[0], ui[1], ui[2], ui[3]);
+    let uc = eng.metrics.upload_collision_cause;
+    println!("  same-announcer collisions: a phase count out of date {}, an ungranted answer {}, phases never heard {}, both current {}", uc[0], uc[1], uc[2], uc[3]);
     println!("  holder heard by the announcer: completed grants {:.1} dBm mean, lapsed grants {:.1} dBm mean", rc as f64 / gc, rl as f64 / gl);
     if !newcomers.is_empty() {
         let mean = if catch_h.is_empty() { 0.0 } else { catch_h.iter().sum::<f64>() / catch_h.len() as f64 };
