@@ -95,8 +95,18 @@ pub struct Stats {
     pub symbols_rejected: u64,
     pub nacks_sent: u64,
     pub wants_sent: u64,
-    /// Uploads that put at least one symbol on the air.
+    /// Uploads that put at least one symbol on the air (whole objects and repair answers).
     pub uploads_started: u64,
+    /// Of those, repair answers: a list of named symbols rather than a whole object.
+    pub repairs_started: u64,
+    /// Announcer side: offers granted, and grants that lapsed without progress.
+    pub grants_given: u64,
+    pub grants_lapsed: u64,
+    /// How well we heard the holder, summed over grants that ended in completion and over grants
+    /// that lapsed (dBm; divide by the counts).
+    pub grant_rssi_completed: i64,
+    pub grants_completed: u64,
+    pub grant_rssi_lapsed: i64,
     /// Repair answers lined up; most are cancelled by hearing another holder answer first.
     pub repairs_queued: u64,
     pub manifests_adopted: u64,
@@ -222,6 +232,8 @@ pub struct Node {
     own_objects: BTreeSet<ShortId>,
     pending_ack: BTreeSet<ShortId>,
     wants: BTreeSet<ShortId>,
+    /// Objects completed by registration rather than by a symbol, awaiting `on_complete`.
+    quiet_complete: Vec<ShortId>,
     neighbors: BTreeMap<NodeId, Neighbor>,
     carriers: Vec<CarrierRt>,
     ctrl: usize,
@@ -292,6 +304,7 @@ impl Node {
             own_objects: BTreeSet::new(),
             pending_ack: BTreeSet::new(),
             wants: BTreeSet::new(),
+            quiet_complete: Vec::new(),
             neighbors: BTreeMap::new(),
             carriers,
             ctrl,
@@ -499,6 +512,16 @@ impl Node {
 
     pub fn is_announcing(&self) -> bool {
         self.carriers.iter().any(|c| c.election.as_ref().map(|e| e.is_announcer()).unwrap_or(false))
+    }
+
+    /// Diagnostic: the announcer our current upload on `carrier` is meant for, if any.
+    pub fn upload_target(&self, carrier: usize) -> Option<NodeId> {
+        self.carriers.get(carrier).and_then(|c| c.upload.as_ref()).map(|u| u.to)
+    }
+
+    /// Diagnostic: whether we hold `id` complete.
+    pub fn holds(&self, id: &ShortId) -> bool {
+        self.store.has_complete(id)
     }
 
     /// Diagnostic: every wanted object with its progress, grant and timers.
@@ -727,8 +750,15 @@ impl Node {
                 d = d.min(self.next_meeting_start(self.now) + 1);
             }
         }
-        if let Some(t) = self.offers.iter().map(|(_, _, at)| *at).min() {
-            d = d.min(t);
+        if !self.offers.is_empty() {
+            // An offer to another cell's announcer waits for the rendezvous on a hopping carrier.
+            let cell = self.cell_carrier();
+            let own = self.announcer_of(cell);
+            let everyone_listens = !self.hops(cell) || self.in_rendezvous(cell, self.now);
+            let meeting = self.next_meeting_start(self.now) + 1;
+            for (_, a, at) in &self.offers {
+                d = d.min(if *a == own || everyone_listens { *at } else { (*at).max(meeting) });
+            }
         }
         if !self.is_announcing() {
             d = d.min(self.last_report + self.cfg.params.conflict_ttl_ms / 2);
@@ -770,6 +800,11 @@ impl Node {
         match ev {
             Event::Tick { now, carriers } => self.tick(now, carriers, &mut out),
             Event::Rx { now, carrier, bytes, rssi_dbm } => self.rx(now, carrier, bytes, rssi_dbm, &mut out),
+        }
+        // Objects that registration completed (every symbol came before the metadata) complete
+        // like any other: once, with the same consequences.
+        while let Some(id) = self.quiet_complete.pop() {
+            self.on_complete(id, &mut out);
         }
         out
     }
@@ -1123,12 +1158,24 @@ impl Node {
         let now = self.now;
         let stall = self.cfg.params.t_nack_stall_ms;
         let t_grant = self.cfg.params.t_grant_ms;
-        // A granted uploader that has not delivered anything loses the grant.
+        // A grant lapses after `t_grant` without progress, counted from the grant or from the
+        // last symbol it brought, whichever is later. An uploader that delivered once and then
+        // fell silent is no more responsible than one that never started.
         let progress = &self.progress;
-        self.grants.retain(|id, (_, t)| {
+        let neighbors = &self.neighbors;
+        let mut lapsed = 0u64;
+        let mut lapsed_rssi = 0i64;
+        self.grants.retain(|id, (h, t)| {
             let p = progress.get(id).copied().unwrap_or_default();
-            now < *t + t_grant || p.last_progress > *t
+            let keep = now < (*t).max(p.last_progress) + t_grant;
+            if !keep {
+                lapsed += 1;
+                lapsed_rssi += neighbors.get(h).map(|n| n.rssi as i64).unwrap_or(-140);
+            }
+            keep
         });
+        self.stats.grants_lapsed += lapsed;
+        self.stats.grant_rssi_lapsed += lapsed_rssi;
         let thr = self.cfg.params.nack_threshold_permille as u64;
         let ids: Vec<ShortId> = self
             .wants
@@ -1171,6 +1218,19 @@ impl Node {
         if ids.is_empty() {
             return Vec::new();
         }
+        // Ask first for what serves the most listeners per byte (Smith's rule, as in the
+        // carousel): a holder uploads one object at a time, so the order of asking is the order
+        // of arriving, and a small object must not wait behind a large one of the same source.
+        let mut ids = ids;
+        let key = |id: &ShortId| {
+            let listeners = self.carriers.iter().filter_map(|c| c.carousel.as_ref()).map(|k| k.wanted_by(id)).max().unwrap_or(0).max(1) as u128;
+            let bytes = self.store.entry(id).and_then(|e| e.len()).unwrap_or(1).max(1) as u128;
+            (listeners, bytes)
+        };
+        ids.sort_by(|a, b| {
+            let ((la, ba), (lb, bb)) = (key(a), key(b));
+            (lb * ba).cmp(&(la * bb)).then(a.cmp(b))
+        });
         let n = ids.len().min(MAX_WANT);
         let v: Vec<ShortId> = ids.into_iter().take(n).collect();
         for id in &v {
@@ -1370,6 +1430,9 @@ impl Node {
                     if !u.started {
                         u.started = true;
                         self.stats.uploads_started += 1;
+                        if u.list.is_some() {
+                            self.stats.repairs_started += 1;
+                        }
                     }
                 }
                 (Frame::Bulk(Bulk { object: *object, block: *block, esi: *esi, k: *k, payload: buf }).encode(), Class::Content, FrameType::Bulk)
@@ -1682,6 +1745,11 @@ impl Node {
         out.push(Action::ObjectComplete { id, now: self.now });
         self.wants.remove(&id);
         self.progress.remove(&id);
+        // A grant ends when its object arrives.
+        if let Some((h, _)) = self.grants.remove(&id) {
+            self.stats.grants_completed += 1;
+            self.stats.grant_rssi_completed += self.neighbors.get(&h).map(|n| n.rssi as i64).unwrap_or(-140);
+        }
         let is_manifest = self.store.entry(&id).map(|e| e.kind() == ContentType::Manifest).unwrap_or(false);
         if is_manifest {
             if let Some(bytes) = self.store.bytes(&id).map(|b| b.to_vec()) {
@@ -1726,7 +1794,9 @@ impl Node {
         let mut to_want = Vec::new();
         if interested {
             for o in &m.objects {
-                self.store.ensure(o.meta());
+                if self.store.ensure(o.meta()) {
+                    self.quiet_complete.push(o.id.short());
+                }
                 if !self.store.has_complete(&o.id.short()) {
                     to_want.push(o.id.short());
                 }
@@ -1810,6 +1880,7 @@ impl Node {
                 // An offer for something we want: grant the first holder that offers.
                 if self.wants.contains(h) && !self.grants.contains_key(h) {
                     self.grants.insert(*h, (g.node, now));
+                    self.stats.grants_given += 1;
                     self.gossip_soon();
                 }
             }
@@ -1869,11 +1940,17 @@ impl Node {
     /// holder's offer for the same object was heard meanwhile.
     fn offer_check(&mut self) {
         let now = self.now;
-        let due: Vec<(ShortId, NodeId)> = self.offers.iter().filter(|(_, _, at)| *at <= now).map(|(o, a, _)| (*o, *a)).collect();
+        // An offer goes out where its announcer listens: our own announcer is on our channel
+        // now; on a hopping carrier another cell's announcer hears us only in the rendezvous.
+        let cell = self.cell_carrier();
+        let own = self.announcer_of(cell);
+        let everyone_listens = !self.hops(cell) || self.in_rendezvous(cell, now);
+        let sendable = |a: &NodeId, at: &Millis| *at <= now && (*a == own || everyone_listens);
+        let due: Vec<(ShortId, NodeId)> = self.offers.iter().filter(|(_, a, at)| sendable(a, at)).map(|(o, a, _)| (*o, *a)).collect();
         if due.is_empty() {
             return;
         }
-        self.offers.retain(|(_, _, at)| *at > now);
+        self.offers.retain(|(_, a, at)| !sendable(a, at));
         let have: Vec<ShortId> = due.iter().map(|(o, _)| *o).take(MAX_GOSSIP_IDS).collect();
         let g = Gossip { node: self.cfg.id, announcer: self.gossip_announcer_field(), announcer_colour: self.announcer_colouring_field().0, announcer_colours: self.announcer_colouring_field().1, heard: self.heard_field(), have, want: Vec::new() };
         let cell = self.cell_carrier();
@@ -1897,7 +1974,9 @@ impl Node {
                 }
             }
             self.manifests.insert(e.channel, ManifestInfo { seq: e.seq, short: e.manifest, len: e.len, adopted: false });
-            self.store.ensure_hint(e.manifest, e.len, ContentType::Manifest);
+            if self.store.ensure_hint(e.manifest, e.len, ContentType::Manifest) {
+                self.quiet_complete.push(e.manifest);
+            }
             if self.store.has_complete(&e.manifest) {
                 if let Some(bytes) = self.store.bytes(&e.manifest).map(|b| b.to_vec()) {
                     if let Ok(man) = Manifest::decode(&bytes) {

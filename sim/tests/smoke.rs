@@ -68,3 +68,41 @@ fn cell_elects_station_and_serves_everyone() {
         }
     }
 }
+
+#[test]
+fn band_l_objects_cross_between_two_clusters() {
+    // Two clusters of ten, 1.8 km apart in band L: the source is in one, the station in the
+    // other, so every object has to cross from one hop sequence to the other. This world (seed 8)
+    // stalled at 89.5 % while offers to the other cell's announcer went out on the holder's own
+    // hop sequence and a grant that had delivered once never lapsed (FEASIBILITY.md §9).
+    let seed = 8u64;
+    let (size, radius, distance) = (10, 300.0, 1800.0);
+    let mut rng = meshcast_core::rng::Rng::new(seed ^ 0xC1);
+    let mut positions = Vec::new();
+    for cluster in 0..2 {
+        let cx = cluster as f64 * distance;
+        for _ in 0..size {
+            let r = radius * rng.unit().sqrt();
+            let a = rng.unit() * 2.0 * std::f64::consts::PI;
+            positions.push((cx + r * a.cos(), r * a.sin()));
+        }
+    }
+    let n = positions.len();
+    let mut s = spec(BulkPreset::GfskL, positions, vec![0], vec![n - 1], 12.0);
+    s.seed = seed;
+    s.tracks = 8;
+    s.area_km2 = (distance + 2.0 * radius) * 2.0 * radius / 1e6;
+    s.shadow_db = 6.0;
+    s.mix = meshcast_sim::scenario::parse_mix("snac-music:42,snac-speech:22").unwrap();
+    let mut b = build(&s, Params::default());
+    b.engine.run((s.hours * 3.6e6) as u64, 600_000);
+    let mut missing = 0;
+    for (id, t) in &b.tracks {
+        for &f in &t.followers {
+            if !b.engine.metrics.completions.contains_key(&(f, *id)) {
+                missing += 1;
+            }
+        }
+    }
+    assert_eq!(missing, 0, "{missing} follower-object pairs never completed");
+}
