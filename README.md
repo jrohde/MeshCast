@@ -10,13 +10,16 @@ programs first. Store-and-forward, content-addressed, spectrum-polite, zero-conf
 
 MeshCast turns cheap LoRa hardware (an SX1262 dongle, or an upcycled Helium miner with an SX1302)
 into a radio station that nobody has to run. Anyone can start a **channel** and publish tracks or
-spoken bulletins. Nodes that follow the channel collect the content over hours or days, chunk by
-chunk, over whatever carrier happens to be available. Then every node plays the same programme
-from its local copy, in sync. **The listening is live; the distribution is not.**
+spoken bulletins. Nodes that follow the channel collect them object by object, over whatever
+carrier happens to be available. Every node then plays from its local copy: at the times the
+channel's schedule sets, so that everyone hears the same programme at the same moment, like
+radio; or whenever its listener likes, like a podcast. **Playback can be in sync; distribution is
+never live.**
 
-That inversion is the whole trick. Sub-GHz spectrum is slow and legally rationed, but music has
-no deadline. So MeshCast never streams. It trickles files through the mesh and lets the
-regulatory duty cycle limit only how fast new content spreads, never the listening experience.
+That inversion is the whole trick. Sub-GHz spectrum is slow and legally rationed, but a
+programme only has to arrive before its slot. So MeshCast never streams. It trickles files
+through the mesh and lets the regulatory duty cycle limit only how fast new content spreads,
+never the listening experience.
 
 ## Principles
 
@@ -71,6 +74,12 @@ overhead). The codes are decoded only by the phone or station that plays them, a
 Because the carousel is broadcast, adding listeners costs nothing. In the US (FCC 15.247, no duty
 cycle, 1 W) the same hardware runs roughly ten times faster.
 
+The simulator runs the real protocol core. In every scenario measured, from two nodes 5 km apart
+over LoRa alone to a town of 200 nodes on 30 km², every follower gets everything; a spoken
+bulletin reaches its followers in about 2 minutes in the 10 % band and 6 in the polite band, and
+a town's programmes arrive in a median of 15 and 41 minutes
+([docs/FEASIBILITY.md](docs/FEASIBILITY.md) §9).
+
 ## Architecture
 
 Every node runs the same protocol; the difference is capacity, not role.
@@ -92,7 +101,7 @@ the simulator tests the code that ships. See [docs/ARCHITECTURE.md](docs/ARCHITE
 | [docs/FEASIBILITY.md](docs/FEASIBILITY.md) | Verified numbers, corrections to the original brainstorm, why it scales |
 | [docs/PROTOCOL.md](docs/PROTOCOL.md) | Objects, manifests, carousel, gossip, announcer election and healing, wire formats |
 | [docs/TRANSPORTS.md](docs/TRANSPORTS.md) | Carrier comparison and zero-config discovery |
-| [docs/ETHERFATSOEN.md](docs/ETHERFATSOEN.md) | Spectrum etiquette: the six mechanisms and the throttling algorithm |
+| [docs/ETHERFATSOEN.md](docs/ETHERFATSOEN.md) | Spectrum etiquette: its mechanisms and the throttling algorithm |
 | [docs/ETHERDISCIPLINE.md](docs/ETHERDISCIPLINE.md) | Regulatory profiles worldwide, with sources, and firmware enforcement |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Node types, hardware, data flow, implementation stack |
 | [docs/ABUSE.md](docs/ABUSE.md) | Spam, flooding and other abuse: what holds, what does not, and the rule it asks for |
@@ -102,14 +111,16 @@ the simulator tests the code that ships. See [docs/ARCHITECTURE.md](docs/ARCHITE
 
 ## Status
 
-Day 0, design phase. Phase 0 is a simulator that runs the real protocol core, not hardware. See
-[docs/ROADMAP.md](docs/ROADMAP.md).
+Phase 0, the simulator, is largely done: the protocol core in Rust, a discrete-event simulator
+that runs it, and the results in [docs/FEASIBILITY.md](docs/FEASIBILITY.md) §7–9. Next is
+Phase 1: the same core on two boards on the bench. See [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Related projects
 
 [Meshtastic](https://meshtastic.org), [MeshCore](https://meshcore.co.uk),
 [Meshpoint](https://github.com/KMX415/meshpoint), [Reticulum](https://reticulum.network),
 [Othernet](https://github.com/Othernet-Project), [LoRa-APRS](https://github.com/lora-aprs),
+[QMesh](https://github.com/faydr/QMesh),
 [Codec2](https://github.com/drowe67/codec2), [Opus](https://opus-codec.org),
 [RaptorQ (RFC 6330)](https://www.rfc-editor.org/rfc/rfc6330).
 
