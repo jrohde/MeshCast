@@ -142,7 +142,7 @@ impl Default for Params {
             t_score_ms: 60_000,
             neighbor_ttl_ms: 3_600_000,
             control_reserve: 100,
-            max_passes: 3,
+            max_passes: 1,
             t_always_ms: 300_000,
             t_nack_stall_ms: 60_000,
             t_gossip_min_ms: 30_000,
