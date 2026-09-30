@@ -295,6 +295,8 @@ pub struct Node {
     /// Phases an announcer reserved for answers to its NACK of an object nobody is granted:
     /// object -> (phase, since).
     repair_phases: BTreeMap<ShortId, (u8, Millis)>,
+    /// When the announcer last heard an upload in each phase.
+    phase_heard: [Millis; MAX_UPLOAD_PHASES as usize],
     /// Holder side: grants we received, with the time, so that we still answer the announcer's
     /// NACKs for a while after our full pass is done.
     granted_to_us: BTreeMap<(ShortId, NodeId), Millis>,
@@ -365,6 +367,7 @@ impl Node {
             last_report: 0,
             grants: BTreeMap::new(),
             repair_phases: BTreeMap::new(),
+            phase_heard: [0; MAX_UPLOAD_PHASES as usize],
             granted_to_us: BTreeMap::new(),
             offers: Vec::new(),
             stats,
@@ -1208,6 +1211,7 @@ impl Node {
         self.conflicts.clear();
         self.grants.clear();
         self.repair_phases.clear();
+        self.phase_heard = [0; MAX_UPLOAD_PHASES as usize];
         self.granted_to_us.clear();
         self.offers.clear();
         for id in self.own_objects.iter().chain(self.own_manifests.iter().map(|(_, s, _, _)| s)) {
@@ -1695,6 +1699,20 @@ impl Node {
                     phase_end = Some(from + width);
                 }
             }
+            // The announcer keeps quiet in a phase whose uploader it heard in the last two
+            // cycles: it gave that time away, and a half-duplex radio that talks cannot listen.
+            if let (Cand::Carousel(Item::Symbol { .. }), true) = (&cand, divides) {
+                let width = self.cfg.params.t_upload_phase_ms.max(1);
+                let k = self.upload_phase_count() as u64;
+                let current = ((now / width) % k) as usize;
+                let heard = self.phase_heard.get(current).copied().unwrap_or(0);
+                if heard > 0 && now < heard + 2 * k * width {
+                    let t = (now / width + 1) * width;
+                    self.stats.defer_ms[1] += t - now;
+                    self.carriers[i].content_until = t;
+                    return;
+                }
+            }
             // Taking turns means spending a cycle's worth of budget inside one slot.
             let (_, slots) = self.slot_of(i, colour, colours);
             if slots > 1 {
@@ -1965,7 +1983,16 @@ impl Node {
             self.stats.bulk_uninterested += 1;
             return;
         }
-        match self.store.put_symbol(b.object, b.block, b.esi, b.len, &b.payload) {
+        let put = self.store.put_symbol(b.object, b.block, b.esi, b.len, &b.payload);
+        // A symbol of an object we granted or asked to repair is an upload to us: the phase it
+        // uses is in use.
+        if matches!(put, Put::New | Put::Complete | Put::Duplicate) && self.is_announcing() {
+            let phase = self.grants.get(&b.object).map(|(_, _, p)| *p).or_else(|| self.repair_phases.get(&b.object).map(|(p, _)| *p));
+            if let Some(p) = phase {
+                self.phase_heard[p as usize] = now;
+            }
+        }
+        match put {
             Put::New => {
                 self.stats.symbols_new += 1;
                 if self.grants.contains_key(&b.object) {
