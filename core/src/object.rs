@@ -19,7 +19,8 @@ pub enum ContentType {
     Speech = 16,
     /// Music as SNAC 32 kHz codes.
     Music = 17,
-    /// Reserved: Opus for players without a neural decoder (PROTOCOL.md open question 12).
+    /// Opus, local only: made by a player that decoded the SNAC object, for a device next to it
+    /// that cannot; never listed in a channel manifest (PROTOCOL.md §1.1, question 12).
     Opus = 18,
     Other = 255,
 }
