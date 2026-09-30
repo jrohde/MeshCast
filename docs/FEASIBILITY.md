@@ -758,10 +758,18 @@ has decoded, for a speaker next to it) costs nothing on the air.
   third of them collide, and nearly every collision is with another uploader sending to the same
   announcer, a holder it cannot hear. Capping concurrent grants trades this for delay: at one
   grant per announcer collisions fall from 35 % to 1 % and uploads by half, but the median
-  bulletin takes 27 minutes instead of 6 and the worst p90 goes from 64 to 911 minutes. The next
-  idea to test is that the receiver divides its listening time: an announcer gives each
-  concurrent uploader its own phase of the dwell, so hidden uploaders never overlap yet each
-  still spends its own budget.
+  bulletin takes 27 minutes instead of 6 and the worst p90 goes from 64 to 911 minutes.
+  Letting the receiver divide its listening time works better: each upload gets a phase (a hash
+  of object and uploader that both ends compute, so no byte on the air), the uploader transmits
+  only in its phase, and the announcer grants only into a free phase. With three one-second
+  phases, upload frames fall by 46 % (43 636 to 23 720 per 72 hours), collisions from 35 % to 2 %,
+  and the median bulletin takes 9.5 minutes instead of 6.2. An oracle in which uploads to the same
+  announcer never collide shows what perfect scheduling would give: the same 43 % saving at an
+  unchanged 6.3 minutes. The collisions are therefore not what makes some worlds slow, but they
+  are nearly half the upload airtime, and a scheduler whose phase count follows the number of
+  running uploads, rather than a fixed three, should keep both. Band O is unaffected either way
+  (2 % collisions, phases change nothing). Not adopted yet: the fixed version is a trade, and the
+  adaptive one is the next design.
 - All 50 nodes of the dynamics scenario start at the same instant. In band L nobody can hear an
   announcer that does not exist yet, so almost every node becomes announcer within the first
   quarter hour before they find each other; the network is then stable for the remaining 71
