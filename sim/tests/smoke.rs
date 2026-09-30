@@ -23,6 +23,7 @@ fn spec(bulk: BulkPreset, positions: Vec<(f64, f64)>, sources: Vec<usize>, stati
         positions: Some(positions),
         stations_at: Some(stations),
         sources_at: Some(sources),
+        renditions: None,
     }
 }
 
@@ -170,4 +171,36 @@ fn announcers_are_never_granted_uploads() {
     let mut b = build(&s, Params::default());
     b.engine.run((s.hours * 3.6e6) as u64, 600_000);
     assert_eq!(b.engine.metrics.grants_to_announcers, 0, "an announcer was granted an upload");
+}
+
+#[test]
+fn small_listeners_get_renditions_before_their_slot() {
+    // One band O cell: a station that can make renditions, a source, and followers of which two
+    // cannot decode. Those two want each programme as Opus shortly before its slot, get it in
+    // time, and never fetch the codes; with nobody who needs them, no rendition is sent at all.
+    let positions: Vec<(f64, f64)> = (0..12).map(|i| (150.0 * (i % 4) as f64, 150.0 * (i / 4) as f64)).collect();
+    for small in [2usize, 0] {
+        let mut s = spec(BulkPreset::GfskO, positions.clone(), vec![0], vec![5], 5.0);
+        s.tracks = 4;
+        s.mix = meshcast_sim::scenario::parse_mix("snac-music:42,snac-speech:22").unwrap();
+        s.renditions = Some(meshcast_sim::scenario::RenditionSpec { music_kbps: 16.0, speech_kbps: 8.0, small, players_render: false });
+        let mut b = build(&s, Params::default());
+        b.engine.run((s.hours * 3.6e6) as u64, 600_000);
+        assert_eq!(b.small.len(), small);
+        for (id, t) in &b.tracks {
+            let (r, _) = t.rendition.expect("every audio object has a rendition");
+            for &f in &t.followers {
+                if t.small.contains(&f) {
+                    let done = b.engine.metrics.completions.get(&(f, r)).copied();
+                    assert!(done.map(|d| d <= t.slot_ms.unwrap()).unwrap_or(false), "node {f}: rendition of {id:?} not there before its slot ({done:?})");
+                    assert!(!b.engine.metrics.completions.contains_key(&(f, *id)), "node {f} fetched codes it cannot play");
+                } else {
+                    assert!(b.engine.metrics.completions.contains_key(&(f, *id)), "node {f} missing {id:?}");
+                }
+            }
+        }
+        if small == 0 {
+            assert_eq!(b.engine.metrics.bulk_sent_rendition, 0, "renditions sent where nobody asked");
+        }
+    }
 }

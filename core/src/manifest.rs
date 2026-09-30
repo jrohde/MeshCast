@@ -17,6 +17,13 @@ pub struct ManifestObject {
     pub title: String,
 }
 
+/// An object named by id and length, such as a channel's rendition table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ObjectRef {
+    pub id: ObjectId,
+    pub len: u32,
+}
+
 impl ManifestObject {
     pub fn meta(&self) -> ObjectMeta {
         ObjectMeta { id: self.id, len: self.len, kind: self.kind }
@@ -40,6 +47,8 @@ pub struct Manifest {
     pub objects: Vec<ManifestObject>,
     pub schedule: Vec<ScheduleEntry>,
     pub prev: Option<ObjectId>,
+    /// The channel's rendition table, if it names renditions (PROTOCOL.md §1.2).
+    pub renditions: Option<ObjectRef>,
     pub sig: [u8; 64],
 }
 
@@ -51,9 +60,9 @@ pub enum ManifestError {
 }
 
 impl Manifest {
-    fn body_bytes(chan: &[u8; 32], seq: u32, title: &str, objects: &[ManifestObject], schedule: &[ScheduleEntry], prev: &Option<ObjectId>) -> Vec<u8> {
+    fn body_bytes(chan: &[u8; 32], seq: u32, title: &str, objects: &[ManifestObject], schedule: &[ScheduleEntry], prev: &Option<ObjectId>, renditions: &Option<ObjectRef>) -> Vec<u8> {
         let mut e = Encoder::new(Vec::new());
-        e.array(6).ok();
+        e.array(if renditions.is_some() { 7 } else { 6 }).ok();
         e.bytes(chan).ok();
         e.u32(seq).ok();
         e.str(title).ok();
@@ -80,18 +89,27 @@ impl Manifest {
                 e.null().ok();
             }
         }
+        if let Some(r) = renditions {
+            e.array(2).ok();
+            e.bytes(&r.id.0).ok();
+            e.u32(r.len).ok();
+        }
         e.into_writer()
     }
 
     pub fn sign(key: &SigningKey, seq: u32, title: &str, objects: Vec<ManifestObject>, schedule: Vec<ScheduleEntry>, prev: Option<ObjectId>) -> Manifest {
+        Self::sign_with_renditions(key, seq, title, objects, schedule, prev, None)
+    }
+
+    pub fn sign_with_renditions(key: &SigningKey, seq: u32, title: &str, objects: Vec<ManifestObject>, schedule: Vec<ScheduleEntry>, prev: Option<ObjectId>, renditions: Option<ObjectRef>) -> Manifest {
         let chan = key.verifying_key().to_bytes();
-        let body = Self::body_bytes(&chan, seq, title, &objects, &schedule, &prev);
+        let body = Self::body_bytes(&chan, seq, title, &objects, &schedule, &prev, &renditions);
         let sig = key.sign(&body).to_bytes();
-        Manifest { chan, seq, title: String::from(title), objects, schedule, prev, sig }
+        Manifest { chan, seq, title: String::from(title), objects, schedule, prev, renditions, sig }
     }
 
     pub fn encode(&self) -> Vec<u8> {
-        let body = Self::body_bytes(&self.chan, self.seq, &self.title, &self.objects, &self.schedule, &self.prev);
+        let body = Self::body_bytes(&self.chan, self.seq, &self.title, &self.objects, &self.schedule, &self.prev, &self.renditions);
         let mut e = Encoder::new(Vec::new());
         e.array(2).ok();
         e.bytes(&body).ok();
@@ -114,7 +132,8 @@ impl Manifest {
         sig.copy_from_slice(sig_b);
 
         let mut b = Decoder::new(body);
-        if b.array().map_err(|_| ManifestError::Cbor)? != Some(6) {
+        let fields = b.array().map_err(|_| ManifestError::Cbor)?;
+        if fields != Some(6) && fields != Some(7) {
             return Err(ManifestError::Cbor);
         }
         let chan_b = b.bytes().map_err(|_| ManifestError::Cbor)?;
@@ -179,7 +198,22 @@ impl Manifest {
                 Some(ObjectId(p))
             }
         };
-        let m = Manifest { chan, seq, title, objects, schedule, prev, sig };
+        let renditions = if fields == Some(7) {
+            if b.array().map_err(|_| ManifestError::Cbor)? != Some(2) {
+                return Err(ManifestError::Cbor);
+            }
+            let rb = b.bytes().map_err(|_| ManifestError::Cbor)?;
+            if rb.len() != 32 {
+                return Err(ManifestError::BadLength);
+            }
+            let mut rid = [0u8; 32];
+            rid.copy_from_slice(rb);
+            let len = b.u32().map_err(|_| ManifestError::Cbor)?;
+            Some(ObjectRef { id: ObjectId(rid), len })
+        } else {
+            None
+        };
+        let m = Manifest { chan, seq, title, objects, schedule, prev, renditions, sig };
         if !m.verify() {
             return Err(ManifestError::BadSignature);
         }
@@ -188,7 +222,7 @@ impl Manifest {
 
     pub fn verify(&self) -> bool {
         let Ok(vk) = VerifyingKey::from_bytes(&self.chan) else { return false };
-        let body = Self::body_bytes(&self.chan, self.seq, &self.title, &self.objects, &self.schedule, &self.prev);
+        let body = Self::body_bytes(&self.chan, self.seq, &self.title, &self.objects, &self.schedule, &self.prev, &self.renditions);
         let sig = Signature::from_bytes(&self.sig);
         vk.verify(&body, &sig).is_ok()
     }
@@ -213,6 +247,11 @@ mod tests {
     fn sign_encode_decode_verify() {
         let key = SigningKey::from_bytes(&[7u8; 32]);
         let obj = ManifestObject { id: ObjectId::of(b"track"), len: 540_000, kind: ContentType::Music, title: String::from("Track 1") };
+        let table = ObjectRef { id: ObjectId::of(b"rendition table"), len: 120 };
+        for renditions in [None, Some(table)] {
+            let m = Manifest::sign_with_renditions(&key, 1, "Test channel", vec![obj.clone()], vec![], None, renditions);
+            assert_eq!(Manifest::decode(&m.encode()).unwrap(), m);
+        }
         let m = Manifest::sign(&key, 1, "Test channel", vec![obj.clone()], vec![ScheduleEntry { object: obj.id.short(), start: 1000, repeat: 0 }], None);
         assert!(m.verify());
         let bytes = m.encode();

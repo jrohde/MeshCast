@@ -48,6 +48,12 @@ Scope:
 - Bench: two boards exchange an object over GFSK band O, over GFSK band L polite, and over
   ESP-NOW; the LoRa control channel carries beacons and gossip.
 - Street: the same two boards at 100 m, 500 m, 1 km, 3 km; a third board as bridge.
+- On-device decoding: time the SNAC 24 kHz speech decoder (8-bit weights in flash) on the XIAO
+  ESP32S3, ahead of time rather than in real time. If a 5-minute bulletin decodes in well under
+  an hour, a board with a speaker plays speech without renditions.
+- Renditions (PROTOCOL.md §1.2): a reference integer SNAC decoder and a fixed-point Opus build,
+  and the determinism test: the same codes give the same rendition hash on x86-64 and AArch64.
+  A listening test on a T-Deck Pro sets the profiles' bit rates.
 - Decision point on the Rust toolchain for Xtensa: keep, or fall back to C++ firmware with a
   `core` port.
 
@@ -100,6 +106,10 @@ Definition of done:
 4. A firmware update reaches and is applied by every node in the district over the carousel.
 
 ## Later, unordered
+
+- A light decoder for SNAC 32 kHz music codes, so that an ESP32-S3 board with a speaker plays
+  music without renditions.
+- Renditions over ESP-NOW for the last hop, where a station is within reach of the device.
 
 - Text pages and offline web bundles as objects (a "web channel").
 - Map tiles; emergency information channels.

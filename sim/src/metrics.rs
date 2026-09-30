@@ -31,6 +31,8 @@ pub struct Metrics {
     /// Grants (WANT entries naming a holder) sent to a node that was announcing at the time:
     /// announcers do not upload, so each of these waits out `T_grant` for nothing.
     pub grants_to_announcers: u64,
+    /// Bulk frames of renditions (PROTOCOL.md §1.2).
+    pub bulk_sent_rendition: u64,
     /// (node index, object) -> completion time.
     pub completions: BTreeMap<(usize, ShortId), Millis>,
     pub role_events: Vec<RoleEvent>,

@@ -112,8 +112,8 @@ from one model) but weaker per bit; Vocos is a very light decoder for EnCodec co
 speech; DAC is the architecture SNAC extends; Mimi is a speech codec. Rated or measured in
 FEASIBILITY.md §8.
 **Opus**. 16–24 kbit/s music, 8 kbit/s speech; decoders run on ESP32-class hardware. The codec
-MeshCast assumed until §8, and a candidate fallback for players without a neural decoder
-(PROTOCOL.md open question 12).
+MeshCast assumed until §8, and now the format of renditions for devices without a neural decoder
+(PROTOCOL.md §1.2).
 **Codec2**. 1.2–3.2 kbit/s intelligible speech; the digital-voice codec of the amateur world
 (FreeDV, M17).
 **Voice over LoRa meshes.** Meshtastic's audio module sends Codec2 (700 bit/s by default) from a

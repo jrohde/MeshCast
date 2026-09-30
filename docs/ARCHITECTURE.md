@@ -125,9 +125,16 @@ The codec decides where work happens:
 - **Dongles never decode.** An ESP32-S3 has neither the memory (the music decoder has 38.5 M
   parameters) nor the arithmetic for it. A dongle carries the codes as opaque bytes and hands
   completed objects to the phone over BLE.
-- **A device with a speaker but no decoder** (a LilyGo T-Deck Pro, say) gets Opus from a phone
-  or station next to it that has decoded the object (content type 18, PROTOCOL.md §1.1). That
-  copy never goes on the mesh: the mesh carries each programme once, as codes.
+- **A device with a speaker but no decoder** asks for a rendition (PROTOCOL.md §1.2): Opus made
+  from the codes by a station or phone in its cell, checked against the id the source signed,
+  and sent only to the cell where it is asked for, shortly before it plays. A LilyGo T-Deck Pro
+  is such a device: ESP32-S3, 16 MB flash, 8 MB PSRAM, SX1262, and in one variant a PCM512A audio
+  module (<https://github.com/Xinyuan-LilyGO/T-Deck-Pro>). A rendition costs a cell its bit rate
+  for as long as someone listens (FEASIBILITY.md §10), so two things would make such devices
+  cheaper: ESP-NOW for the last hop when a station is near, and decoding on the device itself.
+  The speech model (13.1 M parameters) would just fit that flash at 8 bits (13 MB of 16 MB) and
+  could decode bulletins ahead of time; Phase 1 measures how fast. Music needs a lighter decoder
+  for the same codes.
 
 The decoder weights ship with the app and the station software (77 MB and 26 MB as fp16). The
 runtime on the phone is an open choice for Phase 1: onnxruntime is the fastest path measured so

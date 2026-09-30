@@ -12,6 +12,7 @@ use crate::fatsoen::Fatsoen;
 use crate::frame::{AnnounceEntry, Beacon, Bulk, CarrierKind, Class, Frame, FrameType, Gossip, ManifestAnnounce, Nack, MAX_ANNOUNCE_ENTRIES, MAX_GOSSIP_IDS, MAX_NACK_RANGES, MAX_WANT, SYMBOL_SIZE};
 use crate::ids::{ChannelId, NodeId, ShortId};
 use crate::manifest::Manifest;
+use crate::rendition::RenditionTable;
 use crate::object::{ContentType, ObjectMeta};
 use crate::params::{Params, SCORE_MAX};
 use crate::profile::{Access, RegionProfile};
@@ -52,6 +53,11 @@ pub struct NodeConfig {
     pub params: Params,
     pub seed: u64,
     pub keep_bytes_below: usize,
+    /// Whether this node plays audio codes itself (a phone behind a dongle, a station). A node
+    /// that cannot, such as a board with a speaker, wants renditions instead (PROTOCOL.md §1.2).
+    pub decodes: bool,
+    /// Whether this node can make renditions: it runs the profiles' decoder and encoder.
+    pub renders: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -113,6 +119,8 @@ pub struct Stats {
     pub grants_lapsed_foreign: u64,
     pub grants_lapsed_unstarted: u64,
     pub grants_received: u64,
+    /// Renditions this node made on demand.
+    pub renditions_made: u64,
     /// Repair answers lined up; most are cancelled by hearing another holder answer first.
     pub repairs_queued: u64,
     pub manifests_adopted: u64,
@@ -295,6 +303,11 @@ pub struct Node {
     /// Phases an announcer reserved for answers to its NACK of an object nobody is granted:
     /// object -> (phase, since).
     repair_phases: BTreeMap<ShortId, (u8, Millis)>,
+    /// Renditions named by the manifests we hold: rendition -> (the object it is made from,
+    /// its metadata).
+    renditions: BTreeMap<ShortId, (ShortId, ObjectMeta)>,
+    /// Renditions we will want when their slot comes near: (slot start, rendition).
+    renditions_due: Vec<(Millis, ShortId)>,
     /// When the announcer last heard an upload in each phase.
     phase_heard: [Millis; MAX_UPLOAD_PHASES as usize],
     /// Holder side: grants we received, with the time, so that we still answer the announcer's
@@ -368,6 +381,8 @@ impl Node {
             grants: BTreeMap::new(),
             repair_phases: BTreeMap::new(),
             phase_heard: [0; MAX_UPLOAD_PHASES as usize],
+            renditions: BTreeMap::new(),
+            renditions_due: Vec::new(),
             granted_to_us: BTreeMap::new(),
             offers: Vec::new(),
             stats,
@@ -731,10 +746,109 @@ impl Node {
                     for o in &m.objects {
                         set.insert(o.id.short());
                     }
+                    if let Some(t) = m.renditions {
+                        set.insert(t.id.short());
+                    }
                 }
             }
         }
+        for (r, (parent, _)) in &self.renditions {
+            if set.contains(parent) {
+                set.insert(*r);
+            }
+        }
         set
+    }
+
+    /// Whether we could make rendition `id`: we render, know it and hold what it is made from.
+    fn can_render(&self, id: &ShortId) -> bool {
+        self.cfg.renders && self.renditions.get(id).map(|(parent, _)| self.store.has_complete(parent)).unwrap_or(false)
+    }
+
+    /// Make rendition `id` from the object it renders, if we can and hold that object. A real
+    /// node runs the profile and keeps the result only if it hashes to the signed id; a
+    /// platform that does not reproduce the profile bit for bit simply cannot serve renditions.
+    fn render(&mut self, id: &ShortId) -> bool {
+        if self.store.has_complete(id) {
+            return true;
+        }
+        let Some(&(parent, meta)) = self.renditions.get(id) else { return false };
+        if !self.cfg.renders || !self.store.has_complete(&parent) {
+            return false;
+        }
+        self.store.insert_complete(meta, None);
+        self.stats.renditions_made += 1;
+        true
+    }
+
+    /// Local time of a schedule entry's UTC start. The simulation's epoch is UTC 0; a real node
+    /// adds the offset from its time source (§6).
+    fn slot_ms(&self, utc_s: u64) -> Millis {
+        utc_s.saturating_mul(1000) as Millis
+    }
+
+    /// Renditions whose slot has come near are wanted now.
+    fn renditions_due_check(&mut self) {
+        let horizon = self.now + self.cfg.params.t_render_ahead_ms;
+        let due: Vec<ShortId> = self.renditions_due.iter().filter(|(t, _)| *t <= horizon).map(|(_, id)| *id).collect();
+        if due.is_empty() {
+            return;
+        }
+        self.renditions_due.retain(|(t, _)| *t > horizon);
+        for id in due {
+            if !self.store.has_complete(&id) {
+                self.add_want(id);
+                self.want_refresh = true;
+            }
+        }
+    }
+
+    /// Learn the renditions a table names.
+    fn load_table(&mut self, table: &ShortId) {
+        let Some(t) = self.store.bytes(table).and_then(|b| RenditionTable::decode(b).ok()) else { return };
+        for r in t.entries {
+            self.renditions.insert(r.id.short(), (r.parent, r.meta()));
+        }
+        if !self.cfg.decodes {
+            self.plan_renditions();
+        }
+    }
+
+    /// A device that cannot decode wants the sound, not the codes, and only shortly before it
+    /// plays it: a radio needs what is on next, not the whole window. Unscheduled objects are
+    /// asked for at once (they stand in for what a user picks).
+    fn plan_renditions(&mut self) {
+        let mut want = Vec::new();
+        let mut due = Vec::new();
+        for (chan, info) in &self.manifests {
+            if !self.follows.contains(chan) {
+                continue;
+            }
+            let Some(m) = self.store.bytes(&info.short).and_then(|b| Manifest::decode(b).ok()) else { continue };
+            for o in m.objects.iter().filter(|o| o.kind.codec().is_some()) {
+                let parent = o.id.short();
+                let Some((&r, &(_, meta))) = self.renditions.iter().find(|(_, (p, _))| *p == parent) else { continue };
+                if self.store.has_complete(&r) || self.wants.contains(&r) || self.renditions_due.iter().any(|(_, id)| *id == r) {
+                    continue;
+                }
+                let slot = m.schedule.iter().find(|e| e.object == parent).map(|e| self.slot_ms(e.start));
+                match slot {
+                    Some(t) if self.now + self.cfg.params.t_render_ahead_ms < t => due.push((t, r, meta)),
+                    _ => want.push((r, meta)),
+                }
+            }
+        }
+        for (t, r, meta) in due {
+            self.store.ensure(meta);
+            self.renditions_due.push((t, r));
+        }
+        for (r, meta) in want {
+            if self.store.ensure(meta) {
+                self.quiet_complete.push(r);
+            }
+            self.add_want(r);
+            self.want_refresh = true;
+        }
     }
 
     /// The holder of `id` we hear best among those that said they have it and do not
@@ -834,6 +948,8 @@ impl Node {
         self.follows.clear();
         self.manifests.clear();
         self.own_manifests.clear();
+        self.renditions.clear();
+        self.renditions_due.clear();
         self.own_objects.clear();
         self.pending_ack.clear();
         self.wants.clear();
@@ -847,6 +963,9 @@ impl Node {
     /// Time at which the host should call `Tick` next.
     pub fn next_deadline(&self) -> Millis {
         let mut d = self.next_score;
+        if let Some(t) = self.renditions_due.iter().map(|(t, _)| *t).min() {
+            d = d.min(t.saturating_sub(self.cfg.params.t_render_ahead_ms).max(self.now + 1));
+        }
         if self.is_announcing() {
             d = d.min(self.next_beacon);
         }
@@ -1018,6 +1137,7 @@ impl Node {
                 }
             }
         }
+        self.renditions_due_check();
         self.follower_want_check();
         self.conflict_report_check();
         self.offer_check();
@@ -1079,6 +1199,15 @@ impl Node {
                         self.quiet_complete.push(id);
                     } else {
                         self.add_want(id);
+                    }
+                }
+                // The manifests we hold were adopted by a follower, for the channels it follows
+                // and in the form it plays. An announcer serves every channel, so it adopts them
+                // again as one: their objects are registered and what it lacks is wanted.
+                let held: Vec<ShortId> = self.manifests.values().filter(|i| self.store.has_complete(&i.short)).map(|i| i.short).collect();
+                for short in held {
+                    if let Some(m) = self.store.bytes(&short).and_then(|b| Manifest::decode(b).ok()) {
+                        self.adopt_manifest(&m, short);
                     }
                 }
                 self.next_beacon = self.now;
@@ -2022,6 +2151,9 @@ impl Node {
             self.stats.grants_completed += 1;
             self.stats.grant_rssi_completed += self.neighbors.get(&h).map(|n| n.rssi as i64).unwrap_or(-140);
         }
+        if self.store.entry(&id).map(|e| e.kind() == ContentType::Renditions).unwrap_or(false) {
+            self.load_table(&id);
+        }
         let is_manifest = self.store.entry(&id).map(|e| e.kind() == ContentType::Manifest).unwrap_or(false);
         if is_manifest {
             if let Some(bytes) = self.store.bytes(&id).map(|b| b.to_vec()) {
@@ -2065,7 +2197,25 @@ impl Node {
         let interested = self.follows.contains(&chan) || self.is_announcing();
         let mut to_want = Vec::new();
         if interested {
+            // The rendition table: fetched by those who need renditions, known by name to all.
+            if let Some(t) = m.renditions {
+                let meta = ObjectMeta { id: t.id, len: t.len, kind: ContentType::Renditions };
+                if self.store.ensure(meta) {
+                    self.quiet_complete.push(t.id.short());
+                }
+                let needs = (!self.cfg.decodes && self.follows.contains(&chan)) || self.cfg.renders;
+                if self.store.has_complete(&t.id.short()) {
+                    self.load_table(&t.id.short());
+                } else if needs {
+                    to_want.push(t.id.short());
+                }
+            }
+            // A device that cannot decode has no use for the codes of a channel it listens to.
+            let skip_codes = !self.cfg.decodes && self.follows.contains(&chan) && !self.is_announcing();
             for o in &m.objects {
+                if skip_codes && o.kind.codec().is_some() {
+                    continue;
+                }
                 if self.store.ensure(o.meta()) {
                     self.quiet_complete.push(o.id.short());
                 }
@@ -2150,6 +2300,16 @@ impl Node {
                 if let Some(car) = self.carriers[i].carousel.as_mut() {
                     car.on_want(*w, g.node, now);
                 }
+                // A rendition a follower asks for: make it if we can, else ask for it like any
+                // object. An announcer never wants a rendition for itself.
+                if !self.store.has_complete(w) && !self.store.is_known(w) {
+                    if let Some(&(_, meta)) = self.renditions.get(w) {
+                        self.store.ensure(meta);
+                    }
+                }
+                if !self.store.has_complete(w) && self.renditions.contains_key(w) && self.render(w) {
+                    continue;
+                }
                 if !self.store.has_complete(w) && self.store.is_known(w) {
                     new_wants.push(*w);
                 }
@@ -2192,7 +2352,12 @@ impl Node {
                 continue;
             }
             for (w, grant, phase) in g.want.iter() {
-                if !self.store.has_complete(w) {
+                // A rendition we can make counts as held; it is made only when we are granted it,
+                // so that one node, not every capable one, spends the work.
+                if !self.store.has_complete(w) && !self.can_render(w) {
+                    continue;
+                }
+                if *grant == self.cfg.id && !self.render(w) {
                     continue;
                 }
                 if *grant == self.cfg.id {

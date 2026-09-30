@@ -50,9 +50,10 @@ object already has the manifest that says what it is.
 | 1 | manifest | `application/meshcast-manifest` | a channel manifest (§2) |
 | 2 | text | `text/plain; charset=utf-8` | text pages |
 | 3 | firmware | `application/octet-stream` | firmware images |
+| 4 | renditions | `application/meshcast-renditions` | a channel's rendition table (§1.2) |
 | 16 | speech | `audio/x-snac; model=snac_24khz` | spoken programmes: news, talk, bulletins |
 | 17 | music | `audio/x-snac; model=snac_32khz` | music |
-| 18 | opus | `audio/ogg; codecs=opus` | local only: audio for a device that cannot run the neural decoder, made by a player that has decoded the SNAC object; never listed in a channel manifest (§9, question 12) |
+| 18 | opus | `audio/ogg; codecs=opus` | a rendition (§1.2): audio for a device that cannot run the neural decoder, made on demand from a SNAC object and sent only where someone asks for it |
 | 255 | other | | anything else; relayed, not interpreted |
 
 Audio objects hold the discrete codes of a neural codec, not a waveform (FEASIBILITY.md §8 has
@@ -71,7 +72,8 @@ Rules:
 - **The publisher chooses the kind**; nodes do not guess it. A spoken programme over a music bed
   is music.
 - **Only the device that plays decodes**: the phone, or a station with a speaker. Relays and
-  dongles carry the codes as opaque bytes and never transcode. Decoding happens ahead of
+  dongles carry the codes as opaque bytes and never transcode. A node that decodes may also
+  make renditions for a device that cannot (§1.2). Decoding happens ahead of
   playback, as soon as an object completes, so a player does not need to decode in real time.
 - **Encoding happens once, at the source**: on the phone that records a bulletin or on the
   station that ingests a track.
@@ -91,6 +93,66 @@ Within a group each level's codes are in time order. The number of groups is
 ⌊8 × `len` / bits per group⌋; leftover bits are zero. Because groups follow each other in time,
 any prefix of an object decodes to a prefix of the audio, which a later live mode can use.
 
+### 1.2 Renditions: sound for the last hop
+
+Codes travel through the mesh; sound travels only the last hop, and only where someone asks for
+it.
+
+A device that cannot run the neural decoder can still play a common codec. The LilyGo T-Deck Pro
+has an ESP32-S3 with 16 MB flash and 8 MB PSRAM, an SX1262 and, in one variant, a PCM512A audio
+module (<https://github.com/Xinyuan-LilyGO/T-Deck-Pro>); the music decoder needs 18.3 G
+multiply-adds per audio second (FEASIBILITY.md §8.2). Such a device asks for a *rendition*: the
+programme as Opus, made from the codes by a node that can decode them.
+
+- **A rendition is an ordinary object.** It has an id (the hash of its bytes), a length and
+  content type 18 (Opus). Its bytes are a pure function of the codes: a *profile* fixes the
+  decoder (a reference implementation of the model the content type names, with defined integer
+  arithmetic), the resampling and the encoder (a pinned Opus build and its settings).
+- **The source signs it.** The source runs every profile when it publishes and lists the
+  renditions in a *rendition table*: an object of content type 4 holding, per audio object, its
+  short id, the profile and the rendition's full id and length. The manifest names the table by
+  id and length (36 bytes, whatever the window holds), so the table is signed through the
+  manifest and the renditions through the table. Only the nodes that need renditions fetch the
+  table: devices that cannot decode, nodes that make renditions, and announcers that serve them.
+- **Nobody sends a rendition until someone asks.** A device that cannot decode wants the
+  rendition instead of the codes, and only shortly before it plays it: `T_render_ahead` (draft
+  30 min) before its slot in the schedule (§6), or when its user picks it. A radio needs what is
+  on next, not the whole window.
+- **Any node that holds the codes and can run the profile can offer the rendition.** It answers
+  an ask with an offer as if it held it, makes it only when it is granted the upload, so that one
+  node and not every capable one spends the work, and sends it only if it matches the id in the
+  table. A platform that does not reproduce the profile bit for bit therefore cannot serve
+  renditions, but can never serve a wrong one: correctness never depends on determinism, only
+  availability does. Stations and phones make renditions (a dongle uploads what its phone made);
+  dongles never decode.
+- **An announcer serves a rendition like any object**, while a follower wants it, and never
+  wants one for itself. If it can make it, it does; otherwise it asks, in its own cell and in the
+  rendezvous, and a node that can make it offers and uploads it. Announcers do not upload, so a
+  station that announces makes renditions for its own cell only; a cell whose announcer cannot
+  make them relies on a follower that can, or on a neighbouring cell's.
+- **Verification is the object hash.** The device checks the rendition against the id in the
+  table with BLAKE3, the check it applies to every object. No pairing, no second key, no QR code.
+  A rendition of an encrypted channel is encrypted like its objects (§2), so a node can make it
+  only if it holds the channel key; the device then needs the key too.
+- **A rendition costs what listening costs.** A device plays in real time, so a rendition on
+  the sub-GHz cell costs its bit rate for as long as someone listens, once per cell however many
+  devices listen there (FEASIBILITY.md §10). Where the device has a carrier with more room, such
+  as ESP-NOW on an ESP32-S3 near a station (TRANSPORTS.md), the rendition should take it; the
+  object is the same.
+
+Profiles (draft; bit rates to be set by a listening test on the target device):
+
+| Profile | From | Decoder | Rendition |
+|---|---|---|---|
+| 1 | 17 music | SNAC 32 kHz, reference integer decoder v1 | Opus, mono, 16 kbit/s |
+| 2 | 16 speech | SNAC 24 kHz, reference integer decoder v1 | Opus, mono, 8 kbit/s |
+
+Determinism is a Phase 1 deliverable: the same codes must give the same rendition hash on
+x86-64 and AArch64. The assumptions to be tested: a decoder in integer arithmetic with defined
+rounding is bit-exact by construction, and libopus built in fixed point without platform
+intrinsics is a deterministic function of its input and settings. If a platform cannot
+reproduce a profile, it does not serve that profile.
+
 ## 2. Channels and manifests
 
 A **channel** is an Ed25519 public key. Its **channel id** is the first 8 bytes of BLAKE3(pubkey).
@@ -105,6 +167,7 @@ A **manifest** is an object of MIME `application/meshcast-manifest` containing, 
 | `objects` | list of {`id` 32 B, `len` u32, `kind` u8 content type (§1.1), `title`, `blocks` u16, `enc` bool} | the channel's catalogue (or a window of it) |
 | `schedule` | list of {`id` 8 B, `start` u64 UTC seconds, `repeat` optional} | when to play what |
 | `prev` | 32 B optional | id of the previous manifest, for history |
+| `renditions` | {`id` 32 B, `len` u32} optional | the channel's rendition table (§1.2) |
 | `sig` | 64 B | Ed25519 signature over everything above |
 
 Rules:
@@ -523,6 +586,8 @@ arrives a few minutes later than it otherwise would. That is the entire user-vis
 - Time sources in order of trust: GPS, phone/NTP over BLE or IP, announcer BEACON `utc` with
   `time_quality`, and finally nothing (the node plays on demand only). A node adopts a BEACON's time
   only if its own quality is lower.
+- A device that cannot decode asks for the rendition of an object `T_render_ahead` before its
+  slot (§1.2), so a radio fetches what is on next and nothing else.
 - Accuracy needed: seconds, not milliseconds. Two neighbours playing the same track one second
   apart is acceptable; one minute apart is not.
 
@@ -567,6 +632,7 @@ arrives a few minutes later than it otherwise would. That is the entire user-vis
 | `T_offer` | 0–3 s | random delay before a holder offers on an open ask |
 | repair wait | `T_suppress × (neighbours heard better than the asker) / (all neighbours)` + jitter | ungranted NACK answer |
 | `T_upload_phase` | 1 s | one upload phase: uploaders to one announcer take turns this long each |
+| `T_render_ahead` | 30 min | a device that cannot decode asks for a rendition this long before its slot |
 | `T_grant` | 10 min | a grant lapses this long after its last symbol (or after the grant, if none came) |
 | `T_slot` | 10 s | time slot when announcers in conflict share a channel |
 | `conflict_ttl`, `T_report_min` | 30 min, 60 s | conflict report lifetime and follower report rate limit |
@@ -614,10 +680,10 @@ arrives a few minutes later than it otherwise would. That is the entire user-vis
     once never lapsed, so an announcer kept naming a holder that had gone quiet. Offers now wait
     for the rendezvous and grants lapse without progress; the band L neighbourhood went from
     95–99 % on average (one seed at 66 %) to 100 % on every seed.
-12. *(resolved: Opus stays local.)* A device that cannot run the neural decoder, such as a
-    LilyGo T-Deck Pro with a headphone jack (ESP32-S3, 8 MB PSRAM), can play Opus but not SNAC.
-    Carrying Opus renditions on the air was measured: with half the programmes also as Opus the
-    network spends three to six times the airtime (FEASIBILITY.md §9.5). So an Opus object
-    (content type 18) is made by a phone or station that has decoded the SNAC object, handed to
-    the device next to it over a local link, and never listed in a channel manifest: the mesh
-    carries every programme once, as codes.
+12. *(resolved: renditions, on demand and for the last hop; §1.2.)* A device that cannot run the
+    neural decoder, such as a LilyGo T-Deck Pro, can play Opus but not SNAC. Carrying Opus
+    alongside every programme was measured: with half the programmes also as Opus the network
+    spends three to six times the airtime (FEASIBILITY.md §9.5). So Opus never travels with the
+    codes. A device that needs it asks for the rendition of what it is about to play; a node in
+    its cell that can decode makes it, checked against the id the source signed, and the cell's
+    carousel carries it once to whoever asked (FEASIBILITY.md §10).
