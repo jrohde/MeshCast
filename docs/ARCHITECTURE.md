@@ -75,7 +75,7 @@ Rust everywhere, one Cargo workspace:
 
 | Crate | Target | Contents |
 |---|---|---|
-| `core` | `no_std`, no allocator assumptions beyond a bounded arena | objects, symbols, manifests (CBOR, Ed25519), frames and parsers, carousel, gossip, announcer election, EtherFatsoen gate, EtherDiscipline accounting, region profiles. No I/O: it consumes events (frame received, timer, RSSI sample) and emits actions (transmit frame, arm timer). |
+| `core` | `no_std`, no allocator assumptions beyond a bounded arena | objects, symbols, content types and the pinned audio codecs, manifests (CBOR, Ed25519), frames and parsers, carousel, gossip, announcer election, EtherFatsoen gate, EtherDiscipline accounting, region profiles. No I/O: it consumes events (frame received, timer, RSSI sample) and emits actions (transmit frame, arm timer). |
 | `sim` | host | discrete-event simulator driving many `core` instances through modelled radios (path loss with shadowing, capture effect, hidden nodes, per-carrier bit rates from the datasheets), scenario files, metrics export |
 | `station` | Linux | `core` + SX1302 via `libloragw` bindings (as ChirpStack Concentratord does) or SX1262 over SPI, object store on disk, SNAC encoding of ingested tracks and decoding for a speaker, HTTPS seeder/fetcher, metrics endpoint |
 | `firmware` | ESP32-S3 (`esp-hal`, `embassy`), later nRF52 (`embassy-nrf`) | `core` + SX126x driver (GFSK and LoRa), ESP-NOW and BLE via ESP-IDF bindings where Rust crates fall short, SD/flash object store; no audio decoding (§6) |

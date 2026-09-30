@@ -10,7 +10,7 @@ use alloc::vec::Vec;
 
 use crate::frame::SYMBOL_SIZE;
 use crate::ids::{ObjectId, ShortId};
-use crate::object::{block_k, blocks, ObjectMeta, Mime, K_MAX};
+use crate::object::{block_k, blocks, ObjectMeta, ContentType, K_MAX};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Put {
@@ -58,7 +58,7 @@ pub struct Entry {
     pub meta: Option<ObjectMeta>,
     /// Length hint (from MANIFEST_ANNOUNCE) when `meta` is not yet known.
     pub len_hint: Option<u32>,
-    pub mime_hint: Mime,
+    pub kind_hint: ContentType,
     blocks: Vec<Option<Block>>,
     bytes: Option<Vec<u8>>,
     complete: bool,
@@ -69,8 +69,8 @@ impl Entry {
     pub fn len(&self) -> Option<u32> {
         self.meta.map(|m| m.len).or(self.len_hint)
     }
-    pub fn mime(&self) -> Mime {
-        self.meta.map(|m| m.mime).unwrap_or(self.mime_hint)
+    pub fn kind(&self) -> ContentType {
+        self.meta.map(|m| m.kind).unwrap_or(self.kind_hint)
     }
     pub fn is_complete(&self) -> bool {
         self.complete
@@ -129,7 +129,7 @@ impl MemStore {
         self.entries.remove(id).is_some()
     }
 
-    /// Register an object whose length and mime are known (from a manifest).
+    /// Register an object whose length and content type are known (from a manifest).
     pub fn ensure(&mut self, meta: ObjectMeta) {
         let short = meta.id.short();
         let keep = (meta.len as usize) <= self.keep_bytes_below;
@@ -137,7 +137,7 @@ impl MemStore {
             short,
             meta: None,
             len_hint: None,
-            mime_hint: meta.mime,
+            kind_hint: meta.kind,
             blocks: Vec::new(),
             bytes: None,
             complete: false,
@@ -156,13 +156,13 @@ impl MemStore {
     }
 
     /// Register an object by short id with a length hint (from MANIFEST_ANNOUNCE).
-    pub fn ensure_hint(&mut self, short: ShortId, len: u32, mime: Mime) {
+    pub fn ensure_hint(&mut self, short: ShortId, len: u32, kind: ContentType) {
         let keep = (len as usize) <= self.keep_bytes_below;
         let e = self.entries.entry(short).or_insert_with(|| Entry {
             short,
             meta: None,
             len_hint: None,
-            mime_hint: mime,
+            kind_hint: kind,
             blocks: Vec::new(),
             bytes: None,
             complete: false,
@@ -170,7 +170,7 @@ impl MemStore {
         });
         if e.meta.is_none() && e.len_hint.is_none() {
             e.len_hint = Some(len);
-            e.mime_hint = mime;
+            e.kind_hint = kind;
             let nb = blocks(len) as usize;
             if e.blocks.len() < nb {
                 e.blocks.resize(nb, None);
@@ -207,7 +207,7 @@ impl MemStore {
         };
         self.entries.insert(
             short,
-            Entry { short, meta: Some(meta), len_hint: None, mime_hint: meta.mime, blocks: blk, bytes: stored, complete: true, verified: true },
+            Entry { short, meta: Some(meta), len_hint: None, kind_hint: meta.kind, blocks: blk, bytes: stored, complete: true, verified: true },
         );
     }
 
@@ -220,7 +220,7 @@ impl MemStore {
             short,
             meta: None,
             len_hint: None,
-            mime_hint: Mime::Other,
+            kind_hint: ContentType::Other,
             blocks: Vec::new(),
             bytes: None,
             complete: false,
@@ -349,7 +349,7 @@ mod tests {
     #[test]
     fn reassemble_and_verify() {
         let data: Vec<u8> = (0..1234u32).map(|i| (i * 7 % 251) as u8).collect();
-        let meta = ObjectMeta { id: ObjectId::of(&data), len: data.len() as u32, mime: Mime::Text };
+        let meta = ObjectMeta { id: ObjectId::of(&data), len: data.len() as u32, kind: ContentType::Text };
         let mut st = MemStore::new(1 << 20);
         st.ensure(meta);
         let short = meta.id.short();
@@ -375,7 +375,7 @@ mod tests {
     #[test]
     fn poisoned_symbol_rejected() {
         let data = vec![5u8; 500];
-        let meta = ObjectMeta { id: ObjectId::of(&data), len: 500, mime: Mime::Text };
+        let meta = ObjectMeta { id: ObjectId::of(&data), len: 500, kind: ContentType::Text };
         let mut st = MemStore::new(1 << 20);
         st.ensure(meta);
         let short = meta.id.short();
@@ -395,7 +395,7 @@ mod tests {
         assert_eq!(st.put_symbol(short, 0, 0, 2, &[0; SYMBOL_SIZE]), Put::New);
         assert_eq!(st.put_symbol(short, 0, 1, 2, &[0; SYMBOL_SIZE]), Put::New);
         assert!(!st.has_complete(&short));
-        st.ensure_hint(short, 300, Mime::Audio);
+        st.ensure_hint(short, 300, ContentType::Music);
         assert!(st.has_complete(&short));
     }
 }

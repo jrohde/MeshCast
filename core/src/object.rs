@@ -1,29 +1,48 @@
 //! Objects and their symbol layout (PROTOCOL.md §1).
 
 use crate::frame::SYMBOL_SIZE;
+use crate::audio::{Codec, SNAC_24KHZ, SNAC_32KHZ};
 use crate::ids::ObjectId;
 
 /// Maximum source symbols per block.
 pub const K_MAX: u16 = 1024;
 
+/// What an object is: one byte in its manifest entry (PROTOCOL.md §1.1). Frames never carry it;
+/// a node that wants an object already has the manifest that lists it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 #[repr(u8)]
-pub enum Mime {
-    Audio = 0,
+pub enum ContentType {
     Manifest = 1,
     Text = 2,
     Firmware = 3,
+    /// Spoken programmes as SNAC 24 kHz codes.
+    Speech = 16,
+    /// Music as SNAC 32 kHz codes.
+    Music = 17,
+    /// Reserved: Opus for players without a neural decoder (PROTOCOL.md open question 12).
+    Opus = 18,
     Other = 255,
 }
 
-impl Mime {
+impl ContentType {
     pub fn from_u8(v: u8) -> Self {
         match v {
-            0 => Mime::Audio,
-            1 => Mime::Manifest,
-            2 => Mime::Text,
-            3 => Mime::Firmware,
-            _ => Mime::Other,
+            1 => ContentType::Manifest,
+            2 => ContentType::Text,
+            3 => ContentType::Firmware,
+            16 => ContentType::Speech,
+            17 => ContentType::Music,
+            18 => ContentType::Opus,
+            _ => ContentType::Other,
+        }
+    }
+
+    /// The pinned model that decodes this content, if it is codec audio.
+    pub fn codec(self) -> Option<&'static Codec> {
+        match self {
+            ContentType::Speech => Some(&SNAC_24KHZ),
+            ContentType::Music => Some(&SNAC_32KHZ),
+            _ => None,
         }
     }
 }
@@ -32,7 +51,7 @@ impl Mime {
 pub struct ObjectMeta {
     pub id: ObjectId,
     pub len: u32,
-    pub mime: Mime,
+    pub kind: ContentType,
 }
 
 /// Number of symbols for an object of `len` bytes (at least one).

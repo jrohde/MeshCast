@@ -5,6 +5,7 @@ use std::fs;
 
 use clap::{Parser, Subcommand};
 use meshcast_core::frame::{CarrierKind, SYMBOL_SIZE};
+use meshcast_core::object::ContentType;
 use meshcast_core::params::Params;
 use meshcast_core::Millis;
 use serde::Serialize;
@@ -643,7 +644,7 @@ fn run_dynamics(nodes: usize, area_km2: f64, stations: usize, channels: usize, f
         match kind {
             0 => {
                 let src = &mut built.sources[c];
-                let o = track_object(common.seed, src.node, next_index[c], bulletin_kb * 1024);
+                let o = track_object(common.seed, src.node, next_index[c], bulletin_kb * 1024, ContentType::Speech);
                 next_index[c] += 1;
                 src.objects.push(o.clone());
                 while src.objects.len() > window {

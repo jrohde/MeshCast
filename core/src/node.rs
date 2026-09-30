@@ -12,7 +12,7 @@ use crate::fatsoen::Fatsoen;
 use crate::frame::{AnnounceEntry, Beacon, Bulk, CarrierKind, Class, Frame, FrameType, Gossip, ManifestAnnounce, Nack, MAX_ANNOUNCE_ENTRIES, MAX_GOSSIP_IDS, MAX_NACK_RANGES, MAX_WANT, SYMBOL_SIZE};
 use crate::ids::{ChannelId, NodeId, ShortId};
 use crate::manifest::Manifest;
-use crate::object::{Mime, ObjectMeta};
+use crate::object::{ContentType, ObjectMeta};
 use crate::params::{Params, SCORE_MAX};
 use crate::profile::{Access, RegionProfile};
 use crate::rng::Rng;
@@ -1669,7 +1669,7 @@ impl Node {
         out.push(Action::ObjectComplete { id, now: self.now });
         self.wants.remove(&id);
         self.progress.remove(&id);
-        let is_manifest = self.store.entry(&id).map(|e| e.mime() == Mime::Manifest).unwrap_or(false);
+        let is_manifest = self.store.entry(&id).map(|e| e.kind() == ContentType::Manifest).unwrap_or(false);
         if is_manifest {
             if let Some(bytes) = self.store.bytes(&id).map(|b| b.to_vec()) {
                 if let Ok(m) = Manifest::decode(&bytes) {
@@ -1884,7 +1884,7 @@ impl Node {
                 }
             }
             self.manifests.insert(e.channel, ManifestInfo { seq: e.seq, short: e.manifest, len: e.len, adopted: false });
-            self.store.ensure_hint(e.manifest, e.len, Mime::Manifest);
+            self.store.ensure_hint(e.manifest, e.len, ContentType::Manifest);
             if self.store.has_complete(&e.manifest) {
                 if let Some(bytes) = self.store.bytes(&e.manifest).map(|b| b.to_vec()) {
                     if let Ok(man) = Manifest::decode(&bytes) {

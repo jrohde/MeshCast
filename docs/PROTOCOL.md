@@ -61,7 +61,7 @@ weights:
 Rules:
 - **A code is a contract and never changes meaning.** A retrained or different model gets a new
   code, so an object decodes the same way on every device for as long as it exists. The full
-  hashes live in `core` next to the codes.
+  hashes live in `core` (`audio.rs`) next to the codes.
 - **The publisher chooses the kind**; nodes do not guess it. A spoken programme over a music bed
   is music.
 - **Only the device that plays decodes**: the phone, or a station with a speaker. Relays and
@@ -96,7 +96,7 @@ A **manifest** is an object of MIME `application/meshcast-manifest` containing, 
 | `chan` | 32 B | channel public key |
 | `seq` | u32 | monotonically increasing; a node keeps only the highest valid seq per channel |
 | `title`, `desc` | text | channel metadata |
-| `objects` | list of {`id` 32 B, `len` u32, `type` u8 (§1.1), `title`, `blocks` u16, `enc` bool} | the channel's catalogue (or a window of it) |
+| `objects` | list of {`id` 32 B, `len` u32, `kind` u8 content type (§1.1), `title`, `blocks` u16, `enc` bool} | the channel's catalogue (or a window of it) |
 | `schedule` | list of {`id` 8 B, `start` u64 UTC seconds, `repeat` optional} | when to play what |
 | `prev` | 32 B optional | id of the previous manifest, for history |
 | `sig` | 64 B | Ed25519 signature over everything above |

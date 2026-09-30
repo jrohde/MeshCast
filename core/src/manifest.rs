@@ -7,19 +7,19 @@ use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use minicbor::{data::Type, Decoder, Encoder};
 
 use crate::ids::{ChannelId, ObjectId, ShortId};
-use crate::object::{Mime, ObjectMeta};
+use crate::object::{ContentType, ObjectMeta};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ManifestObject {
     pub id: ObjectId,
     pub len: u32,
-    pub mime: Mime,
+    pub kind: ContentType,
     pub title: String,
 }
 
 impl ManifestObject {
     pub fn meta(&self) -> ObjectMeta {
-        ObjectMeta { id: self.id, len: self.len, mime: self.mime }
+        ObjectMeta { id: self.id, len: self.len, kind: self.kind }
     }
 }
 
@@ -62,7 +62,7 @@ impl Manifest {
             e.array(4).ok();
             e.bytes(&o.id.0).ok();
             e.u32(o.len).ok();
-            e.u8(o.mime as u8).ok();
+            e.u8(o.kind as u8).ok();
             e.str(&o.title).ok();
         }
         e.array(schedule.len() as u64).ok();
@@ -141,9 +141,9 @@ impl Manifest {
             let mut id = [0u8; 32];
             id.copy_from_slice(idb);
             let len = b.u32().map_err(|_| ManifestError::Cbor)?;
-            let mime = Mime::from_u8(b.u8().map_err(|_| ManifestError::Cbor)?);
+            let kind = ContentType::from_u8(b.u8().map_err(|_| ManifestError::Cbor)?);
             let t = String::from(b.str().map_err(|_| ManifestError::Cbor)?);
-            objects.push(ManifestObject { id: ObjectId(id), len, mime, title: t });
+            objects.push(ManifestObject { id: ObjectId(id), len, kind, title: t });
         }
         let ns = b.array().map_err(|_| ManifestError::Cbor)?.ok_or(ManifestError::Cbor)?;
         if ns > 4096 {
@@ -200,7 +200,7 @@ impl Manifest {
     /// The manifest as an object: id = hash of its encoding.
     pub fn as_object(&self) -> (ObjectMeta, Vec<u8>) {
         let bytes = self.encode();
-        (ObjectMeta { id: ObjectId::of(&bytes), len: bytes.len() as u32, mime: Mime::Manifest }, bytes)
+        (ObjectMeta { id: ObjectId::of(&bytes), len: bytes.len() as u32, kind: ContentType::Manifest }, bytes)
     }
 }
 
@@ -212,7 +212,7 @@ mod tests {
     #[test]
     fn sign_encode_decode_verify() {
         let key = SigningKey::from_bytes(&[7u8; 32]);
-        let obj = ManifestObject { id: ObjectId::of(b"track"), len: 540_000, mime: Mime::Audio, title: String::from("Track 1") };
+        let obj = ManifestObject { id: ObjectId::of(b"track"), len: 540_000, kind: ContentType::Music, title: String::from("Track 1") };
         let m = Manifest::sign(&key, 1, "Test channel", vec![obj.clone()], vec![ScheduleEntry { object: obj.id.short(), start: 1000, repeat: 0 }], None);
         assert!(m.verify());
         let bytes = m.encode();

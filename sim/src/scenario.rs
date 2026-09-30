@@ -6,7 +6,7 @@ use meshcast_core::ed25519_dalek::SigningKey;
 use meshcast_core::ids::{NodeId, ObjectId, ShortId};
 use meshcast_core::manifest::{Manifest, ManifestObject, ScheduleEntry};
 use meshcast_core::node::NodeConfig;
-use meshcast_core::object::Mime;
+use meshcast_core::object::ContentType;
 use meshcast_core::params::Params;
 use meshcast_core::rng::Rng;
 use serde::Serialize;
@@ -59,9 +59,9 @@ pub struct Built {
     pub sources: Vec<SourceInfo>,
 }
 
-pub fn track_object(seed: u64, source: usize, index: usize, len: u32) -> ManifestObject {
+pub fn track_object(seed: u64, source: usize, index: usize, len: u32, kind: ContentType) -> ManifestObject {
     let id = ObjectId::of(format!("track {source} {index} seed {seed}").as_bytes());
-    ManifestObject { id, len, mime: Mime::Audio, title: format!("Track {index}") }
+    ManifestObject { id, len, kind, title: format!("Track {index}") }
 }
 
 pub fn build(spec: &ScenarioSpec, params: Params) -> Built {
@@ -149,7 +149,7 @@ pub fn build(spec: &ScenarioSpec, params: Params) -> Built {
         let mut objects = Vec::new();
         let mut metas = Vec::new();
         for t in 0..spec.tracks {
-            let o = track_object(spec.seed, s, t, spec.track_kb * 1024);
+            let o = track_object(spec.seed, s, t, spec.track_kb * 1024, ContentType::Music);
             metas.push((o.meta(), None));
             objects.push(o);
         }
