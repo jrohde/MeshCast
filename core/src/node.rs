@@ -2141,8 +2141,12 @@ impl Node {
             if self.role(i) != Role::Announcer {
                 continue;
             }
+            // A want is served by the announcer it names. Announcers that overhear a follower of
+            // another cell and serve it too start the same pass at the same instant, and where
+            // they are hidden from each other every frame of both collides at that follower.
+            let addressed = g.announcer == me;
             let mut new_wants = Vec::new();
-            for (w, _, _) in &g.want {
+            for (w, _, _) in g.want.iter().filter(|_| addressed) {
                 if let Some(car) = self.carriers[i].carousel.as_mut() {
                     car.on_want(*w, g.node, now);
                 }

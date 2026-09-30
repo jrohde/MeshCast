@@ -261,12 +261,23 @@ the cell wants, as learned from GOSSIP and MANIFEST_ANNOUNCE, that the announcer
 The round never waits for anyone. A follower that joins mid-round starts collecting and completes
 the object next round. Symbols are idempotent, so a slow announcer simply takes more rounds.
 
-**Passes and idleness.** Followers never report HAVE, so the announcer cannot know when everyone
-is done. Instead each object gets `max_passes` (draft 3) full passes and then leaves the carousel
-unless a new WANT arrives after its last pass. Manifests are repeated at most every `T_always`
+**One pass, then repair.** Followers never report HAVE, so the announcer cannot know when
+everyone is done. Each object gets one full pass (`max_passes` = 1) and then leaves the carousel
+unless a new WANT arrives after that pass: a follower that caught most of it repairs the rest
+with a NACK, one that caught little asks again. Three passes per object, the earlier draft, cost
+35 to 49 % more airtime in every scenario and bought no speed; the repair does the work of the
+repeated passes, aimed (FEASIBILITY.md §9.8). Manifests are repeated at most every `T_always`
 (draft 5 min) when nothing else is wanted. A carousel with nothing to send is silent; the
 announcer then only beacons. (The first simulator runs looped manifests forever at the full duty
 cycle, which wasted the budget and caused half-duplex losses during uploads.)
+
+**A want is served by the announcer it names.** A follower's WANT names the announcer it
+follows (§3.3). Other announcers that overhear it do not serve it: two announcers answering the
+same WANT start the same pass at the same instant, and where they cannot hear each other every
+frame of both collides at the follower that asked. In one simulated world a follower caught 27
+of an object's 216 symbols in twelve hours that way (FEASIBILITY.md §9.8). An announcer still
+hears the WANTs, offers and conflict reports of other cells; it only leaves their wants to their
+own announcers.
 
 **Repair.** Any node, follower or announcer, that holds at least 80 % of an object and has seen no
 new symbol for `T_nack_stall` (draft 60 s) sends one NACK listing the missing symbols. The
@@ -544,7 +555,7 @@ arrives a few minutes later than it otherwise would. That is the entire user-vis
 | `challenge_beacons` | 3 | beacons with a clearly lower score before a follower steps up |
 | `rssi_hysteresis` | 6 dB | a follower switches announcer only for a clearly stronger one |
 | `near_rssi` | sensitivity + 17 dB | beacon strength that means "same cell" for the tie-break |
-| `max_passes` | 3 | carousel passes per object unless re-wanted |
+| `max_passes` | 1 | carousel passes per object unless re-wanted |
 | `T_always` | 5 min | manifest repetition when idle |
 | `T_nack_stall` | 60 s | no progress on an ≥ 80 % object before a NACK |
 | `T_want_min` | 10 min | minimum interval between a follower's WANT frames |
