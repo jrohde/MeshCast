@@ -326,6 +326,14 @@ another; holding it to one phase in K made it K times slower (a median upload of
 (§5.3) turned around: slots are for carriers the regulator does not cap, phases for the one where
 its cap makes uploads long.
 
+**The announcer keeps quiet in the phases it gave away.** A radio that transmits cannot receive,
+and carrier sensing does not stop an announcer from talking over an uploader it can decode but
+hears below the clear-channel threshold (15 dB above sensitivity, ETSI EN 300 220-2 Table 18).
+So an announcer holds its carousel content during a phase whose uploader it has heard in the last
+two cycles; control frames still go. In the ring smoke test a quarter of the upload frames had
+arrived while the station was transmitting; afterwards 1.7 %, and 43 % fewer upload frames were
+needed; FEASIBILITY.md §9.7.
+
 **Every upload to an announcer runs in a phase the announcer named, by the holder it named.** A
 grant names both in the WANT. An announcer's NACK names both too (§3.5): the granted uploader and
 its phase if the object has one, otherwise the holder it hears best and a phase reserved for

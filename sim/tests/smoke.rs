@@ -132,6 +132,9 @@ fn hidden_uploaders_take_turns_at_their_announcer() {
     assert!(sent > 0, "no uploads happened");
     // Without phases 63 % of these frames collided when this test was written; with them 0.4 %.
     assert!(o[1] * 100 <= sent * 2, "uploads collided at the station: {o:?}");
+    // And the station keeps quiet while they speak: 26 % arrived while it was transmitting before
+    // it did, 1.7 % after.
+    assert!(o[2] * 100 <= sent * 5, "the station talked over its uploaders: {o:?}");
     for (id, t) in &b.tracks {
         for &f in &t.followers {
             assert!(b.engine.metrics.completions.contains_key(&(f, *id)), "node {f} missing {id:?}");
