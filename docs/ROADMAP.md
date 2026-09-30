@@ -26,7 +26,8 @@ Scope:
 
 Definition of done, with numbers written into FEASIBILITY.md:
 1. Delivered MB per hour per carrier at node densities of 10, 100 and 1000 per km².
-2. Time for a 3-minute Opus track and for a 10-track album to reach 90 % of followers across a
+2. Time for a 3-minute track (540 kB of Opus when Phase 0 ran; 42 kB since the codec choice in
+   FEASIBILITY.md §8) and for a 10-track album to reach 90 % of followers across a
    modelled town (e.g. 30 km², 200 nodes, 3 stations), with and without internet at the stations.
 3. Collision and hidden-node loss rate versus density; the occupancy at which delivery time
    doubles; whether the 30 % target holds.
@@ -63,8 +64,11 @@ Definition of done:
 
 Scope:
 - `station` on the miner: `core` + SX1302 via `libloragw` bindings or a second SX1262; object
-  store; Opus transcoding; HTTPS seed/fetch between two stations in different towns; metrics.
-- Phone app v0: BLE to a dongle, follow a channel via QR code, see the library, play a track.
+  store; SNAC encoding of ingested tracks; HTTPS seed/fetch between two stations in different
+  towns; metrics.
+- Phone app v0: BLE to a dongle, follow a channel via QR code, see the library, decode tracks
+  ahead with the pinned SNAC models (PROTOCOL.md §1.1) and play them. Measure on a Pixel 4a
+  what decoding costs natively: speed, and battery per hour of music.
 - Signed manifests end to end: publish from a phone, hear it on another dongle.
 - Ten to twenty nodes across a district, some offline, one station.
 
@@ -81,7 +85,8 @@ Definition of done:
 **Goal:** the features that make it a radio station rather than a file mover.
 
 Scope:
-- Spoken bulletins: record on the phone, Opus 8 kbit/s or Codec2, scheduled like tracks.
+- Spoken bulletins: record on the phone, encode with SNAC 24 kHz (0.98 kbit/s), scheduled like
+  tracks.
 - Encrypted channels with out-of-band key sharing.
 - RaptorQ repair symbols in the carousel (v1 repair), NACK reduced to the exception path.
 - EtherFatsoen congestion control tuned on the real network; spectrum weather in beacons.

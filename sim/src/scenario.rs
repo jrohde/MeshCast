@@ -6,13 +6,44 @@ use meshcast_core::ed25519_dalek::SigningKey;
 use meshcast_core::ids::{NodeId, ObjectId, ShortId};
 use meshcast_core::manifest::{Manifest, ManifestObject, ScheduleEntry};
 use meshcast_core::node::NodeConfig;
-use meshcast_core::object::Mime;
+use meshcast_core::object::ContentType;
 use meshcast_core::params::Params;
 use meshcast_core::rng::Rng;
 use serde::Serialize;
 
 use crate::engine::Engine;
 use crate::radio::{bulk_phy, control_phy, profile_for, region_for, BulkPreset, Phy, Propagation};
+
+/// One kind of object in a publishing mix: a label for reports and a size. The label also names
+/// the content type: anything with "opus" is Opus, anything with "speech" is speech, the rest music.
+#[derive(Clone, Debug, Serialize)]
+pub struct MixItem {
+    pub label: String,
+    pub kb: u32,
+}
+
+impl MixItem {
+    pub fn kind(&self) -> ContentType {
+        if self.label.contains("opus") {
+            ContentType::Opus
+        } else if self.label.contains("speech") {
+            ContentType::Speech
+        } else {
+            ContentType::Music
+        }
+    }
+}
+
+/// Parse "snac-music:42,snac-speech:22,opus-music:540" into a mix.
+pub fn parse_mix(s: &str) -> Result<Vec<MixItem>, String> {
+    s.split(',')
+        .map(|part| {
+            let (label, kb) = part.trim().split_once(':').ok_or_else(|| format!("`{part}`: expected label:kB"))?;
+            let kb = kb.parse().map_err(|_| format!("`{part}`: size is not a number"))?;
+            Ok(MixItem { label: label.to_string(), kb })
+        })
+        .collect()
+}
 
 #[derive(Clone, Debug, Serialize)]
 pub struct ScenarioSpec {
@@ -22,6 +53,8 @@ pub struct ScenarioSpec {
     pub sources: usize,
     pub tracks: usize,
     pub track_kb: u32,
+    /// Each source's objects cycle through this mix; empty means music of `track_kb`.
+    pub mix: Vec<MixItem>,
     pub hours: f64,
     pub seed: u64,
     pub bulk: BulkPreset,
@@ -37,6 +70,7 @@ pub struct ScenarioSpec {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct TrackInfo {
+    pub label: String,
     pub source: usize,
     pub index: usize,
     pub bytes: u32,
@@ -59,9 +93,9 @@ pub struct Built {
     pub sources: Vec<SourceInfo>,
 }
 
-pub fn track_object(seed: u64, source: usize, index: usize, len: u32) -> ManifestObject {
+pub fn track_object(seed: u64, source: usize, index: usize, len: u32, kind: ContentType) -> ManifestObject {
     let id = ObjectId::of(format!("track {source} {index} seed {seed}").as_bytes());
-    ManifestObject { id, len, mime: Mime::Audio, title: format!("Track {index}") }
+    ManifestObject { id, len, kind, title: format!("Track {index}") }
 }
 
 pub fn build(spec: &ScenarioSpec, params: Params) -> Built {
@@ -148,8 +182,13 @@ pub fn build(spec: &ScenarioSpec, params: Params) -> Built {
         let key = SigningKey::from_bytes(&kb);
         let mut objects = Vec::new();
         let mut metas = Vec::new();
+        let default_mix = [MixItem { label: "music".into(), kb: spec.track_kb }];
+        let mix: &[MixItem] = if spec.mix.is_empty() { &default_mix } else { &spec.mix };
+        let mut labels = Vec::new();
         for t in 0..spec.tracks {
-            let o = track_object(spec.seed, s, t, spec.track_kb * 1024);
+            let item = &mix[t % mix.len()];
+            let o = track_object(spec.seed, s, t, item.kb * 1024, item.kind());
+            labels.push(item.label.clone());
             metas.push((o.meta(), None));
             objects.push(o);
         }
@@ -168,7 +207,7 @@ pub fn build(spec: &ScenarioSpec, params: Params) -> Built {
             }
         }
         for (t, o) in objects.iter().enumerate() {
-            tracks.insert(o.id.short(), TrackInfo { source: s, index: t, bytes: o.len, followers: followers.clone() });
+            tracks.insert(o.id.short(), TrackInfo { label: labels[t].clone(), source: s, index: t, bytes: o.len, followers: followers.clone() });
         }
         source_infos.push(SourceInfo { node: s, key, channel: chan, objects, seq: 1 });
     }

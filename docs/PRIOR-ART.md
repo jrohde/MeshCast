@@ -102,9 +102,20 @@ agility. EtherDiscipline implements it literally; EtherFatsoen goes further.
 
 ## Audio
 
-**Opus**. 16–24 kbit/s music, 8 kbit/s speech; decoders run on ESP32-class hardware.
+**SNAC** (Multi-Scale Neural Audio Codec, [MIT](https://github.com/hubertsiuzdak/snac)).
+Residual vector quantisation with coarse levels at lower frame rates: 0.98 kbit/s speech at
+24 kHz, 1.9 kbit/s music at 32 kHz. MeshCast's codec for both (FEASIBILITY.md §8), at the cost
+of a decoder too large for a microcontroller.
+**WavTokenizer, EnCodec, Vocos, DAC, Mimi**. Other open neural codecs. WavTokenizer (one codebook,
+0.48–0.9 kbit/s) is excellent for speech and weaker for music; EnCodec is layered (1.5–24 kbit/s
+from one model) but weaker per bit; Vocos is a very light decoder for EnCodec codes trained on
+speech; DAC is the architecture SNAC extends; Mimi is a speech codec. Rated or measured in
+FEASIBILITY.md §8.
+**Opus**. 16–24 kbit/s music, 8 kbit/s speech; decoders run on ESP32-class hardware. The codec
+MeshCast assumed until §8, and a candidate fallback for players without a neural decoder
+(PROTOCOL.md open question 12).
 **Codec2**. 1.2–3.2 kbit/s intelligible speech; the digital-voice codec of the amateur world
-(FreeDV, M17). For bulletins where every byte counts.
+(FreeDV, M17).
 
 ## What is genuinely new here
 

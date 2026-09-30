@@ -7,6 +7,7 @@
 
 extern crate alloc;
 
+pub mod audio;
 pub mod carousel;
 pub mod crc;
 pub mod discipline;

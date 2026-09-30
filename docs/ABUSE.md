@@ -25,7 +25,7 @@ of yours can spend. Anything above one is a lever.
 | Attack | What you send | What it costs us | Amplification |
 |---|---|---|---|
 | **Channel flood** | Many signed channels with large catalogues | An announcer serves every channel it learns of, so it tries to carry all of them | Unbounded |
-| **WANT flood** | One 50-byte gossip asking for an object | The announcer puts a 540 kB track in its carousel | ~10 000× |
+| **WANT flood** | One 50-byte gossip asking for an object | The announcer puts a 42 kB track in its carousel (540 kB before the codec change) | ~800× |
 | **NACK amplification** | One 30-byte NACK, claiming to be an announcer | Every holder that hears it lines up an answer; the best-placed one sends up to 40 symbols | ~300× |
 | **Grant hijack** | An offer, then silence | The announcer waits `T_grant` (10 min) before reassigning, once per object | Stalls delivery |
 | **Election capture** | Beacons claiming the maximum score | You become announcer and can then simply not transmit; the cell starves | Denial of a whole cell |

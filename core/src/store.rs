@@ -10,7 +10,7 @@ use alloc::vec::Vec;
 
 use crate::frame::SYMBOL_SIZE;
 use crate::ids::{ObjectId, ShortId};
-use crate::object::{block_k, blocks, ObjectMeta, Mime, K_MAX};
+use crate::object::{block_k, blocks, ObjectMeta, ContentType, K_MAX};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Put {
@@ -58,9 +58,13 @@ pub struct Entry {
     pub meta: Option<ObjectMeta>,
     /// Length hint (from MANIFEST_ANNOUNCE) when `meta` is not yet known.
     pub len_hint: Option<u32>,
-    pub mime_hint: Mime,
+    pub kind_hint: ContentType,
     blocks: Vec<Option<Block>>,
     bytes: Option<Vec<u8>>,
+    /// Payloads of symbols that arrived before the object's length was known, kept until the
+    /// buffer exists. Whoever counts a symbol keeps it: without this an object collected ahead of
+    /// its metadata completes with a buffer of zeros.
+    pending: Vec<((u16, u16), Vec<u8>)>,
     complete: bool,
     pub verified: bool,
 }
@@ -69,8 +73,8 @@ impl Entry {
     pub fn len(&self) -> Option<u32> {
         self.meta.map(|m| m.len).or(self.len_hint)
     }
-    pub fn mime(&self) -> Mime {
-        self.meta.map(|m| m.mime).unwrap_or(self.mime_hint)
+    pub fn kind(&self) -> ContentType {
+        self.meta.map(|m| m.kind).unwrap_or(self.kind_hint)
     }
     pub fn is_complete(&self) -> bool {
         self.complete
@@ -129,20 +133,24 @@ impl MemStore {
         self.entries.remove(id).is_some()
     }
 
-    /// Register an object whose length and mime are known (from a manifest).
-    pub fn ensure(&mut self, meta: ObjectMeta) {
+    /// Register an object whose length and content type are known (from a manifest).
+    /// Register an object with full metadata (from a manifest). Returns true if that completed
+    /// it: every symbol had already arrived before we knew what the object was.
+    pub fn ensure(&mut self, meta: ObjectMeta) -> bool {
         let short = meta.id.short();
         let keep = (meta.len as usize) <= self.keep_bytes_below;
         let e = self.entries.entry(short).or_insert_with(|| Entry {
             short,
             meta: None,
             len_hint: None,
-            mime_hint: meta.mime,
+            kind_hint: meta.kind,
             blocks: Vec::new(),
             bytes: None,
+            pending: Vec::new(),
             complete: false,
             verified: false,
         });
+        let was = e.complete;
         if e.meta.is_none() {
             e.meta = Some(meta);
             let nb = blocks(meta.len) as usize;
@@ -150,27 +158,47 @@ impl MemStore {
             if keep && e.bytes.is_none() {
                 e.bytes = Some(vec![0u8; nb * K_MAX as usize * SYMBOL_SIZE]);
             }
+            Self::adopt_pending(e);
             // A provisional entry may already be complete for all its blocks.
             Self::recheck(e);
+        }
+        !was && e.complete
+    }
+
+    /// Move payloads that arrived before the buffer existed into it (or drop them if this object
+    /// is too large to keep).
+    fn adopt_pending(e: &mut Entry) {
+        let pending = core::mem::take(&mut e.pending);
+        if let Some(bytes) = e.bytes.as_mut() {
+            for ((block, esi), payload) in pending {
+                let off = (block as usize * K_MAX as usize + esi as usize) * SYMBOL_SIZE;
+                if off + SYMBOL_SIZE <= bytes.len() {
+                    let n = payload.len().min(SYMBOL_SIZE);
+                    bytes[off..off + n].copy_from_slice(&payload[..n]);
+                }
+            }
         }
     }
 
     /// Register an object by short id with a length hint (from MANIFEST_ANNOUNCE).
-    pub fn ensure_hint(&mut self, short: ShortId, len: u32, mime: Mime) {
+    /// Returns true if the hint completed the object (see `ensure`).
+    pub fn ensure_hint(&mut self, short: ShortId, len: u32, kind: ContentType) -> bool {
         let keep = (len as usize) <= self.keep_bytes_below;
         let e = self.entries.entry(short).or_insert_with(|| Entry {
             short,
             meta: None,
             len_hint: None,
-            mime_hint: mime,
+            kind_hint: kind,
             blocks: Vec::new(),
             bytes: None,
+            pending: Vec::new(),
             complete: false,
             verified: false,
         });
+        let was = e.complete;
         if e.meta.is_none() && e.len_hint.is_none() {
             e.len_hint = Some(len);
-            e.mime_hint = mime;
+            e.kind_hint = kind;
             let nb = blocks(len) as usize;
             if e.blocks.len() < nb {
                 e.blocks.resize(nb, None);
@@ -178,8 +206,10 @@ impl MemStore {
             if keep && e.bytes.is_none() {
                 e.bytes = Some(vec![0u8; nb * K_MAX as usize * SYMBOL_SIZE]);
             }
+            Self::adopt_pending(e);
             Self::recheck(e);
         }
+        !was && e.complete
     }
 
     /// Insert an object we own, complete. `bytes` is kept if below the threshold.
@@ -207,7 +237,7 @@ impl MemStore {
         };
         self.entries.insert(
             short,
-            Entry { short, meta: Some(meta), len_hint: None, mime_hint: meta.mime, blocks: blk, bytes: stored, complete: true, verified: true },
+            Entry { short, meta: Some(meta), len_hint: None, kind_hint: meta.kind, blocks: blk, bytes: stored, pending: Vec::new(), complete: true, verified: true },
         );
     }
 
@@ -220,9 +250,10 @@ impl MemStore {
             short,
             meta: None,
             len_hint: None,
-            mime_hint: Mime::Other,
+            kind_hint: ContentType::Other,
             blocks: Vec::new(),
             bytes: None,
+            pending: Vec::new(),
             complete: false,
             verified: false,
         });
@@ -256,8 +287,11 @@ impl MemStore {
                 let n = payload.len().min(SYMBOL_SIZE);
                 bytes[off..off + n].copy_from_slice(&payload[..n]);
             }
-        } else if e.len().map(|l| (l as usize) <= keep_below).unwrap_or(false) {
-            // Should not happen: ensure() allocates. Ignore.
+        } else if e.len().is_none() && (e.pending.len() + 1) * SYMBOL_SIZE <= keep_below {
+            // Length unknown: keep the payload until we learn whether this object is one whose
+            // bytes we keep. Past the keep threshold it certainly is not, and counting alone is
+            // then what we do for every large object.
+            e.pending.push(((block, esi), payload[..payload.len().min(SYMBOL_SIZE)].to_vec()));
         }
         Self::recheck(e);
         if e.complete {
@@ -349,7 +383,7 @@ mod tests {
     #[test]
     fn reassemble_and_verify() {
         let data: Vec<u8> = (0..1234u32).map(|i| (i * 7 % 251) as u8).collect();
-        let meta = ObjectMeta { id: ObjectId::of(&data), len: data.len() as u32, mime: Mime::Text };
+        let meta = ObjectMeta { id: ObjectId::of(&data), len: data.len() as u32, kind: ContentType::Text };
         let mut st = MemStore::new(1 << 20);
         st.ensure(meta);
         let short = meta.id.short();
@@ -375,7 +409,7 @@ mod tests {
     #[test]
     fn poisoned_symbol_rejected() {
         let data = vec![5u8; 500];
-        let meta = ObjectMeta { id: ObjectId::of(&data), len: 500, mime: Mime::Text };
+        let meta = ObjectMeta { id: ObjectId::of(&data), len: 500, kind: ContentType::Text };
         let mut st = MemStore::new(1 << 20);
         st.ensure(meta);
         let short = meta.id.short();
@@ -388,6 +422,43 @@ mod tests {
         assert_eq!(st.missing(&short, 0).len(), 3);
     }
 
+    fn symbols_of(data: &[u8]) -> Vec<Vec<u8>> {
+        data.chunks(SYMBOL_SIZE).map(|c| { let mut s = vec![0u8; SYMBOL_SIZE]; s[..c.len()].copy_from_slice(c); s }).collect()
+    }
+
+    #[test]
+    fn symbols_before_metadata_are_kept_and_complete_on_registration() {
+        let data: Vec<u8> = (0..900u32).map(|i| (i * 13 % 251) as u8).collect();
+        let meta = ObjectMeta { id: ObjectId::of(&data), len: data.len() as u32, kind: ContentType::Manifest };
+        let short = meta.id.short();
+        let syms = symbols_of(&data);
+        let k = syms.len() as u16;
+        let mut st = MemStore::new(4096);
+        for (esi, sym) in syms.iter().enumerate() {
+            assert_eq!(st.put_symbol(short, 0, esi as u16, k, sym), Put::New);
+        }
+        assert!(!st.has_complete(&short));
+        assert!(st.ensure(meta), "registration completes the object and says so");
+        assert!(st.has_complete(&short));
+        assert!(st.entry(&short).unwrap().verified);
+        assert_eq!(st.bytes(&short).unwrap(), &data[..]);
+        assert!(!st.ensure(meta), "completion is reported once");
+    }
+
+    #[test]
+    fn hint_after_symbols_keeps_real_bytes() {
+        let data: Vec<u8> = (0..700u32).map(|i| (i * 31 % 251) as u8).collect();
+        let short = ObjectId::of(&data).short();
+        let syms = symbols_of(&data);
+        let k = syms.len() as u16;
+        let mut st = MemStore::new(4096);
+        for (esi, sym) in syms.iter().enumerate().rev() {
+            st.put_symbol(short, 0, esi as u16, k, sym);
+        }
+        assert!(st.ensure_hint(short, data.len() as u32, ContentType::Manifest));
+        assert_eq!(st.bytes(&short).unwrap(), &data[..]);
+    }
+
     #[test]
     fn provisional_then_ensure() {
         let mut st = MemStore::new(0);
@@ -395,7 +466,7 @@ mod tests {
         assert_eq!(st.put_symbol(short, 0, 0, 2, &[0; SYMBOL_SIZE]), Put::New);
         assert_eq!(st.put_symbol(short, 0, 1, 2, &[0; SYMBOL_SIZE]), Put::New);
         assert!(!st.has_complete(&short));
-        st.ensure_hint(short, 300, Mime::Audio);
+        st.ensure_hint(short, 300, ContentType::Music);
         assert!(st.has_complete(&short));
     }
 }

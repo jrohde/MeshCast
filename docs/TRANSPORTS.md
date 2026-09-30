@@ -94,6 +94,10 @@ Two dongles 800 m apart in band L (25 mW, polite access, 15 hopping channels): a
 minutes once the follower has found the announcer's hop sequence (simulated: 16, 21 and 27
 minutes for three tracks).
 
+These runs used 540 kB tracks (3 minutes of Opus). The codec chosen later (FEASIBILITY.md §8)
+makes a track 42 kB, so the same airtime carries about 13 times as many, and over LoRa alone a
+track takes minutes rather than hours. Not yet re-simulated at the new size.
+
 Two dongles in the same street with ESP-NOW: the same protocol, 50–100 kbit/s, an album in an hour.
 
 A station on a roof with an SX1302, internet, and 200 dongles across town: the station wins the

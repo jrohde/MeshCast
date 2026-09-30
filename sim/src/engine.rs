@@ -38,6 +38,8 @@ struct Transmission {
     bytes: Vec<u8>,
     frame_type: FrameType,
     candidates: Vec<(usize, f64)>,
+    /// For an upload: the node index it is meant for.
+    upload_to: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -324,6 +326,30 @@ impl Engine {
             Self::prune(q, now.saturating_sub(MAX_AIRTIME_MS));
             q.push_back((now, end));
         }
+        // An upload frame: which announcer is it for, and can it hear it at all?
+        let mut upload_to = None;
+        if frame_type == FrameType::Bulk && self.nodes[from].node.role(carrier) != meshcast_core::node::Role::Announcer {
+            if let Some(t) = self.nodes[from].node.upload_target(carrier) {
+                let j = (t.0 as usize).wrapping_sub(1);
+                if j < self.nodes.len() {
+                    upload_to = Some(j);
+                    let reach = &self.reach[from][carrier];
+                    let rx = reach.iter().find(|(k, _)| *k == j).map(|(_, r)| *r);
+                    let outcome = if !self.nodes[j].alive {
+                        Some(5)
+                    } else if rx.map(|r| r < self.phys[carrier].sensitivity_dbm).unwrap_or(true) {
+                        Some(4)
+                    } else if self.nodes[j].node.channel(carrier, now) != channel {
+                        Some(3)
+                    } else {
+                        None // decided at the end of the frame
+                    };
+                    if let Some(o) = outcome {
+                        self.metrics.upload_outcome[o] += 1;
+                    }
+                }
+            }
+        }
         let phy = &self.phys[carrier];
         let mut candidates = Vec::new();
         let reach = std::mem::take(&mut self.reach[from][carrier]);
@@ -357,7 +383,7 @@ impl Engine {
         }
         self.reach[from][carrier] = reach;
         self.recent.entry((carrier, channel)).or_default().push_back(id);
-        self.txs.insert(id, Transmission { id, from, carrier, channel, start: now, end, bytes, frame_type, candidates });
+        self.txs.insert(id, Transmission { id, from, carrier, channel, start: now, end, bytes, frame_type, candidates, upload_to });
         self.push(end, Ev::TxEnd(id));
     }
 
@@ -400,6 +426,9 @@ impl Engine {
             let hd = self.nodes[j].own_tx[tx.carrier].iter().any(|&(s, e)| s < tx.end && e > tx.start);
             if hd {
                 self.metrics.frames_half_duplex += 1;
+                if tx.upload_to == Some(j) {
+                    self.metrics.upload_outcome[2] += 1;
+                }
                 continue;
             }
             let mut worst = f64::NEG_INFINITY;
@@ -418,6 +447,17 @@ impl Engine {
             }
             if worst > f64::NEG_INFINITY && rx - worst < phy_capture {
                 self.metrics.frames_collided += 1;
+                if tx.upload_to == Some(j) {
+                    self.metrics.upload_outcome[1] += 1;
+                    let other = self.txs.get(&worst_id);
+                    let k = match other.map(|t| (t.upload_to, t.frame_type)) {
+                        Some((Some(to), _)) if to == j => 0,
+                        Some((Some(_), _)) => 1,
+                        _ if self.nodes[worst_from].node.role(tx.carrier) == meshcast_core::node::Role::Announcer => 2,
+                        _ => 3,
+                    };
+                    self.metrics.upload_interferer[k] += 1;
+                }
                 if tx.frame_type == FrameType::Bulk {
                     let a = self.nodes[tx.from].node.role(tx.carrier) == meshcast_core::node::Role::Announcer;
                     let b = self.nodes[worst_from].node.role(tx.carrier) == meshcast_core::node::Role::Announcer;
@@ -447,6 +487,9 @@ impl Engine {
                 continue;
             }
             delivered += 1;
+            if tx.upload_to == Some(j) {
+                self.metrics.upload_outcome[0] += 1;
+            }
             if tx.frame_type == FrameType::Bulk {
                 self.metrics.per_node_bulk[j].0 += 1;
             }
@@ -463,7 +506,7 @@ impl Engine {
         }
         // Later-ending frames that overlapped this one must still see it: keep an ended stub
         // (no payload, no candidates) until it is older than the longest possible frame.
-        let stub = Transmission { id: tx.id, from: tx.from, carrier: tx.carrier, channel: tx.channel, start: tx.start, end: tx.end, bytes: tx.bytes.clone(), frame_type: tx.frame_type, candidates: Vec::new() };
+        let stub = Transmission { id: tx.id, from: tx.from, carrier: tx.carrier, channel: tx.channel, start: tx.start, end: tx.end, bytes: tx.bytes.clone(), frame_type: tx.frame_type, candidates: Vec::new(), upload_to: tx.upload_to };
         self.txs.insert(id, stub);
         self.recent.entry(key).or_default().push_back(id);
         let cutoff = now.saturating_sub(MAX_AIRTIME_MS);

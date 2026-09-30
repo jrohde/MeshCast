@@ -1,5 +1,5 @@
-//! The announcer's carousel (PROTOCOL.md §4): a loop over the objects the cell wants, most-wanted
-//! first, NACKed symbols at the front. Each object gets `max_passes` full passes, then leaves the
+//! The announcer's carousel (PROTOCOL.md §4): a loop over the objects the cell wants, the most
+//! listeners served per byte first, NACKed symbols at the front. Each object gets `max_passes` full passes, then leaves the
 //! loop unless someone wants it again; manifests are repeated at most every `t_always`. When
 //! nothing is wanted the carousel is silent.
 
@@ -164,24 +164,38 @@ impl Carousel {
     fn rebuild(&mut self, store: &MemStore, now: Millis) {
         self.rebuilds += 1;
         self.expire(now);
-        let mut scored: Vec<(usize, ShortId)> = Vec::new();
+        // (listeners, bytes, id). Manifests go first; then Smith's rule: one transmitter serving
+        // many waiting listeners minimises their total wait by sending the most listeners per
+        // byte first. Among objects of one size that is simply most-wanted first; a small object
+        // no longer waits behind a large one, and every wanted object is still sent every round.
+        let mut scored: Vec<(u64, u64, ShortId)> = Vec::new();
         let wanted: Vec<ShortId> = self.wants.keys().filter(|id| self.eligible(id, store)).copied().collect();
         let include_always = self.always_due(now) || !wanted.is_empty();
         if include_always {
             for id in &self.always {
                 if store.has_complete(id) {
-                    scored.push((usize::MAX, *id));
+                    scored.push((u64::MAX, 1, *id));
                 }
             }
             self.last_always = Some(now);
         }
         for id in wanted {
             if !self.always.contains(&id) {
-                scored.push((self.wants.get(&id).map(|w| w.len()).unwrap_or(0), id));
+                let listeners = self.wants.get(&id).map(|w| w.len()).unwrap_or(0) as u64;
+                let bytes = store.entry(&id).and_then(|e| e.len()).unwrap_or(1).max(1) as u64;
+                scored.push((listeners, bytes, id));
             }
         }
-        scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-        self.set = scored.into_iter().map(|(_, id)| id).collect();
+        // a before b when a.listeners / a.bytes > b.listeners / b.bytes, compared without division.
+        scored.sort_by(|a, b| {
+            let (l, r) = (a.0 as u128 * b.1 as u128, b.0 as u128 * a.1 as u128);
+            if a.0 == u64::MAX || b.0 == u64::MAX {
+                b.0.cmp(&a.0).then(a.2.cmp(&b.2))
+            } else {
+                r.cmp(&l).then(a.2.cmp(&b.2))
+            }
+        });
+        self.set = scored.into_iter().map(|(_, _, id)| id).collect();
         self.idx = 0;
         self.block = 0;
         self.esi = 0;

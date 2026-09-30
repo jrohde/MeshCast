@@ -63,10 +63,13 @@ Numbers verified against the current ETSI standard and the chip datasheets, deta
 | LoRa SF7, 869.4–869.65 MHz | metadata only | hundreds of bit/s | ~10 km |
 | Internet | if present | unlimited | anywhere |
 
-An hour of Opus music is about 11 MB. One transmitter in the 10 % band moves 25–35 minutes of
-music per hour; in the polite band or over ESP-NOW, several hours per hour. Because the carousel
-is broadcast, adding listeners costs nothing. In the US (FCC 15.247, no duty cycle, 1 W) the same
-hardware runs roughly ten times faster.
+Audio travels as the codes of a neural codec (SNAC): an hour of music is 0.84 MB, an hour of
+speech half that, and a 3-minute track 42 kB. One transmitter in the 10 % band moves five to eight
+hours of music per hour; in the polite band or over ESP-NOW, about a day's worth. LoRa alone, at
+roughly 0.5 kbit/s, still carries a track every ten to fifteen minutes (an estimate before protocol
+overhead). The codes are decoded only by the phone or station that plays them, ahead of time.
+Because the carousel is broadcast, adding listeners costs nothing. In the US (FCC 15.247, no duty
+cycle, 1 W) the same hardware runs roughly ten times faster.
 
 ## Architecture
 

@@ -16,6 +16,12 @@ pub struct RoleEvent {
 
 #[derive(Default, Debug)]
 pub struct Metrics {
+    /// Upload frames by what happened at the announcer they were meant for:
+    /// [delivered, collided, receiver transmitting, receiver on another channel, too weak, receiver off].
+    pub upload_outcome: [u64; 6],
+    /// Who broke collided upload frames: [uploader to the same announcer, uploader to another,
+    /// an announcer, anything else].
+    pub upload_interferer: [u64; 4],
     /// (node index, object) -> completion time.
     pub completions: BTreeMap<(usize, ShortId), Millis>,
     pub role_events: Vec<RoleEvent>,
@@ -50,6 +56,7 @@ impl Metrics {
 #[derive(Debug, Serialize)]
 pub struct ObjectSummary {
     pub object: String,
+    pub label: String,
     pub source: usize,
     pub index: usize,
     pub bytes: u32,

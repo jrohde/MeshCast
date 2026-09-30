@@ -117,16 +117,19 @@ second of airtime than LoRa SF7/250 but reaches a third as far.
 
 ## 4. Throughput per transmitter, by regime
 
-| Regime | Raw rate | Airtime allowed | Average | Per hour | Opus music (24 kbit/s) per hour |
-|---|---|---|---|---|---|
-| EU band O, 500 mW, 10 % DC | 100–150 kbit/s | 10 % | 10–15 kbit/s | 4.5–6.8 MB | 25–37 min |
-| EU band L, 25 mW, polite + AFA | 100 kbit/s | up to ~42 % | ~40 kbit/s | ~19 MB | ~1.7 h |
-| ESP-NOW LR, 100 mW | 50–100 kbit/s (distance-dependent) | 100 % | 50–100 kbit/s | 22–45 MB | 2–4 h |
-| US 902–928 MHz, FCC 15.247 digital modulation, 1 W | 300 kbit/s (≥ 500 kHz 6 dB bandwidth) | 100 % | 300 kbit/s | 135 MB | ~12 h |
-| Internet | n/a | n/a | n/a | unlimited | unlimited |
+| Regime | Raw rate | Airtime allowed | Average | Per hour | Opus music (24 kbit/s) per hour | SNAC music (1.88 kbit/s) per hour |
+|---|---|---|---|---|---|---|
+| EU band O, 500 mW, 10 % DC | 100–150 kbit/s | 10 % | 10–15 kbit/s | 4.5–6.8 MB | 25–37 min | 5.3–8 h |
+| EU band O, LoRa SF7/125, 10 % DC | 5.47 kbit/s | 10 % | ~0.55 kbit/s | ~0.25 MB | ~1.4 min | ~17 min |
+| EU band L, 25 mW, polite + AFA | 100 kbit/s | up to ~42 % | ~40 kbit/s | ~19 MB | ~1.7 h | ~22 h |
+| ESP-NOW LR, 100 mW | 50–100 kbit/s (distance-dependent) | 100 % | 50–100 kbit/s | 22–45 MB | 2–4 h | 26–53 h |
+| US 902–928 MHz, FCC 15.247 digital modulation, 1 W | 300 kbit/s (≥ 500 kHz 6 dB bandwidth) | 100 % | 300 kbit/s | 135 MB | ~12 h | ~160 h |
+| Internet | n/a | n/a | n/a | unlimited | unlimited | unlimited |
 
-Opus at 16 kbit/s mono (speech, or lo-fi music) halves the file sizes; Codec2 speech at
-1.2 kbit/s makes a 5-minute bulletin a 45 kB object.
+The LoRa row is computed, not measured: SF7 at 125 kHz and coding rate 4/5 is
+7 × 125 000 / 2⁷ × 4/5 = 5.47 kbit/s on air, before headers. The last column is the codec chosen
+in §8: an hour of music is 0.84 MB, an hour of speech (SNAC 24 kHz, 0.98 kbit/s) 0.44 MB. All
+averages are per transmitter and before protocol overhead.
 
 ## 5. Why it scales
 
@@ -159,7 +162,9 @@ listeners (the system naturally favours popular content, like Usenet did).
 
 The simulator in `sim/` runs the real `meshcast-core` protocol on modelled radios (log-distance
 path loss, exponent 3, 6 dB shadowing, capture, half-duplex, CCA, per-band accounting). Tracks are
-540 kB (3 minutes of Opus at 24 kbit/s). Every number below is reproducible with the command
+540 kB (3 minutes of Opus at 24 kbit/s). §8 later replaced Opus by SNAC, which makes a track
+42 kB, so these runs load the network about 13 times harder than the chosen codec will; they
+have not been re-run at the new size yet. Every number below is reproducible with the command
 shown; seeds are fixed. These are simulation results, not measurements: Phase 1 checks them
 against real radios.
 
@@ -501,3 +506,275 @@ and a newcomer's first WANT is answered like any other.
 - Whether 0–500 ms jitter and a 30 % occupancy target are the right values in a live band with
   LoRaWAN and other users: Phase 2 measurements.
 - Announcer-to-announcer exchange without bridge followers (PROTOCOL.md open question 7).
+
+## 8. The audio codec: measured by ear and by clock
+
+Until Phase 0 ended, every number here assumed Opus at 24 kbit/s: 540 kB per 3-minute track.
+Neural audio codecs turn audio into a short stream of integer codes and back, and some of them
+now reach listenable music at about 2 kbit/s. This section records how the codec was chosen.
+The listening tests and timings were run once, on the maintainer's own AI-generated tracks and
+hardware; the scripts are not in the repository (they drive Python reference implementations,
+and the project has no Python), so the method is described in enough detail to repeat it.
+
+### 8.1 Listening tests
+
+Method: 30-second excerpts from 1:00 of five of the maintainer's tracks (brass, reggae, hip-hop,
+a quiet song, dance), each encoded and decoded only from the codes that would be transmitted,
+stored losslessly, and presented blind in a fixed random order with the original hidden among
+them. One listener, headphones, absolute category rating from 1 (bad) to 5 (excellent).
+
+| Variant | kbit/s | kB per 3 min | Mean rating, 5 tracks |
+|---|---|---|---|
+| Original (hidden) | 1536 | 34 560 | 4.2 |
+| **SNAC 32 kHz** | **1.88** | **42** | **3.8** |
+| Opus 24, mono | 26.8 (measured, incl. Ogg) | 603 | 3.6 |
+| SNAC 44 kHz | 2.6 | 58 | 3.4 |
+| EnCodec 48 kHz stereo, 6 kbit/s | 6.1 | 136 | 3.4 |
+| EnCodec 24 kHz, 6 / 3 / 1.5 kbit/s | 6 / 3 / 1.5 | 135 / 68 / 34 | 3.2 / 2.6 / 1.8 |
+| Opus 12 / 6, mono | 12.4 / 7.0 | 280 / 159 | 2.6 / 1.6 |
+| WavTokenizer medium (music), 75 tokens/s | 0.9 | 20 | 2.6 |
+| WavTokenizer large, 40 tokens/s | 0.48 | 11 | 1.8 |
+| WavTokenizer large, 75 tokens/s ("speech" checkpoint) | 0.9 | 20 | 1.0 |
+
+A second round on three of the tracks added Vocos, a light decoder for EnCodec codes, at 12, 6,
+3 and 1.5 kbit/s: 2.7, 2.3, 1.3 and 1.0, below EnCodec's own decoder at the same bit rate
+(Vocos's published EnCodec model is trained on speech). The anchors repeated round one exactly
+(SNAC 32 kHz 3.7, Opus 24 3.7, WavTokenizer 2.3 on the same three tracks), which says the
+ratings are consistent, not that they generalise: one listener, five tracks.
+
+SNAC's 24 kHz model, trained on speech, was heard on the same music on a phone and judged not
+good enough for music.
+
+Sources: SNAC ([code and model cards](https://github.com/hubertsiuzdak/snac), MIT),
+WavTokenizer ([code](https://github.com/jishengpeng/WavTokenizer), MIT), EnCodec
+([code](https://github.com/facebookresearch/encodec), MIT), Vocos
+([code](https://github.com/gemelo-ai/vocos), MIT).
+
+### 8.2 What decoding costs
+
+Decoding runs on every device that plays, so its cost decides where playback can happen.
+Measured on an AMD Ryzen 7 255 (one core unless stated), 30 s of the same excerpt:
+
+| Decoder | Parameters | Multiply-adds per second of audio | PyTorch 2.5, 1 core | onnxruntime 1.30 native | onnxruntime-web 1.23 (WebAssembly), 1 core |
+|---|---|---|---|---|---|
+| SNAC 32 kHz | 38.5 M | 18.3 G | 0.9× real time | 1.8× (1 core), 3.3× (4 cores) | 0.73× |
+| SNAC 24 kHz | 13.1 M | 4.9 G | 3.5× | | 2.4× |
+| SNAC 44 kHz | 38.5 M | not counted (same network at 44.1 kHz) | | | 0.56× |
+| WavTokenizer (40 / 75 tokens/s) | 63 M | 2.6 / 4.8 G | 24× / 13× | | |
+| EnCodec 24 kHz | 7.4 M | 1.2 G | 20× | | |
+| Vocos on EnCodec codes | 8.0 M | 0.6 G | 90× | | |
+
+Multiply-adds are PyTorch's `FlopCounterMode` count halved. The ONNX models are the SNAC decoders
+exported with the noise injection, local attention and activation rewritten as plain operators;
+their output matches PyTorch to 118–124 dB signal-to-noise ratio.
+
+On a phone, the same page ran in the Claude app on a Pixel 4a (2020, Snapdragon 730G,
+Android 13), onnxruntime-web on one core: **SNAC 24 kHz 0.80×, SNAC 32 kHz 0.27×, SNAC 44 kHz
+0.19× real time**, each matching the desktop output to 123–124 dB. The browser's WebGPU path on
+the phone's Adreno 618 returned wrong audio (0–1 dB against the desktop) and then hung, so the
+graphics chip is untested rather than slow. On the desktop, native onnxruntime was 2.5× faster
+than WebAssembly on one core; applying that ratio, a native app on the Pixel 4a would decode
+music at roughly 0.7× real time per big core. That is an estimate, not a measurement.
+
+Repackagings of SNAC for other runtimes were checked and do not help yet: Vokra (a Rust runtime,
+pre-1.0) decoded 30 s of SNAC 44 kHz in 112 s using 12 GB; CrispASR's GGUF of SNAC 24 kHz is
+full precision because, per its model card, 8-bit quantisation damaged the codec output.
+
+### 8.3 Decision
+
+- **Music: SNAC 32 kHz, 1.88 kbit/s.** Rated above Opus 24 at 14 times fewer bytes. A 3-minute
+  track is 42 kB, one source block.
+- **Speech: SNAC 24 kHz, 0.98 kbit/s.** Half the bytes and a quarter of the decoding work of the
+  music model. Kept separate from music by choice: two models are more to maintain, but speech and
+  music are different kinds of programme and each gets the model made for it.
+- **Decode ahead, never in real time.** Tracks arrive minutes to hours before they play, so a
+  player decodes each object when it completes. The slowest path measured, one phone core in a
+  browser, needs under four hours of background work per hour of music.
+- **Only players decode.** Dongles carry codes and hand them to the phone; they have neither the
+  memory nor the arithmetic for a 38.5 M-parameter decoder.
+
+PROTOCOL.md §1.1 pins both models to exact weights and defines the payload layout.
+
+### 8.4 Open
+
+- SNAC 24 kHz has not been rated blind on the maintainer's own spoken programmes; the choice rests
+  on the model card and the demo samples.
+- Energy: how much battery a phone spends per hour of music, on the processor and on the graphics
+  chip, is unmeasured. The browser test has a battery mode, but it needs a working WebGPU path.
+- A lighter decoder for the same SNAC codes, trained on music, would keep the objects valid and cut
+  the decoding cost. Vocos shows the size (8 M parameters, 0.6 G multiply-adds per second) is
+  possible; whether the quality is, nobody has measured.
+- Opus as a fallback for players without a neural decoder: resolved in §9.5, local only.
+- The simulations of §7 used 540 kB tracks and should be re-run at 42 kB.
+
+## 9. After the codec change: ensembles, mixed traffic and four faults
+
+With 42 kB tracks (§8) the Phase 0 scenarios were run again, and with them a question §7 never
+asked: how much does one run say? This section records what that turned up. Every number in
+this section is an ensemble of eight seeds (`meshcast-sim ... --seeds 8`), given as the mean and
+the worst seed; the scenarios are those of §7 with 8 objects per source where §7 used fewer, so
+that a mix of four kinds has at least two of each. `--mix` sets what each source publishes, for
+example `snac-music:42,snac-speech:22`.
+
+### 9.1 One run is one throw of the dice
+
+The band L neighbourhood of §7.7 (50 nodes, 1 km², 540 kB tracks, 6 h) delivered 100 % on seed 1.
+On eight seeds the same code delivers 100, 88.6, 100, 95.2, 99.6, 100, 92.7 and 87.4 %: a mean
+of 95.4 %. Nothing in the protocol changed between those runs, only the random draws, and the
+spread is wide enough to hide a fault or invent an improvement. From here on designs are
+compared on ensembles; the single-seed tables of §7 stand as they were measured.
+
+### 9.2 Four faults
+
+The ensembles exposed a band L neighbourhood that stalled at 66 % on one seed while its
+neighbours delivered everything. A trace of each announcer's want list (`MESHCAST_DEBUG_WANTS=1`)
+showed two announcers asking every few minutes, for hours, for objects the other cell held, and
+never getting them.
+
+1. **Offers went where the asker does not listen.** An announcer's ask reaches the other cell in
+   the rendezvous, when every node is on the meeting channel. The holders there answered with an
+   offer a few seconds later, on their own cell's hop sequence, which the asking announcer never
+   visits. Rule now: a frame goes where its addressee listens; an offer to another cell's
+   announcer waits for the rendezvous.
+2. **A grant that had delivered once never lapsed.** The rule kept a grant alive if any symbol had
+   arrived after it was given, so an uploader that sent a few symbols and fell silent stayed
+   responsible for hours. PROTOCOL.md already said the right thing (a grant lapses after
+   `T_grant` without a symbol); the code now does it, counted from the last symbol.
+3. **Symbols that arrived before their object's metadata were counted but not kept.** A node
+   that collected an object before it knew what the object was stored a tally of symbols and no
+   payload; when the metadata arrived the object was complete, with a buffer of zeros, and
+   nothing announced the completion. For a manifest that meant a node could hold a "complete"
+   manifest it could not read. Rules now: whoever counts a symbol keeps it, and an object
+   completes once, with the same consequences, however it got there. (Found because the
+   simulator reported objects as undelivered that the nodes held.)
+4. **Small objects waited behind large ones** (§9.4).
+
+Faults 1 and 2, SNAC objects, before and after (8 seeds each):
+
+| Scenario | Before: delivered, mean (worst) | After | Bulk frames |
+|---|---|---|---|
+| Band O neighbourhood | 100 % (100) | 100 % (100) | unchanged |
+| Band L neighbourhood | 99.0 % (95.0) | **100 % (100)** | −31 % |
+| Band O, 100 nodes on 15 km² | 99.9 % (99.6) | 99.9 % (99.6) | −7 % |
+| Band L, 100 nodes on 15 km² | 98.9 % (95.8) | **99.9 % (99.3)** | −15 % |
+| ESP-NOW neighbourhood | 98.2 % (91.4) | **99.8 % (98.5)** | −31 % |
+| Two clusters, band L | 98.7 % (89.5) | **100 % (100)** | −32 % |
+| LoRa only, 5 km | 100 % (100) | 100 % (100) | unchanged |
+| Town, band O (200 nodes, 30 km²) | 100 % (100) | 100 % (100) | +5 % |
+| Town, band L | 99.9 % (99.7) | **100 % (100)** | −15 % |
+
+Single-channel carriers are untouched, as they should be: there is no other channel to be on.
+The two-cluster world that stalled at 89.5 % is now a smoke test (`sim/tests/smoke.rs`) that
+fails without the two fixes. The remaining 0.1 % in band O at 15 km² was fault 3, a measurement
+that missed objects the nodes held.
+
+### 9.3 SNAC-sized objects, all fixes
+
+All four fixes, SNAC music (42 kB) and speech (22 kB) alternating, 8 seeds, next to the same
+scenario with 540 kB tracks on one seed before these fixes:
+
+| Scenario | 540 kB Opus, one seed (§7 code) | SNAC 42 + 22 kB, 8 seeds: delivered, mean (worst) | median | bulk frames |
+|---|---|---|---|---|
+| Band O neighbourhood (50 nodes, 1 km², 3 h) | 100.0 %, median 66 min | 100.0 % (100.0) | 9 min | 13,483 |
+| Band L neighbourhood (50 nodes, 1 km², 6 h) | 91.4 %, median 90 min | 100.0 % (100.0) | 22 min | 55,357 |
+| Band O, 100 nodes on 15 km² (12 h) | 100.0 %, median 156 min | 100.0 % (99.9) | 10 min | 88,813 |
+| Band L, 100 nodes on 15 km² (12 h) | 98.7 %, median 355 min | 100.0 % (100.0) | 47 min | 380,782 |
+| ESP-NOW neighbourhood (30 nodes, 6 h) | 99.4 %, median 57 min | 100.0 % (100.0) | 16 min | 96,988 |
+| Two clusters 1.8 km apart, band L (12 h) | 100.0 %, median 68 min | 100.0 % (100.0) | 23 min | 20,048 |
+| LoRa only, two nodes 5 km apart (24 h) | 100.0 %, median 793 min | 100.0 % (100.0) | 48 min | 2,509 |
+| Town, band O (200 nodes, 30 km², 24 h) | 87.4 %, median 572 min | 100.0 % (100.0) | 18 min | 213,033 |
+| Town, band L (200 nodes, 30 km², 24 h) | 100.0 %, median 633 min | 100.0 % (99.9) | 79 min | 1,293,710 |
+
+Delivery is complete everywhere, and a track that took hours now takes minutes: over LoRa alone,
+48 minutes instead of 13 hours. In the dynamics scenario of §7.6 (8 channels, daily bulletins,
+subscription churn) a new bulletin reaches its followers in 1.8 minutes in band O and 6 in band L
+at 22 kB, against 6.6 and 20 at 300 kB; every follower that is on holds the current window of
+every channel it follows, in both bands.
+
+### 9.4 Mixed traffic and Smith's rule
+
+A network may carry SNAC objects next to much larger ones: Opus renditions (PROTOCOL.md open
+question 12), web bundles, firmware. With four kinds mixed (SNAC music 42 kB, SNAC speech 22 kB,
+Opus music 540 kB, Opus speech 180 kB), SNAC music in the band O neighbourhood took 27 minutes
+instead of 9. Two places decided the order in which objects travel, and neither looked at size:
+the carousel sorted by how many followers wanted an object, and the announcer asked holders for
+objects in id order, which is hash order, which is random. A holder uploads one object at a time,
+so a 540 kB object asked for first held up every small object of its source.
+
+The rule for one transmitter serving many waiting listeners is old: to minimise their total
+wait, send in order of weight over length (Smith's rule). Here the weight is the number of
+listeners, so **everywhere one sender chooses among objects, it takes the most listeners per
+byte first**: the carousel's order, and the order in which an announcer asks. Among objects of
+one size it is most-wanted first, as before; every wanted object is still sent every round.
+
+SNAC and Opus mixed, 8 seeds, the carousel already ordered by listeners per byte, and the ask
+order changed from object id to the same rule:
+
+| Scenario | SNAC music, median: ask in id order | Smith's rule | Opus music, median: id order | Smith's rule |
+|---|---|---|---|---|
+| Band O neighbourhood | 27 min | **9 min** | 31 min | 37 min |
+| Band L neighbourhood | 37 min | **23 min** | 47 min | 53 min |
+| Band O, 15 km² | 27 min | **10 min** | 60 min | 69 min |
+| Band L, 15 km² | 99 min | **43 min** | 158 min | 183 min |
+| ESP-NOW neighbourhood | 23 min | **17 min** | 35 min | 41 min |
+| Two clusters, band L | 33 min | **28 min** | 61 min | 73 min |
+| LoRa only, 5 km | 169 min | **41 min** | 370 min | 410 min |
+| Town, band O | 69 min | **19 min** | 188 min | 188 min |
+| Town, band L | 180 min | **64 min** | 267 min | 338 min |
+
+Small objects stop waiting behind large ones, most of all where the channel is slowest (LoRa
+alone: 169 to 41 minutes); the large ones pay a little, as Smith's rule says they must. Delivery
+stays at 100 % in every scenario.
+
+### 9.5 What an Opus rendition on the air costs
+
+PROTOCOL.md open question 12 asks whether Opus should travel as a second rendition of a
+programme. The simulator's closest case is a source whose objects are half SNAC and half Opus;
+with every fix in place:
+
+| Scenario | Bulk frames, SNAC only | SNAC and Opus mixed | Ratio |
+|---|---|---|---|
+| Band O neighbourhood | 13,483 | 42,441 | 3.1× |
+| Band L neighbourhood | 55,357 | 241,301 | 4.4× |
+| Band O, 15 km² | 88,813 | 300,144 | 3.4× |
+| Band L, 15 km² | 380,782 | 2,275,480 | 6.0× |
+| ESP-NOW neighbourhood | 96,988 | 468,667 | 4.8× |
+| Two clusters, band L | 20,048 | 116,712 | 5.8× |
+| LoRa only, 5 km | 2,509 | 9,234 | 3.7× |
+| Town, band O | 213,033 | 1,280,239 | 6.0× |
+| Town, band L | 1,293,710 | 7,606,850 | 5.9× |
+
+Half the programmes as Opus cost three to six times the airtime of all of them as SNAC. A real
+second rendition, of every programme and alongside its SNAC codes, costs more still. That is the
+measured price of the on-air answer to question 12; the local answer (a player re-encodes what it
+has decoded, for a speaker next to it) costs nothing on the air, and is the one adopted.
+
+### 9.6 Open
+
+- **Hidden uploaders collide at their announcer.** In the band L dynamics scenario uploads vary
+  from 169 to 2 085 per 72 hours across eight seeds. Classifying every upload frame at the
+  announcer it was meant for (`upload_outcome` in the simulator) shows why: in the bad worlds a
+  third of them collide, and nearly every collision is with another uploader sending to the same
+  announcer, a holder it cannot hear. Capping concurrent grants trades this for delay: at one
+  grant per announcer collisions fall from 35 % to 1 % and uploads by half, but the median
+  bulletin takes 27 minutes instead of 6 and the worst p90 goes from 64 to 911 minutes.
+  Letting the receiver divide its listening time works better: each upload gets a phase (a hash
+  of object and uploader that both ends compute, so no byte on the air), the uploader transmits
+  only in its phase, and the announcer grants only into a free phase. With three one-second
+  phases, upload frames fall by 46 % (43 636 to 23 720 per 72 hours), collisions from 35 % to 2 %,
+  and the median bulletin takes 9.5 minutes instead of 6.2. An oracle in which uploads to the same
+  announcer never collide shows what perfect scheduling would give: the same 43 % saving at an
+  unchanged 6.3 minutes. The collisions are therefore not what makes some worlds slow, but they
+  are nearly half the upload airtime, and a scheduler whose phase count follows the number of
+  running uploads, rather than a fixed three, should keep both. Band O is unaffected either way
+  (2 % collisions, phases change nothing). Not adopted yet: the fixed version is a trade, and the
+  adaptive one is the next design.
+- All 50 nodes of the dynamics scenario start at the same instant. In band L nobody can hear an
+  announcer that does not exist yet, so almost every node becomes announcer within the first
+  quarter hour before they find each other; the network is then stable for the remaining 71
+  hours. Letting a node that follows nobody sit on the base hop sequence (where the first
+  announcer of any area transmits) instead of scanning cut role events by a third over eight
+  seeds (257 to 165) and uploads by a sixth, but a bulletin took 7.8 minutes instead of 6.2.
+  Judged on one seed it looked worse on every count; judged on eight it is a trade, not yet
+  adopted.
+

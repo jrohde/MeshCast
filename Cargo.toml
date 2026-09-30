@@ -10,3 +10,7 @@ repository = "https://github.com/jrohde/MeshCast"
 
 [profile.release]
 debug = 1
+
+# The smoke tests simulate hours of radio traffic; unoptimised they take minutes each.
+[profile.test]
+opt-level = 2

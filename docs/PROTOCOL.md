@@ -15,8 +15,8 @@ exists, and this document must be updated with it.
 
 ## 1. Objects
 
-An **object** is an immutable byte string with a small header: MIME type, length, optional
-title, optional encryption flag. Tracks, bulletins, manifests, firmware images and text pages are
+An **object** is an immutable byte string described by its manifest entry: content type (§1.1),
+length, optional title, optional encryption flag. Tracks, bulletins, manifests, firmware images and text pages are
 all objects.
 
 - **Object id**: BLAKE3 hash of the object bytes (32 bytes). On the air a **short id** of the first
@@ -26,11 +26,70 @@ all objects.
 - **Symbols**: the object is split into symbols of `T` bytes (draft `T = 200`). The last symbol
   is zero-padded; the true length is in the header. `K = ceil(len / T)` source symbols.
 - **Source blocks**: objects larger than `K_max` symbols (draft 1024, so 200 kB) are split into
-  consecutive source blocks; each block is independently repairable. A 3-minute Opus track at
-  24 kbit/s is 540 kB, so 3 blocks.
+  consecutive source blocks; each block is independently repairable. A 3-minute music track
+  (§1.1) is 42 kB, one block; the 540 kB objects the Phase 0 simulations used (3 minutes of
+  24 kbit/s Opus) are 3 blocks.
+- **Symbols before metadata**: a node can collect symbols of an object before it knows what the
+  object is (an announcer overhearing a neighbouring carousel, or a manifest's symbols arriving
+  before its announcement). It keeps their payloads, not just a count, and the object completes
+  when its metadata arrives: once, with the same consequences as completing by a symbol (a
+  manifest is adopted, the want is dropped). Only an object too large for the node to keep at
+  all is tracked by count alone, as every large object is.
 - **Integrity**: v0 verifies the full object hash on completion and discards the object on
   mismatch. v1 option: a Merkle root over symbol hashes in the manifest so a poisoned symbol can be
   rejected on arrival (costs 4 bytes per symbol in the manifest).
+
+### 1.1 Content types and the two audio codecs
+
+Every object has a one-byte **content type**, carried in the manifest entry that lists it
+(§2). Frames never carry it: a BULK frame names an object by short id, and a node that wants the
+object already has the manifest that says what it is.
+
+| Code | Name | MIME | Content |
+|---|---|---|---|
+| 1 | manifest | `application/meshcast-manifest` | a channel manifest (§2) |
+| 2 | text | `text/plain; charset=utf-8` | text pages |
+| 3 | firmware | `application/octet-stream` | firmware images |
+| 16 | speech | `audio/x-snac; model=snac_24khz` | spoken programmes: news, talk, bulletins |
+| 17 | music | `audio/x-snac; model=snac_32khz` | music |
+| 18 | opus | `audio/ogg; codecs=opus` | local only: audio for a device that cannot run the neural decoder, made by a player that has decoded the SNAC object; never listed in a channel manifest (§9, question 12) |
+| 255 | other | | anything else; relayed, not interpreted |
+
+Audio objects hold the discrete codes of a neural codec, not a waveform (FEASIBILITY.md §8 has
+the measurements behind the choice). Speech and music use different models, each pinned to exact
+weights:
+
+| Code | Model | Weights | Bit rate | 3 min | 5 min |
+|---|---|---|---|---|---|
+| 16 speech | SNAC 24 kHz, 3 levels | `hubertsiuzdak/snac_24khz` at revision `d73ad17`, `pytorch_model.bin` SHA-256 `4b8164cc…9b4bff40` | 0.98 kbit/s | 22 kB | 37 kB |
+| 17 music | SNAC 32 kHz, 4 levels | `hubertsiuzdak/snac_32khz` at revision `c84c6ac`, `pytorch_model.bin` SHA-256 `bfee2f05…1ea3ba65` | 1.88 kbit/s | 42 kB | 70 kB |
+
+Rules:
+- **A code is a contract and never changes meaning.** A retrained or different model gets a new
+  code, so an object decodes the same way on every device for as long as it exists. The full
+  hashes live in `core` (`audio.rs`) next to the codes.
+- **The publisher chooses the kind**; nodes do not guess it. A spoken programme over a music bed
+  is music.
+- **Only the device that plays decodes**: the phone, or a station with a speaker. Relays and
+  dongles carry the codes as opaque bytes and never transcode. Decoding happens ahead of
+  playback, as soon as an object completes, so a player does not need to decode in real time.
+- **Encoding happens once, at the source**: on the phone that records a bulletin or on the
+  station that ingests a track.
+- The model weights (77 MB and 26 MB as fp16) ship with the player software and are not sent
+  over the mesh. A player that cannot verify the SHA-256 above does not play the object.
+
+**Payload layout.** No header. The payload is a bitstream of 12-bit codes (each codebook has
+4096 entries); code *i* occupies bits 12*i* to 12*i* + 11, and bit *b* of the stream is bit
+*b* mod 8 of byte ⌊*b*/8⌋. Codes are grouped by the span of the coarsest level:
+
+| Code | Group | Codes per group, coarse level first | Bits | Duration |
+|---|---|---|---|---|
+| 16 speech | 4 finest frames | 1 + 2 + 4 = 7 | 84 | 85.3 ms (4 × 512 samples at 24 kHz) |
+| 17 music | 8 finest frames | 1 + 2 + 4 + 8 = 15 | 180 | 96 ms (8 × 384 samples at 32 kHz) |
+
+Within a group each level's codes are in time order. The number of groups is
+⌊8 × `len` / bits per group⌋; leftover bits are zero. Because groups follow each other in time,
+any prefix of an object decodes to a prefix of the audio, which a later live mode can use.
 
 ## 2. Channels and manifests
 
@@ -43,7 +102,7 @@ A **manifest** is an object of MIME `application/meshcast-manifest` containing, 
 | `chan` | 32 B | channel public key |
 | `seq` | u32 | monotonically increasing; a node keeps only the highest valid seq per channel |
 | `title`, `desc` | text | channel metadata |
-| `objects` | list of {`id` 32 B, `len` u32, `mime`, `title`, `blocks` u16, `enc` bool} | the channel's catalogue (or a window of it) |
+| `objects` | list of {`id` 32 B, `len` u32, `kind` u8 content type (§1.1), `title`, `blocks` u16, `enc` bool} | the channel's catalogue (or a window of it) |
 | `schedule` | list of {`id` 8 B, `start` u64 UTC seconds, `repeat` optional} | when to play what |
 | `prev` | 32 B optional | id of the previous manifest, for history |
 | `sig` | 64 B | Ed25519 signature over everything above |
@@ -157,9 +216,13 @@ The announcer maintains a **carousel set**: every object (including manifests) t
 the cell wants, as learned from GOSSIP and MANIFEST_ANNOUNCE, that the announcer has. A round is:
 
 1. `BEACON` on the bulk carrier.
-2. For each object in the set, ordered rarest-first (fewest HAVEs among heard nodes) with new
-   manifests first: emit its symbols, one `BULK` frame each, subject to EtherFatsoen and
-   EtherDiscipline gating between frames.
+2. For each object in the set, manifests first and then **the most listeners served per byte**:
+   emit its symbols, one `BULK` frame each, subject to EtherFatsoen and EtherDiscipline gating
+   between frames. The listeners of an object are the followers asking for it; ordering by
+   listeners divided by size is Smith's rule, which minimises the total time listeners wait on
+   one shared transmitter. Among objects of one size it is simply most-wanted first; a small
+   object no longer waits behind a large one; and every wanted object is still sent every round,
+   so nothing starves.
 3. Merge NACKs received during the round; symbols named in NACKs are queued at the front of the
    next round.
 4. Objects that every heard follower reports complete leave the set.
@@ -191,10 +254,14 @@ No absolute signal level enters into it; the rank is relative to the holder's ow
 (`grant = NONE`) or a *grant* naming one uploader. Any node that holds the object, in the
 announcer's own cell or a neighbouring one, answers an open ask with an *offer*: one small GOSSIP
 carrying HAVE, after a random delay of up to `T_offer`, and not at all if it hears another
-holder's offer first. The announcer grants the first offer it hears and names that holder in its
-next WANT; only the named holder uploads, one object at a time (further grants queue), on the
-announcer's channel and in its slot. A grant lapses after `T_grant` without a symbol arriving,
-and the ask becomes open again. NACKs from an announcer are answered only by its granted
+holder's offer first. **A frame goes where its addressee listens**: an offer to the holder's own
+announcer goes out at once, but on a hopping carrier an offer to another cell's announcer waits
+for the rendezvous, the only time that announcer listens on a channel the holder can reach. The
+announcer grants the first offer it hears and names that holder in its next WANT; only the named
+holder uploads, one object at a time (further grants queue), on the announcer's channel and in
+its slot. A grant lapses after `T_grant` without a symbol arriving, counted from the grant or
+from the last symbol, whichever is later, and the ask becomes open again: an uploader that
+delivered once and then fell silent is no more responsible than one that never started. NACKs from an announcer are answered only by its granted
 uploader. This is the DHCP pattern, and it replaced "any holder answers after a random wait",
 which the simulator showed producing fourteen uploads per object per cell among holders that
 could not hear each other's suppression.
@@ -202,6 +269,10 @@ could not hear each other's suppression.
 **Ask only for what is not coming.** An announcer's WANT lists objects that have received no
 symbol for `T_nack_stall`; an object whose symbols are arriving is not asked for again, and a
 holder whose granted upload is flowing is not asked for a second object until it is done.
+**Ask first for the most listeners per byte**, the carousel's rule applied one step earlier: a
+holder uploads one object at a time, so the order of asking is the order of arriving, and a
+3-minute track must not wait behind a 540 kB object from the same source. (Asking in object-id
+order, as Phase 0 did, delayed small objects in mixed traffic about threefold.)
 Several holders may upload different objects to one announcer at the same time: each spends its
 own regulatory budget, and serialising them (tried in Phase 0) halves the cell's inbound rate.
 Holders on opposite sides of a cell that cannot hear each other's CCA are the known residual
@@ -399,7 +470,7 @@ arrives a few minutes later than it otherwise would. That is the entire user-vis
 | `meet_every` | 5 | every fifth dwell is on the common control-plane sequence |
 | `T_offer` | 0–3 s | random delay before a holder offers on an open ask |
 | repair wait | `T_suppress × (neighbours heard better than the asker) / (all neighbours)` + jitter | ungranted NACK answer |
-| `T_grant` | 10 min | a grant without any symbol arriving lapses |
+| `T_grant` | 10 min | a grant lapses this long after its last symbol (or after the grant, if none came) |
 | `T_slot` | 10 s | time slot when announcers in conflict share a channel |
 | `conflict_ttl`, `T_report_min` | 30 min, 60 s | conflict report lifetime and follower report rate limit |
 | `T_jitter` (tx) | 0–500 ms | random delay before control/metadata frames |
@@ -409,7 +480,9 @@ arrives a few minutes later than it otherwise would. That is the entire user-vis
 ## 9. Open questions
 
 1. Symbol size versus LoRa airtime: 200 B is right for GFSK; should LoRa-only cells use 64 B?
-2. Should the carousel prioritise by schedule proximity (what plays soonest) over rarest-first?
+2. Should the carousel prioritise by schedule proximity (what plays soonest)? It now orders by
+   listeners served per byte (§4); a playback deadline could weight that, but has not been
+   needed yet.
 3. Per-symbol authentication in v0 rather than v1, given that anyone can inject BULK frames?
 4. Multi-announcer cells on purpose (two bulk channels, two announcers) in dense areas?
 5. How does a node learn a channel id in the first place without internet? (QR code, spoken
@@ -424,8 +497,11 @@ arrives a few minutes later than it otherwise would. That is the entire user-vis
     experiment (FEASIBILITY.md §7.7.1) broke cells with several announcers. The first guess, that
     announcers fill up by overhearing and so can never complete, was measured and is wrong: on
     main 57 to 100 % of what an announcer receives arrives on request, and it holds every object.
-    The branch mixes two changes, the fountain carousel and a partial-relay attempt that flooded
-    the channel with duplicates; they are being measured apart before anything is concluded.
+    Measured apart, fountain coding alone is equal where one announcer serves a cell and worse
+    where several do, and the comparison corrected the premise: the duplicates come from a node
+    hearing several announcers send the *same* symbols, not from a carousel repeating itself
+    (FEASIBILITY.md §7.7.1). Not merged. Next hypothesis: a symbol range per announcer, so that
+    two carousels a node hears are never redundant.
 11. Cross-cell fetching among cells that cannot hear each other is the weakest part of the
     protocol, and the Phase 0 answer is mixed. Conflict colouring with granted uploads took band O
     at town scale from a 10.5-hour to a 7.3-hour median at the same complete delivery, and the
@@ -435,3 +511,16 @@ arrives a few minutes later than it otherwise would. That is the entire user-vis
     and turn-taking uploads were tried and rejected. Next: measure where the band L town path
     stalls (grant latency, coinciding upload channels, or one-object-per-holder), and find a rule
     that is cheap where channels are plentiful without being unsafe where they are scarce.
+    After the codec change the cause was found with an ensemble and a want-list trace
+    (FEASIBILITY.md §9): holders sent offers for another cell's announcer at once, on their own
+    hop sequence, where that announcer never listens; and a grant whose uploader had delivered
+    once never lapsed, so an announcer kept naming a holder that had gone quiet. Offers now wait
+    for the rendezvous and grants lapse without progress; the band L neighbourhood went from
+    95–99 % on average (one seed at 66 %) to 100 % on every seed.
+12. *(resolved: Opus stays local.)* A device that cannot run the neural decoder, such as a
+    LilyGo T-Deck Pro with a headphone jack (ESP32-S3, 8 MB PSRAM), can play Opus but not SNAC.
+    Carrying Opus renditions on the air was measured: with half the programmes also as Opus the
+    network spends three to six times the airtime (FEASIBILITY.md §9.5). So an Opus object
+    (content type 18) is made by a phone or station that has decoded the SNAC object, handed to
+    the device next to it over a local link, and never listed in a channel manifest: the mesh
+    carries every programme once, as codes.
