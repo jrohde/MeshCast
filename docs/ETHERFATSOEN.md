@@ -59,8 +59,8 @@ sources between them, to the floor.
 ### 3. Redundancy makes collisions harmless
 
 In a chat network a lost packet is a problem: it must be retransmitted, costing airtime, or the
-message is gone. In MeshCast a lost symbol is a symbol that arrives next round, or is covered by a
-repair symbol. Because loss is cheap, the protocol can afford to be extremely polite: high
+message is gone. In MeshCast a lost symbol is a symbol that a NACK brings back in the next round,
+or that a repair symbol covers. Because loss is cheap, the protocol can afford to be extremely polite: high
 backoff, low duty cycle, and let the redundancy absorb the losses. Politeness is cheap when loss is
 acceptable.
 

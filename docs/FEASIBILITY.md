@@ -887,7 +887,38 @@ In the ring smoke test the frames arriving while the station transmits fell from
 and the uploads needed 43 % fewer frames, because fewer had to be repaired. Band O and ESP-NOW do
 not divide the listening time and are unchanged.
 
-### 9.8 Open
+### 9.8 One pass, served by the announcer it names
+
+Every object used to get three full carousel passes, because followers never say when they are
+done. Measuring renditions (large objects for a few listeners) showed what that costs: three times
+the object for nobody in particular. So the pass count was measured on its own, eight seeds each:
+one pass was as fast as three everywhere and cheaper by a third to a half, because the NACK repair
+does the work of the repeated passes, aimed. One world of the band O 15 km² scenario, though,
+ended with two followers at 12 to 63 % of four objects after twelve hours, although they asked
+every ten minutes.
+
+A trace of one of them showed why: two announcers answered each of its WANTs, the one it follows
+and a neighbouring one that overheard it, and both started the same pass at the same instant, on
+the same channel, frame for frame. Hidden from each other, every frame of both collided at the
+follower, which caught 27 of one object's 216 symbols in twelve hours; with three passes the two
+had drifted apart and the fault stayed hidden. A want is now served only by the announcer it
+names (PROTOCOL.md §4). Both changes, against the current design, eight seeds each:
+
+| Scenario | Three passes: median, bulk frames | One pass, named announcer | Frames |
+|---|---|---|---|
+| Band O neighbourhood | 8.8 min, 13,483 | 9.1 min, 6,936 | −49 % |
+| Band L neighbourhood | 21.0 min, 32,151 | **17.6 min**, 17,541 | −45 % |
+| Band O, 15 km² | 9.6 min, 68,865 | 8.9 min, 44,647 | −35 % |
+| Band L, 15 km² | 29.8 min, 239,541 | 28.6 min, 131,452 | −45 % |
+| ESP-NOW neighbourhood | 15.1 min, 80,955 | 15.6 min, 44,863 | −45 % |
+| Two clusters, band L | 17.7 min, 16,524 | 18.3 min, 8,533 | −48 % |
+| Town, band O | 17.7 min, 219,499 | **15.4 min**, 169,354 | −23 % |
+| Town, band L | 43.2 min, 845,799 | **41.2 min**, 489,293 | −42 % |
+
+Every world delivers everything. In the dynamics scenario a bulletin arrives in 5.8 minutes in band L
+(5.9 before) and 1.8 in band O, and every follower that is on holds the current window at the end.
+
+### 9.9 Open
 
 - All 50 nodes of the dynamics scenario start at the same instant. In band L nobody can hear an
   announcer that does not exist yet, so almost every node becomes announcer within the first
