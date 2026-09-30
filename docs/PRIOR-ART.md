@@ -116,6 +116,14 @@ MeshCast assumed until §8, and a candidate fallback for players without a neura
 (PROTOCOL.md open question 12).
 **Codec2**. 1.2–3.2 kbit/s intelligible speech; the digital-voice codec of the amateur world
 (FreeDV, M17).
+**Voice over LoRa meshes.** Meshtastic's audio module sends Codec2 (700 bit/s by default) from a
+push-to-talk button; it is experimental and runs only on 2.4 GHz SX128x radios, because, in its
+documentation's words, the sub-GHz bands are not wide enough for continuous audio on the mesh
+([docs](https://meshtastic.org/docs/configuration/module/audio/)). QMesh
+([GitHub](https://github.com/faydr/QMesh)) floods Codec2 voice through a LoRa mesh in
+synchronised TDMA slots, transmitting in every third one, and accepts the latency that brings
+over several hops. Both carry speech between people in near real time; MeshCast carries
+programmes to listeners ahead of time, which is why it can use the sub-GHz bands at all.
 
 ## What is genuinely new here
 
