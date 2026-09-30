@@ -54,6 +54,8 @@ enum Ev {
 }
 
 pub struct Engine {
+    /// Rendition objects, so their frames can be counted apart.
+    pub rendition_ids: std::collections::HashSet<meshcast_core::ids::ShortId>,
     pub nodes: Vec<SimNode>,
     pub phys: Vec<Phy>,
     heap: BinaryHeap<Reverse<(Millis, u64, Ev)>>,
@@ -122,7 +124,7 @@ impl Engine {
         }
         let mut metrics = Metrics::default();
         metrics.per_node_bulk = vec![(0, 0); n];
-        let mut e = Engine { nodes, phys, heap: BinaryHeap::new(), seq: 0, tx_seq: 0, loss, reach, recent: HashMap::new(), txs: HashMap::new(), now: 0, metrics, verbose: false, trace_grants: std::env::var("MESHCAST_TRACE_GRANTS").is_ok(), next_sample: 0 };
+        let mut e = Engine { rendition_ids: Default::default(), nodes, phys, heap: BinaryHeap::new(), seq: 0, tx_seq: 0, loss, reach, recent: HashMap::new(), txs: HashMap::new(), now: 0, metrics, verbose: false, trace_grants: std::env::var("MESHCAST_TRACE_GRANTS").is_ok(), next_sample: 0 };
         for i in 0..n {
             e.schedule_wake(i, 1);
         }
@@ -324,6 +326,13 @@ impl Engine {
         self.metrics.frames_sent += 1;
         if frame_type == FrameType::Bulk {
             self.metrics.bulk_sent += 1;
+            if !self.rendition_ids.is_empty() {
+                if let Ok(Frame::Bulk(b)) = Frame::decode(&bytes) {
+                    if self.rendition_ids.contains(&b.object) {
+                        self.metrics.bulk_sent_rendition += 1;
+                    }
+                }
+            }
             let ann = self.nodes[from].node.role(carrier) == meshcast_core::node::Role::Announcer;
             self.metrics.bulk_sent_by[ann as usize] += 1;
         }

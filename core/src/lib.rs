@@ -20,6 +20,7 @@ pub mod node;
 pub mod object;
 pub mod params;
 pub mod profile;
+pub mod rendition;
 pub mod rng;
 pub mod store;
 

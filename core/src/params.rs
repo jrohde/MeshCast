@@ -118,6 +118,9 @@ pub struct Params {
     /// Length of one upload phase: uploaders to one announcer take turns in phases this long,
     /// one permitted transmission under polite access.
     pub t_upload_phase_ms: Millis,
+    /// A device that cannot decode asks for a rendition this long before the object's slot in
+    /// the schedule (PROTOCOL.md §1.2); an unscheduled object is asked for at once.
+    pub t_render_ahead_ms: Millis,
     /// A reported conflict between announcers is forgotten after this long.
     pub conflict_ttl_ms: Millis,
     /// Minimum interval between two conflict reports from the same follower.
@@ -151,6 +154,7 @@ impl Default for Params {
             upload_suppress_ms: 20_000,
             t_slot_ms: 10_000,
             t_upload_phase_ms: 1_000,
+            t_render_ahead_ms: 1_800_000,
             conflict_ttl_ms: 1_800_000,
             t_report_min_ms: 60_000,
             t_grant_ms: 600_000,

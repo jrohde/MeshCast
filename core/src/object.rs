@@ -15,12 +15,14 @@ pub enum ContentType {
     Manifest = 1,
     Text = 2,
     Firmware = 3,
+    /// A channel's rendition table (PROTOCOL.md §1.2).
+    Renditions = 4,
     /// Spoken programmes as SNAC 24 kHz codes.
     Speech = 16,
     /// Music as SNAC 32 kHz codes.
     Music = 17,
-    /// Opus, local only: made by a player that decoded the SNAC object, for a device next to it
-    /// that cannot; never listed in a channel manifest (PROTOCOL.md §1.1, question 12).
+    /// Opus: a rendition of a SNAC object for a device that cannot decode it, made on demand and
+    /// sent only where someone asks for it (PROTOCOL.md §1.2).
     Opus = 18,
     Other = 255,
 }
@@ -31,6 +33,7 @@ impl ContentType {
             1 => ContentType::Manifest,
             2 => ContentType::Text,
             3 => ContentType::Firmware,
+            4 => ContentType::Renditions,
             16 => ContentType::Speech,
             17 => ContentType::Music,
             18 => ContentType::Opus,

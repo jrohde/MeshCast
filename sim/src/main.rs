@@ -58,9 +58,25 @@ struct Common {
     /// Print role changes as they happen.
     #[arg(long, default_value_t = false)]
     verbose: bool,
+    /// Name an Opus rendition of every audio object in its manifest, at these rates in kbit/s
+    /// for music and speech, e.g. "16,8" (PROTOCOL.md §1.2). Stations make them on demand.
+    #[arg(long)]
+    renditions: Option<String>,
+    /// Followers that cannot decode and want renditions instead (needs --renditions).
+    #[arg(long, default_value_t = 0)]
+    small: usize,
+    /// Let every node that decodes make renditions, not only stations.
+    #[arg(long, default_value_t = false)]
+    players_render: bool,
 }
 
 impl Common {
+    fn renditions(&self) -> Option<scenario::RenditionSpec> {
+        let r = self.renditions.as_deref()?;
+        let (m, sp) = r.split_once(',').unwrap_or_else(|| panic!("--renditions: expected music,speech kbit/s"));
+        Some(scenario::RenditionSpec { music_kbps: m.trim().parse().expect("--renditions music"), speech_kbps: sp.trim().parse().expect("--renditions speech"), small: self.small, players_render: self.players_render })
+    }
+
     fn mix_items(&self) -> Vec<scenario::MixItem> {
         self.mix.as_deref().map(|m| scenario::parse_mix(m).unwrap_or_else(|e| panic!("--mix: {e}"))).unwrap_or_default()
     }
@@ -190,6 +206,23 @@ struct Report {
     bulk_sent_by: [u64; 2],
     upload_same: u64,
     upload_other: u64,
+    renditions: Option<RenditionSummary>,
+}
+
+/// How followers that cannot decode were served (PROTOCOL.md §1.2).
+#[derive(Serialize, Debug, Clone)]
+struct RenditionSummary {
+    /// Small listeners, and (object, small listener) pairs.
+    listeners: usize,
+    pairs: usize,
+    complete: usize,
+    /// Pairs complete before the object's slot in the schedule.
+    on_time: usize,
+    p50_h: Option<f64>,
+    p90_h: Option<f64>,
+    /// Bulk frames carrying renditions, and renditions made.
+    frames: u64,
+    made: u64,
 }
 
 #[derive(Serialize, Debug)]
@@ -265,6 +298,7 @@ fn main() {
                 positions: Some(vec![(0.0, 0.0), (distance_m, 0.0)]),
                 stations_at: Some(vec![]),
                 sources_at: Some(vec![0]),
+                renditions: common.renditions(),
             };
             run(spec, &common, None);
         }
@@ -287,6 +321,7 @@ fn main() {
                 positions: None,
                 stations_at: None,
                 sources_at: None,
+                renditions: common.renditions(),
             };
             run(spec, &common, None);
         }
@@ -320,6 +355,7 @@ fn main() {
                 positions: Some(positions),
                 stations_at: Some(vec![n - 1]),
                 sources_at: Some(vec![0]),
+                renditions: common.renditions(),
             };
             run(spec, &common, None);
         }
@@ -345,6 +381,7 @@ fn main() {
                 positions: None,
                 stations_at: None,
                 sources_at: None,
+                renditions: common.renditions(),
             };
             run(spec, &common, Some((kill_at_h, revive_at_h)));
         }
@@ -449,11 +486,20 @@ fn simulate(spec: ScenarioSpec, verbose: bool, failover: Option<(f64, f64)>) -> 
     // Objects.
     let mut objects = Vec::new();
     for (id, info) in &built.tracks {
-        let mut times: Vec<f64> = info
-            .followers
-            .iter()
-            .filter_map(|&f| m.completions.get(&(f, *id)).map(|&t| t as f64 / 3.6e6))
-            .collect();
+        // Followers that decode; those that cannot are reported with the renditions.
+        let decoders: Vec<usize> = info.followers.iter().copied().filter(|f| !info.small.contains(f)).collect();
+        if std::env::var("MESHCAST_TRACE_GRANTS").is_ok() {
+            let bulk_c = eng.phys.iter().position(|p| p.kind != CarrierKind::LoraControl).unwrap_or(1);
+            for &f in &decoders {
+                if !m.completions.contains_key(&(f, *id)) {
+                    let n = &eng.nodes[f].node;
+                    let ann = n.announcer_of(bulk_c);
+                    let aj = (ann.0 as usize).wrapping_sub(1);
+                    eprintln!("MISSING node {} obj {:?} alive {} progress {:?} wants {} follows {:?} ann_has {:?}", f, id, eng.nodes[f].alive, n.object_progress(id), n.wants_object(id), ann, eng.nodes.get(aj).map(|a| a.node.holds(id)));
+                }
+            }
+        }
+        let mut times: Vec<f64> = decoders.iter().filter_map(|&f| m.completions.get(&(f, *id)).map(|&t| t as f64 / 3.6e6)).collect();
         times.sort_by(|a, b| a.partial_cmp(b).unwrap());
         objects.push(ObjectSummary {
             object: format!("{:?}", id),
@@ -461,7 +507,7 @@ fn simulate(spec: ScenarioSpec, verbose: bool, failover: Option<(f64, f64)>) -> 
             source: info.source,
             index: info.index,
             bytes: info.bytes,
-            followers: info.followers.len(),
+            followers: decoders.len(),
             complete: times.len(),
             p50_h: percentile(&times, 0.5),
             p90_h: percentile(&times, 0.9),
@@ -470,6 +516,44 @@ fn simulate(spec: ScenarioSpec, verbose: bool, failover: Option<(f64, f64)>) -> 
     }
     objects.sort_by_key(|o| (o.source, o.index));
     let kinds = by_kind(&objects);
+    let renditions = spec.renditions.as_ref().map(|_| {
+        let mut t: Vec<f64> = Vec::new();
+        let mut pairs = 0;
+        let mut on_time = 0;
+        for info in built.tracks.values() {
+            let Some((r, _)) = info.rendition else { continue };
+            for f in &info.small {
+                pairs += 1;
+                if std::env::var("MESHCAST_TRACE_GRANTS").is_ok() && !m.completions.contains_key(&(*f, r)) {
+                    let bulk_c = eng.phys.iter().position(|p| p.kind != CarrierKind::LoraControl).unwrap_or(1);
+                    let n = &eng.nodes[*f].node;
+                    let ann = n.announcer_of(bulk_c);
+                    let a = eng.nodes.get((ann.0 as usize).wrapping_sub(1)).map(|x| &x.node);
+                    let st: Vec<_> = built.engine.nodes.iter().enumerate().filter(|(_, x)| x.mains).map(|(i, x)| (i, x.node.holds(&r), x.node.object_progress(&r), x.node.role(bulk_c))).collect();
+                    eprintln!("RMISS small {} r {:?} progress {:?} wants {} ann {:?} ann_progress {:?} ann_wants {:?} stations {:?}", f, r, n.object_progress(&r), n.wants_object(&r), ann, a.map(|x| x.object_progress(&r)), a.map(|x| x.wants_object(&r)), st);
+                }
+                if let Some(&c) = m.completions.get(&(*f, r)) {
+                    t.push(c as f64 / 3.6e6);
+                    if info.slot_ms.map(|s| c <= s).unwrap_or(false) {
+                        on_time += 1;
+                    } else if std::env::var("MESHCAST_TRACE_GRANTS").is_ok() {
+                        eprintln!("RLATE small {} slot {:.2} h done {:.2} h", f, info.slot_ms.unwrap_or(0) as f64 / 3.6e6, c as f64 / 3.6e6);
+                    }
+                }
+            }
+        }
+        t.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        RenditionSummary {
+            listeners: built.small.len(),
+            pairs,
+            complete: t.len(),
+            on_time,
+            p50_h: percentile(&t, 0.5),
+            p90_h: percentile(&t, 0.9),
+            frames: m.bulk_sent_rendition,
+            made: built.engine.nodes.iter().map(|n| n.node.stats.renditions_made).sum(),
+        }
+    });
 
     // Announcers at the end.
     let bulk_c = eng.phys.iter().position(|p| p.kind != CarrierKind::LoraControl).unwrap_or(1);
@@ -569,6 +653,7 @@ fn simulate(spec: ScenarioSpec, verbose: bool, failover: Option<(f64, f64)>) -> 
         bulk_sent_by: m.bulk_sent_by,
         upload_same: m.upload_collision_same_object,
         upload_other: m.upload_collision_other_object,
+        renditions,
         per_node,
         spec: spec.clone(),
         phys: built.phys.clone(),
@@ -610,6 +695,7 @@ struct SeedLine {
     delivered: f64,
     bulk_sent: u64,
     by_kind: Vec<KindSummary>,
+    renditions: Option<RenditionSummary>,
 }
 
 /// Several seeds of one scenario: the spread is the result, not any single run.
@@ -631,7 +717,7 @@ impl Ensemble {
             spec: reports[0].spec.clone(),
             seeds: reports
                 .iter()
-                .map(|r| SeedLine { seed: r.spec.seed, delivered: delivered(r), bulk_sent: r.bulk_sent, by_kind: by_kind(&r.objects) })
+                .map(|r| SeedLine { seed: r.spec.seed, delivered: delivered(r), bulk_sent: r.bulk_sent, by_kind: by_kind(&r.objects), renditions: r.renditions.clone() })
                 .collect(),
         }
     }
@@ -655,6 +741,16 @@ impl Ensemble {
             let p90: Vec<f64> = self.seeds.iter().filter_map(|s| s.by_kind[i].p90_max_h).map(|h| h * 60.0).collect();
             let m = |v: &[f64]| if v.len() == n { format!("{:6.1} min (min {:5.1}, max {:5.1})", mean(v), min(v), max(v)) } else { format!("{} of {n} seeds complete", v.len()) };
             println!("  {:<12} {:>4} kB  complete mean {:5.1} % min {:5.1} %  median {}  worst p90 {}", k.label, k.kb, mean(&c), min(&c), m(&p50), m(&p90));
+        }
+        if self.seeds.iter().all(|s| s.renditions.is_some()) {
+            let r: Vec<&RenditionSummary> = self.seeds.iter().filter_map(|s| s.renditions.as_ref()).collect();
+            let c: Vec<f64> = r.iter().map(|x| if x.pairs > 0 { 100.0 * x.complete as f64 / x.pairs as f64 } else { 100.0 }).collect();
+            let p50: Vec<f64> = r.iter().filter_map(|x| x.p50_h).map(|h| h * 60.0).collect();
+            let fr: Vec<f64> = r.iter().map(|x| x.frames as f64).collect();
+            let made: Vec<f64> = r.iter().map(|x| x.made as f64).collect();
+            let ot: Vec<f64> = r.iter().map(|x| if x.pairs > 0 { 100.0 * x.on_time as f64 / x.pairs as f64 } else { 100.0 }).collect();
+            println!("  renditions     {} small listeners, complete mean {:5.1} % min {:5.1} %, before their slot mean {:5.1} % min {:5.1} %, median {:.1} min, frames mean {:.0} ({:.1} % of bulk), made {:.1}",
+                r[0].listeners, mean(&c), min(&c), mean(&ot), min(&ot), if p50.is_empty() { f64::NAN } else { mean(&p50) }, mean(&fr), 100.0 * mean(&fr) / mean(&frames).max(1.0), mean(&made));
         }
     }
 }
@@ -745,6 +841,7 @@ fn run_dynamics(nodes: usize, area_km2: f64, stations: usize, channels: usize, f
         positions: None,
         stations_at: None,
         sources_at: None,
+        renditions: common.renditions(),
     };
     let params = Params::default();
     let mut built = build(&spec, params);
@@ -831,7 +928,7 @@ fn run_dynamics(nodes: usize, area_km2: f64, stations: usize, channels: usize, f
                 built.engine.nodes[node].node.publish(&m, &[(o.meta(), None)]);
                 built.engine.poke(node);
                 let followers: Vec<usize> = (0..nodes).filter(|&i| subs[i].contains(&c)).collect();
-                built.tracks.insert(o.id.short(), TrackInfo { label: "speech".into(), source: node, index: next_index[c] - 1, bytes: o.len, followers: followers.clone() });
+                built.tracks.insert(o.id.short(), TrackInfo { label: "speech".into(), source: node, index: next_index[c] - 1, bytes: o.len, followers: followers.clone(), rendition: None, small: Vec::new(), slot_ms: None });
                 pubs.push((o.id.short(), t, followers));
             }
             2 => {
