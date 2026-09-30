@@ -125,6 +125,9 @@ The codec decides where work happens:
 - **Dongles never decode.** An ESP32-S3 has neither the memory (the music decoder has 38.5 M
   parameters) nor the arithmetic for it. A dongle carries the codes as opaque bytes and hands
   completed objects to the phone over BLE.
+- **A device with a speaker but no decoder** (a LilyGo T-Deck Pro, say) gets Opus from a phone
+  or station next to it that has decoded the object (content type 18, PROTOCOL.md §1.1). That
+  copy never goes on the mesh: the mesh carries each programme once, as codes.
 
 The decoder weights ship with the app and the station software (77 MB and 26 MB as fp16). The
 runtime on the phone is an open choice for Phase 1: onnxruntime is the fastest path measured so

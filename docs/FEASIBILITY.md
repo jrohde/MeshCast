@@ -604,8 +604,7 @@ PROTOCOL.md §1.1 pins both models to exact weights and defines the payload layo
 - A lighter decoder for the same SNAC codes, trained on music, would keep the objects valid and cut
   the decoding cost. Vocos shows the size (8 M parameters, 0.6 G multiply-adds per second) is
   possible; whether the quality is, nobody has measured.
-- Opus as a fallback for players without a neural decoder, for example a dongle with a speaker
-  (PROTOCOL.md open question 12).
+- Opus as a fallback for players without a neural decoder: resolved in §9.5, local only.
 - The simulations of §7 used 540 kB tracks and should be re-run at 42 kB.
 
 ## 9. After the codec change: ensembles, mixed traffic and four faults
@@ -748,7 +747,7 @@ with every fix in place:
 Half the programmes as Opus cost three to six times the airtime of all of them as SNAC. A real
 second rendition, of every programme and alongside its SNAC codes, costs more still. That is the
 measured price of the on-air answer to question 12; the local answer (a player re-encodes what it
-has decoded, for a speaker next to it) costs nothing on the air.
+has decoded, for a speaker next to it) costs nothing on the air, and is the one adopted.
 
 ### 9.6 Open
 

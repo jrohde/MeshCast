@@ -52,7 +52,7 @@ object already has the manifest that says what it is.
 | 3 | firmware | `application/octet-stream` | firmware images |
 | 16 | speech | `audio/x-snac; model=snac_24khz` | spoken programmes: news, talk, bulletins |
 | 17 | music | `audio/x-snac; model=snac_32khz` | music |
-| 18 | opus | `audio/ogg; codecs=opus` | reserved: fallback audio for players without a neural decoder (§9, question 12) |
+| 18 | opus | `audio/ogg; codecs=opus` | local only: audio for a device that cannot run the neural decoder, made by a player that has decoded the SNAC object; never listed in a channel manifest (§9, question 12) |
 | 255 | other | | anything else; relayed, not interpreted |
 
 Audio objects hold the discrete codes of a neural codec, not a waveform (FEASIBILITY.md §8 has
@@ -517,10 +517,10 @@ arrives a few minutes later than it otherwise would. That is the entire user-vis
     once never lapsed, so an announcer kept naming a holder that had gone quiet. Offers now wait
     for the rendezvous and grants lapse without progress; the band L neighbourhood went from
     95–99 % on average (one seed at 66 %) to 100 % on every seed.
-12. Opus as a fallback for players without a neural decoder, for example a dongle with a speaker
-    (Opus decoders run on ESP32-class chips). Content type 18 is reserved for it (§1.1). An Opus
-    track costs about 14 times the airtime of the same track as SNAC codes, so the question is
-    where it lives: as a second rendition of a programme on the air (then the manifest must link
-    the two, and a relay must know which one to fetch for whom), or only locally, where a phone or
-    station that has decoded the SNAC object re-encodes it for a speaker next to it and nothing
-    extra crosses the air.
+12. *(resolved: Opus stays local.)* A device that cannot run the neural decoder, such as a
+    LilyGo T-Deck Pro with a headphone jack (ESP32-S3, 8 MB PSRAM), can play Opus but not SNAC.
+    Carrying Opus renditions on the air was measured: with half the programmes also as Opus the
+    network spends three to six times the airtime (FEASIBILITY.md §9.5). So an Opus object
+    (content type 18) is made by a phone or station that has decoded the SNAC object, handed to
+    the device next to it over a local link, and never listed in a channel manifest: the mesh
+    carries every programme once, as codes.
