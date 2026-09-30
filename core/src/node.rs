@@ -76,7 +76,8 @@ pub enum Role {
 
 #[derive(Clone, Debug)]
 pub enum Action {
-    Tx { carrier: usize, channel: u8, bytes: Vec<u8>, airtime_ms: u32, class: Class, frame_type: FrameType },
+    /// `upload_to`: the announcer an upload frame is meant for (diagnostics).
+    Tx { carrier: usize, channel: u8, bytes: Vec<u8>, airtime_ms: u32, class: Class, frame_type: FrameType, upload_to: Option<NodeId> },
     ObjectComplete { id: ShortId, now: Millis },
     Role { carrier: usize, role: Role, announcer: NodeId, now: Millis },
 }
@@ -107,6 +108,11 @@ pub struct Stats {
     pub grant_rssi_completed: i64,
     pub grants_completed: u64,
     pub grant_rssi_lapsed: i64,
+    /// Diagnostics: lapsed grants whose holder follows another announcer, and lapsed grants
+    /// that never brought a symbol; grants a holder heard for the first time.
+    pub grants_lapsed_foreign: u64,
+    pub grants_lapsed_unstarted: u64,
+    pub grants_received: u64,
     /// Repair answers lined up; most are cancelled by hearing another holder answer first.
     pub repairs_queued: u64,
     pub manifests_adopted: u64,
@@ -133,6 +139,8 @@ struct Neighbor {
     rssi: i16,
     /// Colour last announced (announcers only).
     colour: u8,
+    /// Upload phases last announced (announcers only): how its listening time is divided.
+    upload_phases: u8,
     haves: BTreeSet<ShortId>,
 }
 
@@ -158,6 +166,9 @@ struct Upload {
     block: u16,
     esi: u16,
     list: Option<VecDeque<(u16, u16)>>,
+    /// The phase of the announcer's listening time this upload uses, named by its grant or by
+    /// the NACK it answers.
+    phase: u8,
 }
 
 #[derive(Clone, Debug)]
@@ -185,6 +196,23 @@ impl CarrierRt {
         }
     }
 
+    /// Hold back frames of `class` until `until`: content waits on its own clock.
+    fn hold(&mut self, class: Class, until: Millis) {
+        if class == Class::Content {
+            self.content_until = until;
+        } else {
+            self.pace_until = until;
+        }
+    }
+
+    /// Drop every upload meant for `to`, running or lined up.
+    fn drop_uploads_to(&mut self, to: NodeId) {
+        if self.upload.as_ref().map(|u| u.to == to).unwrap_or(false) {
+            self.upload = None;
+        }
+        self.upload_queue.retain(|u| u.to != to);
+    }
+
     /// Drop everything we have lined up for `object` that has not begun. An upload that has
     /// started is left alone: stopping halfway would waste what it already sent.
     fn cancel_pending(&mut self, object: ShortId, now: Millis) {
@@ -203,6 +231,9 @@ struct CarrierRt {
     queue: Vec<Pending>,
     busy_until: Millis,
     pace_until: Millis,
+    /// Until when content (carousel symbols, uploads) waits: slots, phases, the rendezvous and
+    /// content budgets hold content only, never the control frames queued behind it.
+    content_until: Millis,
     upload: Option<Upload>,
     /// Further granted uploads, served one at a time after the active one.
     upload_queue: VecDeque<Upload>,
@@ -259,7 +290,11 @@ pub struct Node {
     report_due: bool,
     last_report: Millis,
     /// Announcer side: uploader granted per wanted object, with the time of the grant.
-    grants: BTreeMap<ShortId, (NodeId, Millis)>,
+    /// object -> (granted holder, when, phase of our listening time it uploads in).
+    grants: BTreeMap<ShortId, (NodeId, Millis, u8)>,
+    /// Phases an announcer reserved for answers to its NACK of an object nobody is granted:
+    /// object -> (phase, since).
+    repair_phases: BTreeMap<ShortId, (u8, Millis)>,
     /// Holder side: grants we received, with the time, so that we still answer the announcer's
     /// NACKs for a while after our full pass is done.
     granted_to_us: BTreeMap<(ShortId, NodeId), Millis>,
@@ -267,6 +302,9 @@ pub struct Node {
     offers: Vec<(ShortId, NodeId, Millis)>,
     pub stats: Stats,
 }
+
+/// Upper bound on upload phases an announcer hands out: at most this many uploads run at once.
+const MAX_UPLOAD_PHASES: u8 = 16;
 
 impl Node {
     pub fn new(cfg: NodeConfig, now: Millis) -> Self {
@@ -284,6 +322,7 @@ impl Node {
                 queue: Vec::new(),
                 busy_until: 0,
                 pace_until: 0,
+                content_until: 0,
                 upload: None,
                 upload_queue: VecDeque::new(),
                 dropped: 0,
@@ -325,6 +364,7 @@ impl Node {
             report_due: false,
             last_report: 0,
             grants: BTreeMap::new(),
+            repair_phases: BTreeMap::new(),
             granted_to_us: BTreeMap::new(),
             offers: Vec::new(),
             stats,
@@ -514,9 +554,64 @@ impl Node {
         self.carriers.iter().any(|c| c.election.as_ref().map(|e| e.is_announcer()).unwrap_or(false))
     }
 
-    /// Diagnostic: the announcer our current upload on `carrier` is meant for, if any.
-    pub fn upload_target(&self, carrier: usize) -> Option<NodeId> {
-        self.carriers.get(carrier).and_then(|c| c.upload.as_ref()).map(|u| u.to)
+    /// Diagnostic: the running upload on `carrier` (object, target, started) and how many wait.
+    pub fn upload_state(&self, carrier: usize) -> (Option<(ShortId, NodeId, bool)>, usize) {
+        match self.carriers.get(carrier) {
+            Some(c) => (c.upload.as_ref().map(|u| (u.object, u.to, u.started)), c.upload_queue.len()),
+            None => (None, 0),
+        }
+    }
+
+    /// Diagnostic: the phase count we believe `announcer` uses, and ours if we are one.
+    pub fn upload_phases_believed(&self, announcer: NodeId) -> u8 {
+        self.neighbors.get(&announcer).map(|n| n.upload_phases).unwrap_or(0)
+    }
+    pub fn upload_phases_now(&self) -> u8 {
+        self.upload_phase_count()
+    }
+    /// Diagnostic: whether `announcer` granted us `object`.
+    pub fn upload_granted(&self, object: &ShortId, announcer: NodeId) -> bool {
+        self.granted_to_us.contains_key(&(*object, announcer))
+    }
+
+    /// Diagnostic: the colour we believe announcer `ann` has on `carrier`, and our own.
+    pub fn colour_believed(&self, carrier: usize, ann: NodeId) -> Option<u8> {
+        self.carriers.get(carrier).and_then(|c| c.election.as_ref()).and_then(|e| e.colour_of(ann))
+    }
+    pub fn own_colour(&self) -> u8 {
+        self.my_colour()
+    }
+
+    /// Diagnostic: (symbols held, total) of `id`, and whether it is complete.
+    pub fn object_progress(&self, id: &ShortId) -> Option<(u32, Option<u32>, bool)> {
+        self.store.entry(id).map(|e| {
+            let (h, t) = e.progress();
+            (h, t, e.is_complete())
+        })
+    }
+
+    /// Diagnostic: wanted objects whose length we do not know, so cannot complete.
+    pub fn wants_without_length(&self) -> Vec<ShortId> {
+        self.wants.iter().filter(|id| self.store.entry(id).map(|e| e.len().is_none()).unwrap_or(true)).copied().collect()
+    }
+    /// Diagnostic: the content type we know for `id`.
+    pub fn object_kind(&self, id: &ShortId) -> Option<crate::object::ContentType> {
+        self.store.entry(id).filter(|e| e.len().is_some()).map(|e| e.kind())
+    }
+
+    /// Diagnostic: what we know of channel `chan`'s manifest: (seq, id, adopted, held, wanted).
+    pub fn manifest_state(&self, chan: &crate::ids::ChannelId) -> Option<(u32, ShortId, bool, bool, bool)> {
+        self.manifests.get(chan).map(|i| (i.seq, i.short, i.adopted, self.store.has_complete(&i.short), self.wants.contains(&i.short)))
+    }
+
+    /// Diagnostic: whether `now` is in the rendezvous on `carrier`.
+    pub fn in_meeting(&self, carrier: usize, now: Millis) -> bool {
+        self.in_rendezvous(carrier, now)
+    }
+
+    /// Diagnostic: whether `id` is on our want list.
+    pub fn wants_object(&self, id: &ShortId) -> bool {
+        self.wants.contains(id)
     }
 
     /// Diagnostic: whether we hold `id` complete.
@@ -639,6 +734,17 @@ impl Node {
         set
     }
 
+    /// The holder of `id` we hear best among those that said they have it and do not
+    /// announce (announcers serve their cells, they do not upload), or NONE.
+    fn best_holder(&self, id: &ShortId) -> NodeId {
+        self.neighbors
+            .iter()
+            .filter(|(n, nb)| nb.haves.contains(id) && nb.announcer != **n)
+            .max_by_key(|(_, nb)| nb.rssi)
+            .map(|(n, _)| *n)
+            .unwrap_or(NodeId::NONE)
+    }
+
     /// Drop wants for objects that no manifest of interest references any more (unfollowed
     /// channels, or objects that left a channel's manifest).
     fn prune_wants(&mut self) {
@@ -729,6 +835,7 @@ impl Node {
         self.pending_ack.clear();
         self.wants.clear();
         self.grants.clear();
+        self.repair_phases.clear();
         self.granted_to_us.clear();
         self.offers.clear();
         self.stats = Stats { tx_airtime_ms: alloc::vec![0; self.carriers.len()], ..Default::default() };
@@ -774,6 +881,9 @@ impl Node {
             let has_pending = !c.queue.is_empty() || c.upload.is_some() || (announcing && c.carousel.as_ref().map(|k| k.has_work(&self.store)).unwrap_or(false));
             if has_pending {
                 let mut t = c.busy_until.max(c.pace_until).max(c.fatsoen.backoff_until).max(self.now + 1);
+                if c.queue.is_empty() {
+                    t = t.max(c.content_until);
+                }
                 if c.queue.is_empty() && !announcing {
                     if let Some(u) = &c.upload {
                         t = t.max(u.start_at);
@@ -948,6 +1058,7 @@ impl Node {
     fn on_transition(&mut self, carrier: usize, t: Transition, out: &mut Vec<Action>) {
         match t {
             Transition::BecameCandidate => {
+                self.drop_grants_unless_announcing();
                 out.push(Action::Role { carrier, role: Role::Candidate, announcer: NodeId::NONE, now: self.now });
             }
             Transition::BecameAnnouncer => {
@@ -957,10 +1068,15 @@ impl Node {
                 }
                 self.carriers[carrier].carousel = Some(car);
                 self.carriers[carrier].upload = None;
-                // Serve everything any known manifest references; want what we lack.
-                let to_want: Vec<ShortId> = self.manifests.values().filter(|i| !self.store.has_complete(&i.short)).map(|i| i.short).collect();
-                for id in to_want {
-                    self.add_want(id);
+                // Serve everything any known manifest references; want what we lack, by name and
+                // length.
+                let to_want: Vec<(ShortId, u32)> = self.manifests.values().filter(|i| !self.store.has_complete(&i.short)).map(|i| (i.short, i.len)).collect();
+                for (id, len) in to_want {
+                    if self.store.ensure_hint(id, len, ContentType::Manifest) {
+                        self.quiet_complete.push(id);
+                    } else {
+                        self.add_want(id);
+                    }
                 }
                 self.next_beacon = self.now;
                 self.next_gossip = self.now;
@@ -969,6 +1085,7 @@ impl Node {
             Transition::BecameFollower(to) | Transition::AnnouncerChanged(to) => {
                 self.carriers[carrier].carousel = Some(Carousel::new(self.carousel_params()));
                 self.carriers[carrier].upload = None;
+                self.drop_grants_unless_announcing();
                 self.want_refresh = true;
                 out.push(Action::Role { carrier, role: Role::Follower, announcer: to, now: self.now });
             }
@@ -992,8 +1109,57 @@ impl Node {
             time_quality: 0,
             colour: self.my_colour(),
             colours: self.colours(),
+            upload_phases: if self.divides_listening_time(carrier) { self.upload_phase_count() } else { 1 },
             occupancy,
         }
+    }
+
+    /// Whether an announcer on `carrier` divides its listening time into upload phases. Only
+    /// under polite access: there every transmission is short and followed by a pause, so an
+    /// upload is spread over minutes and hidden uploaders overlap. Under a duty cycle budgeted
+    /// per hour, or with no limit, an upload is a burst of seconds at the full rate; it rarely
+    /// meets another, and holding it to one phase in K made it K times slower.
+    fn divides_listening_time(&self, carrier: usize) -> bool {
+        self.carriers[carrier].p.band.map(|b| matches!(self.discipline.rule(b), Access::Polite { .. })).unwrap_or(false)
+    }
+
+    /// The receiver divides its listening time among those it asked to speak: each grant carries
+    /// its own phase, and the cycle has as many phases as the highest one in use. One upload gets
+    /// all the time; hidden uploaders never overlap.
+    fn upload_phase_count(&self) -> u8 {
+        self.phases_in_use().map(|p| p + 1).max().unwrap_or(1).max(1)
+    }
+
+    /// Phases held by running grants and by reserved repairs.
+    fn phases_in_use(&self) -> impl Iterator<Item = u8> + '_ {
+        self.grants.values().map(|(_, _, p)| *p).chain(self.repair_phases.values().map(|(p, _)| *p))
+    }
+
+    /// `node` no longer announces: stop uploading to it and forget the grants it gave us.
+    fn forget_announcer(&mut self, node: NodeId) {
+        for c in self.carriers.iter_mut() {
+            c.drop_uploads_to(node);
+        }
+        self.granted_to_us.retain(|(_, a), _| *a != node);
+        self.offers.retain(|(_, a, _)| *a != node);
+    }
+
+    /// Grants are the announcer's: they name who speaks in its listening time. A node that
+    /// stops announcing listens to someone else, so its grants end with its role; kept, they
+    /// would ride along in its asks as a follower and keep holders talking to nobody. The same
+    /// holds for wants it took on for its cell.
+    fn drop_grants_unless_announcing(&mut self) {
+        if !self.is_announcing() {
+            self.grants.clear();
+            self.repair_phases.clear();
+            // What we wanted only to serve others goes too.
+            self.prune_wants();
+        }
+    }
+
+    /// The lowest phase no grant or repair uses, if any is left.
+    fn free_upload_phase(&self) -> Option<u8> {
+        (0..MAX_UPLOAD_PHASES).find(|p| !self.phases_in_use().any(|q| q == *p))
     }
 
     fn enqueue(&mut self, carrier: usize, f: Frame) {
@@ -1027,6 +1193,7 @@ impl Node {
             c.queue.clear();
             c.busy_until = 0;
             c.pace_until = 0;
+            c.content_until = 0;
             c.upload = None;
             c.upload_queue.clear();
         }
@@ -1040,6 +1207,7 @@ impl Node {
         self.progress.clear();
         self.conflicts.clear();
         self.grants.clear();
+        self.repair_phases.clear();
         self.granted_to_us.clear();
         self.offers.clear();
         for id in self.own_objects.iter().chain(self.own_manifests.iter().map(|(_, s, _, _)| s)) {
@@ -1154,7 +1322,7 @@ impl Node {
 
     /// Ask only for what is not coming: objects with a symbol in the last stall interval are
     /// flowing and are left out. Each entry carries the granted uploader, if any.
-    fn take_wants(&mut self) -> Vec<(ShortId, NodeId)> {
+    fn take_wants(&mut self) -> Vec<(ShortId, NodeId, u8)> {
         let now = self.now;
         let stall = self.cfg.params.t_nack_stall_ms;
         let t_grant = self.cfg.params.t_grant_ms;
@@ -1165,17 +1333,32 @@ impl Node {
         let neighbors = &self.neighbors;
         let mut lapsed = 0u64;
         let mut lapsed_rssi = 0i64;
-        self.grants.retain(|id, (h, t)| {
+        let (mut foreign, mut unstarted) = (0u64, 0u64);
+        let me = self.cfg.id;
+        self.grants.retain(|id, (h, t, _)| {
             let p = progress.get(id).copied().unwrap_or_default();
             let keep = now < (*t).max(p.last_progress) + t_grant;
             if !keep {
                 lapsed += 1;
                 lapsed_rssi += neighbors.get(h).map(|n| n.rssi as i64).unwrap_or(-140);
+                if neighbors.get(h).map(|n| n.announcer != me).unwrap_or(true) {
+                    foreign += 1;
+                }
+                if p.last_progress < *t {
+                    unstarted += 1;
+                }
             }
             keep
         });
+        let wants = &self.wants;
+        self.repair_phases.retain(|id, (_, t)| {
+            let p = progress.get(id).copied().unwrap_or_default();
+            wants.contains(id) && now < (*t).max(p.last_progress) + t_grant
+        });
         self.stats.grants_lapsed += lapsed;
         self.stats.grant_rssi_lapsed += lapsed_rssi;
+        self.stats.grants_lapsed_foreign += foreign;
+        self.stats.grants_lapsed_unstarted += unstarted;
         let thr = self.cfg.params.nack_threshold_permille as u64;
         let ids: Vec<ShortId> = self
             .wants
@@ -1212,9 +1395,9 @@ impl Node {
                 let p = self.progress.get(id).copied().unwrap_or_default();
                 p.last_progress != 0 && now < p.last_progress + stall
             })
-            .map(|(_, (h, _))| *h)
+            .map(|(_, (h, _, _))| *h)
             .collect();
-        let ids: Vec<ShortId> = ids.into_iter().filter(|id| !self.grants.get(id).map(|(h, _)| busy_holders.contains(h)).unwrap_or(false)).collect();
+        let ids: Vec<ShortId> = ids.into_iter().filter(|id| !self.grants.get(id).map(|(h, _, _)| busy_holders.contains(h)).unwrap_or(false)).collect();
         if ids.is_empty() {
             return Vec::new();
         }
@@ -1236,7 +1419,7 @@ impl Node {
         for id in &v {
             self.progress.entry(*id).or_default().last_want = now;
         }
-        v.into_iter().map(|id| (id, self.grants.get(&id).map(|(g, _)| *g).unwrap_or(NodeId::NONE))).collect()
+        v.into_iter().map(|id| match self.grants.get(&id) { Some((g, _, p)) => (id, *g, *p), None => (id, NodeId::NONE, 0) }).collect()
     }
 
     /// Followers stay silent unless they have wants that the announcer is not serving.
@@ -1307,9 +1490,30 @@ impl Node {
             }
         }
         if let Some((id, block, ranges)) = to_send {
+            // An announcer's NACK names the phase its answers use: the grant's, or one reserved
+            // for this repair.
+            let phase = if !announcing {
+                0
+            } else if let Some((_, _, p)) = self.grants.get(&id) {
+                *p
+            } else if let Some((p, _)) = self.repair_phases.get(&id) {
+                *p
+            } else if let Some(p) = self.free_upload_phase() {
+                self.repair_phases.insert(id, (p, now));
+                p
+            } else {
+                return;
+            };
             self.progress.entry(id).or_default().last_nack = now;
             let cell = self.cell_carrier();
-            self.enqueue(cell, Frame::Nack(Nack { node: self.cfg.id, object: id, block, missing: ranges }));
+            let answerer = if !announcing {
+                NodeId::NONE
+            } else if let Some((h, _, _)) = self.grants.get(&id) {
+                *h
+            } else {
+                self.best_holder(&id)
+            };
+            self.enqueue(cell, Frame::Nack(Nack { node: self.cfg.id, object: id, block, answerer, phase, missing: ranges }));
             self.stats.nacks_sent += 1;
         }
     }
@@ -1401,6 +1605,9 @@ impl Node {
             }
         };
         let Some(cand) = cand else { return };
+        if matches!(cand, Cand::Upload(..) | Cand::Carousel(Item::Symbol { .. })) && self.carriers[i].content_until > now {
+            return;
+        }
         let (bytes, class, frame_type) = match &cand {
             Cand::Queue(j) => {
                 let p = &self.carriers[i].queue[*j];
@@ -1410,22 +1617,24 @@ impl Node {
                 let b = self.make_beacon(i);
                 (Frame::Beacon(b).encode(), Class::Control, FrameType::Beacon)
             }
-            Cand::Carousel(Item::Symbol { object, block, esi, k }) => {
+            Cand::Carousel(Item::Symbol { object, block, esi, .. }) => {
                 let mut buf = alloc::vec![0u8; SYMBOL_SIZE];
-                if !self.store.get_symbol(object, *block, *esi, &mut buf) {
+                let len = self.store.entry(object).and_then(|e| e.len());
+                let (true, Some(len)) = (self.store.get_symbol(object, *block, *esi, &mut buf), len) else {
                     if let Some(car) = self.carriers[i].carousel.as_mut() {
                         car.advance(&self.store, now);
                     }
                     return;
-                }
-                (Frame::Bulk(Bulk { object: *object, block: *block, esi: *esi, k: *k, payload: buf }).encode(), Class::Content, FrameType::Bulk)
+                };
+                (Frame::Bulk(Bulk { object: *object, block: *block, esi: *esi, len, payload: buf }).encode(), Class::Content, FrameType::Bulk)
             }
-            Cand::Upload(object, block, esi, k) => {
+            Cand::Upload(object, block, esi, _) => {
                 let mut buf = alloc::vec![0u8; SYMBOL_SIZE];
-                if !self.store.get_symbol(object, *block, *esi, &mut buf) {
+                let len = self.store.entry(object).and_then(|e| e.len());
+                let (true, Some(len)) = (self.store.get_symbol(object, *block, *esi, &mut buf), len) else {
                     self.carriers[i].upload = None;
                     return;
-                }
+                };
                 if let Some(u) = self.carriers[i].upload.as_mut() {
                     if !u.started {
                         u.started = true;
@@ -1435,7 +1644,7 @@ impl Node {
                         }
                     }
                 }
-                (Frame::Bulk(Bulk { object: *object, block: *block, esi: *esi, k: *k, payload: buf }).encode(), Class::Content, FrameType::Bulk)
+                (Frame::Bulk(Bulk { object: *object, block: *block, esi: *esi, len, payload: buf }).encode(), Class::Content, FrameType::Bulk)
             }
         };
         let airtime = self.carriers[i].p.airtime_ms(bytes.len());
@@ -1446,6 +1655,8 @@ impl Node {
             (Cand::Upload(..), Some(u)) => Some(self.carriers[i].election.as_ref().and_then(|e| e.colouring_of(u.to)).unwrap_or((0, 1))),
             _ => None,
         };
+        // End of our upload phase, if we transmit in one: the phase is our turn to speak.
+        let mut phase_end: Option<Millis> = None;
         if let Some((colour, colours)) = content_colour {
             // The meeting dwell is control plane only, and announcers that share a channel take
             // turns: content (carousel or upload) runs only in its announcer's slot.
@@ -1453,13 +1664,36 @@ impl Node {
             if self.in_rendezvous(i, now) {
                 let t = (now / dwell + 1) * dwell;
                 self.stats.defer_ms[0] += t - now;
-                self.carriers[i].pace_until = t;
+                self.carriers[i].content_until = t;
                 return;
             }
             if let Some(t) = self.slot_wait(i, colour, colours, now) {
                 self.stats.defer_ms[1] += t.saturating_sub(now);
-                self.carriers[i].pace_until = t;
+                self.carriers[i].content_until = t;
                 return;
+            }
+            // An upload transmits only in its own phase of the announcer's listening time, so
+            // uploaders that cannot hear each other never overlap there.
+            let divides = self.divides_listening_time(i);
+            if let (Cand::Upload(..), Some(u), true) = (&cand, self.carriers[i].upload.as_ref(), divides) {
+                let announced = self.neighbors.get(&u.to).map(|n| n.upload_phases).unwrap_or(1).max(1) as u64;
+                let phase = u.phase as u64;
+                let phases = announced.max(phase + 1);
+                if phases > 1 {
+                    let width = self.cfg.params.t_upload_phase_ms.max(1);
+                    let cycle = width * phases;
+                    let start = (now / cycle) * cycle + phase * width;
+                    let from = if now >= start + width { start + cycle } else { start };
+                    if now < from || now + airtime as Millis > from + width {
+                        let t = if now < from { from } else { from + cycle };
+                        self.stats.defer_ms[1] += t.saturating_sub(now);
+                        self.carriers[i].content_until = t;
+                        return;
+                    }
+                    // A cycle's budget is spent inside the phase.
+                    self.carriers[i].fatsoen.set_burst_at_least(cycle as u32);
+                    phase_end = Some(from + width);
+                }
             }
             // Taking turns means spending a cycle's worth of budget inside one slot.
             let (_, slots) = self.slot_of(i, colour, colours);
@@ -1475,7 +1709,7 @@ impl Node {
             _ => false,
         };
         if !self.carriers[i].fatsoen.allows(class, fresh) {
-            self.carriers[i].pace_until = now + 1000;
+            self.carriers[i].hold(class, now + 1000);
             if class == Class::Content {
                 self.stats.defer_ms[4] += 1000;
             }
@@ -1509,7 +1743,7 @@ impl Node {
                         let dwell = self.cfg.params.dwell_ms.max(1);
                         w = w.min((now / dwell + 1) * dwell - now);
                     }
-                    self.carriers[i].pace_until = now + w;
+                    self.carriers[i].hold(class, now + w);
                     self.stats.discipline_waits += 1;
                     self.stats.defer_ms[2] += w;
                     return;
@@ -1532,17 +1766,22 @@ impl Node {
             if let Some(band) = self.carriers[i].p.band {
                 if let Access::Polite { ton_max_ms, toff_min_ms, .. } = self.discipline.rule(band) {
                     let p = budget.min(999) as u64;
-                    let target = ((toff_min_ms as u64 * p) / (1000 - p)).clamp(airtime as u64, ton_max_ms as u64) as u32;
+                    let mut target = ((toff_min_ms as u64 * p) / (1000 - p)).clamp(airtime as u64, ton_max_ms as u64) as u32;
+                    // In an upload phase nobody else speaks to the announcer: the whole phase,
+                    // up to one permitted transmission, is ours.
+                    if let Some(end) = phase_end {
+                        target = target.max((end.saturating_sub(now) as u32).min(ton_max_ms));
+                    }
                     let center = self.carriers[i].p.channels.get(channel as usize).copied().unwrap_or(0);
                     if self.discipline.burst_on_ms(band, center, now) + airtime > target {
-                        self.carriers[i].pace_until = now + toff_min_ms as Millis;
+                        self.carriers[i].content_until = now + toff_min_ms as Millis;
                         self.stats.defer_ms[2] += toff_min_ms as Millis;
                         return;
                     }
                 }
             }
             if let Err(w) = self.carriers[i].fatsoen.take_airtime(now, airtime, budget, fresh) {
-                self.carriers[i].pace_until = now + w;
+                self.carriers[i].content_until = now + w;
                 self.stats.defer_ms[3] += w;
                 return;
             }
@@ -1562,8 +1801,12 @@ impl Node {
         self.stats.tx_by_type[frame_type as usize] += 1;
         self.stats.tx_airtime_ms[i] += airtime as u64;
         self.carriers[i].jittered = false;
+        let upload_to = match (&cand, self.carriers[i].upload.as_ref()) {
+            (Cand::Upload(..), Some(u)) => Some(u.to),
+            _ => None,
+        };
         self.commit(i, cand);
-        out.push(Action::Tx { carrier: i, channel, bytes, airtime_ms: airtime, class, frame_type });
+        out.push(Action::Tx { carrier: i, channel, bytes, airtime_ms: airtime, class, frame_type, upload_to });
     }
 
     fn commit(&mut self, i: usize, cand: Cand) {
@@ -1645,7 +1888,7 @@ impl Node {
 
     fn touch(&mut self, id: NodeId, rssi: i16) -> &mut Neighbor {
         let now = self.now;
-        let n = self.neighbors.entry(id).or_insert(Neighbor { last_heard: now, announcer: NodeId::NONE, score: 0, rssi, colour: 0, haves: BTreeSet::new() });
+        let n = self.neighbors.entry(id).or_insert(Neighbor { last_heard: now, announcer: NodeId::NONE, score: 0, rssi, colour: 0, upload_phases: 1, haves: BTreeSet::new() });
         n.last_heard = now;
         n.rssi = ((n.rssi as i32 + rssi as i32) / 2) as i16;
         n
@@ -1689,6 +1932,7 @@ impl Node {
             n.score = b.score;
             n.announcer = b.announcer;
             n.colour = b.colour;
+            n.upload_phases = b.upload_phases.max(1);
         }
         let me = self.cfg.id;
         let score = self.score;
@@ -1721,7 +1965,7 @@ impl Node {
             self.stats.bulk_uninterested += 1;
             return;
         }
-        match self.store.put_symbol(b.object, b.block, b.esi, b.k, &b.payload) {
+        match self.store.put_symbol(b.object, b.block, b.esi, b.len, &b.payload) {
             Put::New => {
                 self.stats.symbols_new += 1;
                 if self.grants.contains_key(&b.object) {
@@ -1746,7 +1990,8 @@ impl Node {
         self.wants.remove(&id);
         self.progress.remove(&id);
         // A grant ends when its object arrives.
-        if let Some((h, _)) = self.grants.remove(&id) {
+        self.repair_phases.remove(&id);
+        if let Some((h, _, _)) = self.grants.remove(&id) {
             self.stats.grants_completed += 1;
             self.stats.grant_rssi_completed += self.neighbors.get(&h).map(|n| n.rssi as i64).unwrap_or(-140);
         }
@@ -1817,6 +2062,11 @@ impl Node {
         if g.node == self.cfg.id {
             return;
         }
+        // A node that says it follows someone else is not listening for uploads: whatever we
+        // were sending it, and the grants it gave us, ended with its role.
+        if g.announcer != g.node {
+            self.forget_announcer(g.node);
+        }
         {
             let n = self.touch(g.node, rssi);
             n.announcer = g.announcer;
@@ -1830,8 +2080,11 @@ impl Node {
         let score = self.score;
         let now = self.now;
         let other_score = self.neighbors.get(&g.announcer).map(|n| n.score);
+        // An announcer's HAVE lists what its carousel serves; it is not an offer, since
+        // announcers do not upload. Only a follower's HAVE is one.
+        let offering = g.announcer != g.node;
         // Another holder offered the same objects: our pending offers are redundant.
-        if !g.have.is_empty() {
+        if offering && !g.have.is_empty() {
             self.offers.retain(|(o, _, _)| !g.have.contains(o));
         }
         if g.announcer == g.node {
@@ -1862,7 +2115,7 @@ impl Node {
                 continue;
             }
             let mut new_wants = Vec::new();
-            for (w, _) in &g.want {
+            for (w, _, _) in &g.want {
                 if let Some(car) = self.carriers[i].carousel.as_mut() {
                     car.on_want(*w, g.node, now);
                 }
@@ -1878,8 +2131,9 @@ impl Node {
                     car.on_have(*h, g.node);
                 }
                 // An offer for something we want: grant the first holder that offers.
-                if self.wants.contains(h) && !self.grants.contains_key(h) {
-                    self.grants.insert(*h, (g.node, now));
+                let phase = self.free_upload_phase();
+                if let (true, true, false, Some(phase)) = (offering, self.wants.contains(h), self.grants.contains_key(h), phase) {
+                    self.grants.insert(*h, (g.node, now, phase));
                     self.stats.grants_given += 1;
                     self.gossip_soon();
                 }
@@ -1906,18 +2160,26 @@ impl Node {
             } else if !from_announcer {
                 continue;
             }
-            for (w, grant) in g.want.iter() {
+            for (w, grant, phase) in g.want.iter() {
                 if !self.store.has_complete(w) {
                     continue;
                 }
                 if *grant == self.cfg.id {
                     // Granted: upload it, after whatever we are already uploading.
-                    self.granted_to_us.insert((*w, g.node), now);
+                    if self.granted_to_us.insert((*w, g.node), now).is_none() {
+                        self.stats.grants_received += 1;
+                    }
                     let c = &mut self.carriers[i];
+                    // The grant names our phase; a running upload follows it if it changed.
+                    for u in c.upload.iter_mut().chain(c.upload_queue.iter_mut()) {
+                        if u.object == *w && u.to == g.node {
+                            u.phase = *phase;
+                        }
+                    }
                     let active = c.upload.as_ref().map(|u| u.object == *w && u.to == g.node).unwrap_or(false);
                     let queued = c.upload_queue.iter().any(|u| u.object == *w && u.to == g.node);
                     if !active && !queued {
-                        c.add_upload(Upload { object: *w, to: g.node, start_at: now, started: false, block: 0, esi: 0, list: None }, false);
+                        c.add_upload(Upload { object: *w, to: g.node, start_at: now, started: false, block: 0, esi: 0, list: None, phase: *phase }, false);
                     }
                 } else if grant.is_none() {
                     // Open ask: offer, unless we are already uploading it to this announcer.
@@ -2009,10 +2271,11 @@ impl Node {
             } else {
                 // A follower asks its announcer, whose carousel puts the missing symbols at the
                 // front of the next round; an announcer asks the neighbourhood, because no
-                // carousel serves it. So only an announcer's NACK is answered by arbitrary
-                // holders: its granted uploader at once, any other holder after a wait. Letting
+                // carousel serves it. So only an announcer's NACK is answered by holders, and it
+                // names which one: its granted uploader, or the holder it hears best. Letting
                 // peers answer followers as well turned a 200-node town into a repair storm of
-                // nearly a million answers.
+                // nearly a million answers; letting every holder answer an announcer made
+                // holders that cannot hear each other collide.
                 let asker_is_announcer = self.neighbors.get(&n.node).map(|nb| nb.announcer == n.node).unwrap_or(false);
                 let recently = self.granted_to_us.get(&(n.object, n.node)).map(|t| self.now < *t + self.cfg.params.neighbor_ttl_ms).unwrap_or(false);
                 if recently {
@@ -2021,13 +2284,20 @@ impl Node {
                 if !recently && !asker_is_announcer {
                     continue;
                 }
-                // Whoever hears the asker best answers first and silences the rest: an ungranted
-                // repair waits in proportion to how many neighbours we hear better than the
-                // asker, plus a little jitter to separate equals.
+                // The announcer named who answers: if not us, and not "anyone", stay silent.
+                let named = n.answerer == self.cfg.id;
+                if !named && !n.answerer.is_none() {
+                    continue;
+                }
+                // Nobody named (the announcer knows no holder): whoever hears the asker best
+                // answers first and silences the rest. Such an answer waits in proportion to how
+                // many neighbours we hear better than the asker, plus a little jitter.
                 let w = self.cfg.params.upload_suppress_ms.max(1);
                 let ungranted_delay = (w * self.rssi_rank(rssi)) / 1000 + self.rng.below(w / 10 + 1);
+                let phase = n.phase;
                 let c = &mut self.carriers[i];
-                let granted = recently
+                let granted = named
+                    || recently
                     || c.upload.as_ref().map(|u| u.object == n.object && u.to == n.node).unwrap_or(false)
                     || c.upload_queue.iter().any(|u| u.object == n.object && u.to == n.node);
                 let start_at = if granted { self.now } else { self.now + ungranted_delay };
@@ -2044,13 +2314,14 @@ impl Node {
                 match c.upload.as_mut() {
                     Some(u) if u.object == n.object && u.to == n.node && u.list.is_some() => {
                         u.list.as_mut().unwrap().extend(list);
+                        u.phase = phase;
                     }
                     Some(u) if u.object == n.object && u.to == n.node => {
                         // A full pass is in progress; it will cover these.
                     }
                     _ if c.upload_queue.iter().any(|u| u.object == n.object && u.to == n.node) => {}
                     _ => {
-                        c.add_upload(Upload { object: n.object, to: n.node, start_at, started: false, block: n.block, esi: 0, list: Some(list) }, true);
+                        c.add_upload(Upload { object: n.object, to: n.node, start_at, started: false, block: n.block, esi: 0, list: Some(list), phase }, true);
                         self.stats.repairs_queued += 1;
                     }
                 }

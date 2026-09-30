@@ -56,20 +56,33 @@ pub struct Entry {
     pub short: ShortId,
     /// Full metadata, once known from a manifest or from publishing.
     pub meta: Option<ObjectMeta>,
-    /// Length hint (from MANIFEST_ANNOUNCE) when `meta` is not yet known.
+    /// Length from a symbol or a MANIFEST_ANNOUNCE while `meta` is not yet known.
     pub len_hint: Option<u32>,
     pub kind_hint: ContentType,
     blocks: Vec<Option<Block>>,
     bytes: Option<Vec<u8>>,
-    /// Payloads of symbols that arrived before the object's length was known, kept until the
-    /// buffer exists. Whoever counts a symbol keeps it: without this an object collected ahead of
-    /// its metadata completes with a buffer of zeros.
-    pending: Vec<((u16, u16), Vec<u8>)>,
     complete: bool,
     pub verified: bool,
 }
 
 impl Entry {
+    fn empty(short: ShortId, kind: ContentType) -> Self {
+        Entry { short, meta: None, len_hint: None, kind_hint: kind, blocks: Vec::new(), bytes: None, complete: false, verified: false }
+    }
+    /// Take `len` as the object's length: size the block table and, if we keep this object's
+    /// bytes, the buffer. Whatever was held under another length is dropped.
+    fn set_len(&mut self, len: u32, keep_below: usize) {
+        let nb = blocks(len) as usize;
+        if self.len().map(|l| l != len).unwrap_or(false) {
+            self.blocks.clear();
+            self.bytes = None;
+            self.complete = false;
+        }
+        self.blocks.resize(nb, None);
+        if (len as usize) <= keep_below && self.bytes.is_none() {
+            self.bytes = Some(vec![0u8; nb * K_MAX as usize * SYMBOL_SIZE]);
+        }
+    }
     pub fn len(&self) -> Option<u32> {
         self.meta.map(|m| m.len).or(self.len_hint)
     }
@@ -138,75 +151,35 @@ impl MemStore {
     /// it: every symbol had already arrived before we knew what the object was.
     pub fn ensure(&mut self, meta: ObjectMeta) -> bool {
         let short = meta.id.short();
-        let keep = (meta.len as usize) <= self.keep_bytes_below;
-        let e = self.entries.entry(short).or_insert_with(|| Entry {
-            short,
-            meta: None,
-            len_hint: None,
-            kind_hint: meta.kind,
-            blocks: Vec::new(),
-            bytes: None,
-            pending: Vec::new(),
-            complete: false,
-            verified: false,
-        });
+        let keep = self.keep_bytes_below;
+        let e = self.entries.entry(short).or_insert_with(|| Entry::empty(short, meta.kind));
         let was = e.complete;
         if e.meta.is_none() {
+            // The signed metadata is the authority: a different length from a symbol or an
+            // announce loses what was held under it.
+            e.set_len(meta.len, keep);
             e.meta = Some(meta);
-            let nb = blocks(meta.len) as usize;
-            e.blocks.resize(nb, None);
-            if keep && e.bytes.is_none() {
-                e.bytes = Some(vec![0u8; nb * K_MAX as usize * SYMBOL_SIZE]);
+            e.len_hint = None;
+            if e.complete {
+                // Completed from symbols alone: now the bytes can be checked against the id.
+                Self::verify(e);
+            } else {
+                Self::recheck(e);
             }
-            Self::adopt_pending(e);
-            // A provisional entry may already be complete for all its blocks.
-            Self::recheck(e);
         }
         !was && e.complete
-    }
-
-    /// Move payloads that arrived before the buffer existed into it (or drop them if this object
-    /// is too large to keep).
-    fn adopt_pending(e: &mut Entry) {
-        let pending = core::mem::take(&mut e.pending);
-        if let Some(bytes) = e.bytes.as_mut() {
-            for ((block, esi), payload) in pending {
-                let off = (block as usize * K_MAX as usize + esi as usize) * SYMBOL_SIZE;
-                if off + SYMBOL_SIZE <= bytes.len() {
-                    let n = payload.len().min(SYMBOL_SIZE);
-                    bytes[off..off + n].copy_from_slice(&payload[..n]);
-                }
-            }
-        }
     }
 
     /// Register an object by short id with a length hint (from MANIFEST_ANNOUNCE).
     /// Returns true if the hint completed the object (see `ensure`).
     pub fn ensure_hint(&mut self, short: ShortId, len: u32, kind: ContentType) -> bool {
-        let keep = (len as usize) <= self.keep_bytes_below;
-        let e = self.entries.entry(short).or_insert_with(|| Entry {
-            short,
-            meta: None,
-            len_hint: None,
-            kind_hint: kind,
-            blocks: Vec::new(),
-            bytes: None,
-            pending: Vec::new(),
-            complete: false,
-            verified: false,
-        });
+        let keep = self.keep_bytes_below;
+        let e = self.entries.entry(short).or_insert_with(|| Entry::empty(short, kind));
         let was = e.complete;
         if e.meta.is_none() && e.len_hint.is_none() {
+            e.set_len(len, keep);
             e.len_hint = Some(len);
             e.kind_hint = kind;
-            let nb = blocks(len) as usize;
-            if e.blocks.len() < nb {
-                e.blocks.resize(nb, None);
-            }
-            if keep && e.bytes.is_none() {
-                e.bytes = Some(vec![0u8; nb * K_MAX as usize * SYMBOL_SIZE]);
-            }
-            Self::adopt_pending(e);
             Self::recheck(e);
         }
         !was && e.complete
@@ -237,48 +210,35 @@ impl MemStore {
         };
         self.entries.insert(
             short,
-            Entry { short, meta: Some(meta), len_hint: None, kind_hint: meta.kind, blocks: blk, bytes: stored, pending: Vec::new(), complete: true, verified: true },
+            Entry { short, meta: Some(meta), len_hint: None, kind_hint: meta.kind, blocks: blk, bytes: stored, complete: true, verified: true },
         );
     }
 
-    pub fn put_symbol(&mut self, short: ShortId, block: u16, esi: u16, k: u16, payload: &[u8]) -> Put {
-        if k == 0 || k > K_MAX || esi >= k {
+    /// Store symbol `esi` of `block` of an object of `len` bytes (the length every symbol
+    /// carries). An object not seen before is registered by its first symbol.
+    pub fn put_symbol(&mut self, short: ShortId, block: u16, esi: u16, len: u32, payload: &[u8]) -> Put {
+        let k = block_k(len, block);
+        if k == 0 || esi >= k {
             return Put::Rejected;
         }
-        let keep_below = self.keep_bytes_below;
-        let e = self.entries.entry(short).or_insert_with(|| Entry {
-            short,
-            meta: None,
-            len_hint: None,
-            kind_hint: ContentType::Other,
-            blocks: Vec::new(),
-            bytes: None,
-            pending: Vec::new(),
-            complete: false,
-            verified: false,
-        });
+        let keep = self.keep_bytes_below;
+        let e = self.entries.entry(short).or_insert_with(|| Entry::empty(short, ContentType::Other));
         if e.complete {
             return Put::Rejected;
         }
-        if let Some(len) = e.len() {
-            if block >= blocks(len) || block_k(len, block) != k {
-                return Put::Rejected;
+        match e.len() {
+            Some(l) if l != len => return Put::Rejected,
+            Some(_) => {}
+            None => {
+                e.set_len(len, keep);
+                e.len_hint = Some(len);
             }
-        } else if block as usize >= e.blocks.len() {
-            if block >= 64 {
-                return Put::Rejected; // provisional entries stay small
-            }
-            e.blocks.resize(block as usize + 1, None);
         }
         let slot = &mut e.blocks[block as usize];
         if slot.is_none() {
             *slot = Some(Block::new(k));
         }
-        let blk = slot.as_mut().unwrap();
-        if blk.k != k {
-            return Put::Rejected;
-        }
-        if !blk.set(esi) {
+        if !slot.as_mut().unwrap().set(esi) {
             return Put::Duplicate;
         }
         if let Some(bytes) = e.bytes.as_mut() {
@@ -287,11 +247,6 @@ impl MemStore {
                 let n = payload.len().min(SYMBOL_SIZE);
                 bytes[off..off + n].copy_from_slice(&payload[..n]);
             }
-        } else if e.len().is_none() && (e.pending.len() + 1) * SYMBOL_SIZE <= keep_below {
-            // Length unknown: keep the payload until we learn whether this object is one whose
-            // bytes we keep. Past the keep threshold it certainly is not, and counting alone is
-            // then what we do for every large object.
-            e.pending.push(((block, esi), payload[..payload.len().min(SYMBOL_SIZE)].to_vec()));
         }
         Self::recheck(e);
         if e.complete {
@@ -312,6 +267,11 @@ impl MemStore {
             return;
         }
         e.complete = true;
+        Self::verify(e);
+    }
+
+    /// Check a complete object's bytes against its id, if we keep them and know the full id.
+    fn verify(e: &mut Entry) {
         e.verified = match (e.meta, e.bytes.as_ref()) {
             (Some(m), Some(b)) => ObjectId::of(&b[..m.len as usize]) == m.id,
             _ => true, // trusted: no bytes kept, or no full id to check against
@@ -394,7 +354,7 @@ mod tests {
             let end = (off + SYMBOL_SIZE).min(data.len());
             let mut sym = vec![0u8; SYMBOL_SIZE];
             sym[..end - off].copy_from_slice(&data[off..end]);
-            let r = st.put_symbol(short, 0, esi, k, &sym);
+            let r = st.put_symbol(short, 0, esi, meta.len, &sym);
             if esi == 0 {
                 assert_eq!(r, Put::Complete);
             } else {
@@ -403,7 +363,7 @@ mod tests {
         }
         assert!(st.has_complete(&short));
         assert_eq!(st.bytes(&short).unwrap(), &data[..]);
-        assert_eq!(st.put_symbol(short, 0, 1, k, &[0; SYMBOL_SIZE]), Put::Rejected);
+        assert_eq!(st.put_symbol(short, 0, 1, meta.len, &[0; SYMBOL_SIZE]), Put::Rejected);
     }
 
     #[test]
@@ -414,10 +374,10 @@ mod tests {
         st.ensure(meta);
         let short = meta.id.short();
         let sym = [5u8; SYMBOL_SIZE];
-        st.put_symbol(short, 0, 0, 3, &sym);
-        st.put_symbol(short, 0, 1, 3, &sym);
+        st.put_symbol(short, 0, 0, 500, &sym);
+        st.put_symbol(short, 0, 1, 500, &sym);
         let bad = [6u8; SYMBOL_SIZE];
-        assert_eq!(st.put_symbol(short, 0, 2, 3, &bad), Put::New); // completed but failed verification
+        assert_eq!(st.put_symbol(short, 0, 2, 500, &bad), Put::New); // completed but failed verification
         assert!(!st.has_complete(&short));
         assert_eq!(st.missing(&short, 0).len(), 3);
     }
@@ -427,46 +387,53 @@ mod tests {
     }
 
     #[test]
-    fn symbols_before_metadata_are_kept_and_complete_on_registration() {
+    fn symbols_alone_complete_an_object_and_registration_verifies_it() {
         let data: Vec<u8> = (0..900u32).map(|i| (i * 13 % 251) as u8).collect();
         let meta = ObjectMeta { id: ObjectId::of(&data), len: data.len() as u32, kind: ContentType::Manifest };
         let short = meta.id.short();
         let syms = symbols_of(&data);
-        let k = syms.len() as u16;
         let mut st = MemStore::new(4096);
         for (esi, sym) in syms.iter().enumerate() {
-            assert_eq!(st.put_symbol(short, 0, esi as u16, k, sym), Put::New);
+            let r = st.put_symbol(short, 0, esi as u16, meta.len, sym);
+            assert_eq!(r, if esi + 1 == syms.len() { Put::Complete } else { Put::New });
         }
-        assert!(!st.has_complete(&short));
-        assert!(st.ensure(meta), "registration completes the object and says so");
+        assert_eq!(st.bytes(&short).unwrap(), &data[..]);
+        assert!(!st.ensure(meta), "completion is reported once, by the symbol that completed it");
         assert!(st.has_complete(&short));
         assert!(st.entry(&short).unwrap().verified);
-        assert_eq!(st.bytes(&short).unwrap(), &data[..]);
-        assert!(!st.ensure(meta), "completion is reported once");
     }
 
     #[test]
-    fn hint_after_symbols_keeps_real_bytes() {
+    fn registration_rejects_wrong_bytes_collected_without_metadata() {
         let data: Vec<u8> = (0..700u32).map(|i| (i * 31 % 251) as u8).collect();
-        let short = ObjectId::of(&data).short();
-        let syms = symbols_of(&data);
-        let k = syms.len() as u16;
+        let meta = ObjectMeta { id: ObjectId::of(&data), len: data.len() as u32, kind: ContentType::Manifest };
+        let short = meta.id.short();
         let mut st = MemStore::new(4096);
-        for (esi, sym) in syms.iter().enumerate().rev() {
-            st.put_symbol(short, 0, esi as u16, k, sym);
+        for esi in 0..block_k(meta.len, 0) {
+            st.put_symbol(short, 0, esi, meta.len, &[1u8; SYMBOL_SIZE]);
         }
-        assert!(st.ensure_hint(short, data.len() as u32, ContentType::Manifest));
-        assert_eq!(st.bytes(&short).unwrap(), &data[..]);
+        assert!(st.has_complete(&short), "without the id nothing can be checked yet");
+        st.ensure(meta);
+        assert!(!st.has_complete(&short), "the signed id exposes the bytes");
+        assert_eq!(st.missing(&short, 0).len(), block_k(meta.len, 0) as usize);
     }
 
     #[test]
-    fn provisional_then_ensure() {
+    fn a_symbol_that_disagrees_on_length_is_rejected() {
         let mut st = MemStore::new(0);
         let short = ShortId([9; 8]);
-        assert_eq!(st.put_symbol(short, 0, 0, 2, &[0; SYMBOL_SIZE]), Put::New);
-        assert_eq!(st.put_symbol(short, 0, 1, 2, &[0; SYMBOL_SIZE]), Put::New);
-        assert!(!st.has_complete(&short));
-        st.ensure_hint(short, 300, ContentType::Music);
-        assert!(st.has_complete(&short));
+        assert_eq!(st.put_symbol(short, 0, 0, 300, &[0; SYMBOL_SIZE]), Put::New);
+        assert_eq!(st.put_symbol(short, 0, 1, 900, &[0; SYMBOL_SIZE]), Put::Rejected);
+        assert_eq!(st.put_symbol(short, 0, 1, 300, &[0; SYMBOL_SIZE]), Put::Complete);
+    }
+
+    #[test]
+    fn metadata_with_another_length_resets_the_entry() {
+        let mut st = MemStore::new(0);
+        let short = ObjectId::of(b"x").short();
+        st.put_symbol(short, 0, 0, 300, &[0; SYMBOL_SIZE]);
+        let meta = ObjectMeta { id: ObjectId::of(b"x"), len: 1000, kind: ContentType::Music };
+        st.ensure(meta);
+        assert_eq!(st.missing(&short, 0).len(), 5);
     }
 }
