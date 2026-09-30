@@ -749,26 +749,130 @@ second rendition, of every programme and alongside its SNAC codes, costs more st
 measured price of the on-air answer to question 12; the local answer (a player re-encodes what it
 has decoded, for a speaker next to it) costs nothing on the air, and is the one adopted.
 
-### 9.6 Open
+### 9.6 Hidden uploaders, and what dividing the listening time uncovered
 
-- **Hidden uploaders collide at their announcer.** In the band L dynamics scenario uploads vary
-  from 169 to 2 085 per 72 hours across eight seeds. Classifying every upload frame at the
-  announcer it was meant for (`upload_outcome` in the simulator) shows why: in the bad worlds a
-  third of them collide, and nearly every collision is with another uploader sending to the same
-  announcer, a holder it cannot hear. Capping concurrent grants trades this for delay: at one
-  grant per announcer collisions fall from 35 % to 1 % and uploads by half, but the median
-  bulletin takes 27 minutes instead of 6 and the worst p90 goes from 64 to 911 minutes.
-  Letting the receiver divide its listening time works better: each upload gets a phase (a hash
-  of object and uploader that both ends compute, so no byte on the air), the uploader transmits
-  only in its phase, and the announcer grants only into a free phase. With three one-second
-  phases, upload frames fall by 46 % (43 636 to 23 720 per 72 hours), collisions from 35 % to 2 %,
-  and the median bulletin takes 9.5 minutes instead of 6.2. An oracle in which uploads to the same
-  announcer never collide shows what perfect scheduling would give: the same 43 % saving at an
-  unchanged 6.3 minutes. The collisions are therefore not what makes some worlds slow, but they
-  are nearly half the upload airtime, and a scheduler whose phase count follows the number of
-  running uploads, rather than a fixed three, should keep both. Band O is unaffected either way
-  (2 % collisions, phases change nothing). Not adopted yet: the fixed version is a trade, and the
-  adaptive one is the next design.
+In the band L dynamics scenario of §7.6 (50 nodes on 1 km², 8 channels, daily 22 kB bulletins,
+subscription churn, 72 hours) uploads varied from 169 to 2,085 across eight seeds. Classifying
+every upload frame at the announcer it was meant for (`upload_outcome` in the simulator) showed
+why: in the bad worlds a third to half of them collided, nearly always with another uploader
+sending to the same announcer, a holder it could not hear. Capping concurrent grants traded this
+for delay: at one grant per announcer collisions fell from 35 % to 1 %, but the median bulletin
+took 27 minutes instead of 6 and the worst p90 911 minutes instead of 64. Fixed phases (three of
+one second each, chosen by a hash of object and holder) cut upload frames by 46 % and collisions
+to 2 %, at a median of 9.5 minutes. An oracle in which uploads to the same announcer never
+collide showed what perfect scheduling would give: the same saving at an unchanged 6.3 minutes.
+
+The design that followed is in PROTOCOL.md §4: each grant names its phase and the beacon says
+how many are in use. Getting from there to the oracle took nine steps. Each row adds one to the
+row above; every row is eight seeds, band L, with the mean over seeds and the worst world:
+
+| Step | Uploads per 72 h (worst) | Upload frames collided | Grants lapsed | Bulletin median | Worst p90 | Worst world holds the current window |
+|---|---|---|---|---|---|---|
+| No phases (main) | 1,013 (2,085) | 35 % | 184 | 6.2 min | 64 min | 100 % |
+| 1. Each grant names its phase | 1,081 (3,757) | 4 % | 154 | 6.8 min | 186 min | 92.9 % |
+| 2. A grant ends with the announcer's role | 850 (1,789) | 4 % | 144 | 7.1 min | 191 min | 100 % |
+| 3. A symbol carries its object's length | 632 (981) | 6 % | 22 | 7.6 min | 184 min | 100 % |
+| 4. An uploader uses its whole phase | 728 (1,270) | 5 % | 11 | 6.0 min | 21 min | 92.9 % |
+| 5. Content waits on its own clock | 796 (1,755) | 7 % | 5 | 5.9 min | 35 min | 100 % |
+| 6. A NACK names the phase of its answers | 898 (1,847) | 8 % | 6 | 5.9 min | 14 min | 100 % |
+| 7. A NACK names who answers | 352 (691) | 0 % | 5 | 5.9 min | 20 min | 100 % |
+| 8–9. Phases only under polite access; an announcer's HAVE is not an offer | **330 (524)** | **0 %** | **2** | **6.0 min** | **21 min** | **100 %** |
+
+Over the eight worlds the upload frames sent fell from 349,089 to 192,793 (−45 %), and 97 % of
+them now arrive, against 61 %. In band O nothing changed that mattered (1.8 minutes, 79 uploads
+against 80, collisions 2 % to 1 %): one uploader at a time is the usual case there. The worst
+p90 is a single publication in a single world and moves by tens of minutes with it; the medians
+and upload counts are the steadier measure. Steps 8 and 9 came from the cell scenarios below.
+
+1. **Phases.** A hash of object and holder would have cost no byte on the air, but with a dozen
+   uploads running the announcer needed K = 16 far too often: the birthday problem. Explicit
+   phases in the grant do not collide. Collisions fell from 35 % to 4 %, but one world ended with
+   only 92.9 % of its followers up to date, and in it 43 % of all upload frames went to nodes
+   that were no longer announcing.
+2. **A grant outlived its announcer.** A node that stopped announcing kept its grants, and kept
+   naming the holders in the WANT it sent as a follower; the holders kept uploading to a node that
+   listened to someone else. Grants now end with the role, and a holder stops uploading to a node
+   as soon as that node says it follows someone else. Frames to former announcers fell from
+   16,143 to 12 in that world.
+3. **An object named without its length could never complete.** A grant trace
+   (`MESHCAST_TRACE_GRANTS=1`) showed one announcer granting the same two-symbol manifest to the
+   same holder 80 times in 17 hours, and receiving both symbols every time. It had collected the
+   symbols before it knew the manifest, took on the want when a follower asked, and nothing told
+   it the length; without the length, symbols are counted but an object never completes. BULK frames now carry the object's length instead of
+   the block's K (PROTOCOL.md §3.2), 2 bytes more per frame: an object completes from its symbols
+   alone. In the worst world lapsed grants fell from 697 to 11 and uploads from 1,789 to 522.
+4. **A phase was used by less than half.** Inside its one-second phase an uploader still sent
+   the short bursts that keep a node listening (ETHERFATSOEN.md §7), and used about 0.4 s of it (an estimate from the burst rule: bursts of about 60 ms, each
+   followed by the 100 ms pause).
+   Nobody else speaks to the announcer in that phase, so the uploader now uses it as one
+   transmission up to `Ton_max`. The median bulletin went from 7.6 to 6.0 minutes, below the
+   no-phase 6.2.
+5. **Content held back control.** Every pause content takes (the rendezvous, a time slot, a
+   phase, the token bucket) was one timer for the whole radio. An announcer whose carousel had
+   paused for the meeting dwell sent its WANT after it, on its own channel, where no other cell
+   listens; in one world a cell never got a manifest published three hours before the end. Content
+   now waits on its own clock (ETHERFATSOEN.md §2). In that world 311 of the 1,150 asks and grants
+   announcers sent had missed the rendezvous; afterwards none of 1,104 did.
+6. **Repair answers had no phase.** Holders answering an announcer's NACK without a grant sent
+   whenever they liked: in the worst world 5,344 of 5,369 same-announcer collisions involved one.
+   A NACK now names the phase for its answers, the grant's or a reserved one. The worst p90 fell
+   to 14 minutes, but the answers still collided with each other.
+7. **Repair answers came from everyone.** Every holder that heard an announcer's NACK answered
+   after a wait scaled by how well it heard the asker, and holders that cannot hear each other do
+   not suppress each other: the same failure as uploads before grants (ETHERFATSOEN.md §6). The
+   NACK now names who answers, the granted uploader or the holder the announcer hears best among
+   those that said they have the object. Collisions went to 0 % and uploads fell by 61 %.
+
+The cell scenarios of §9.3 then showed what the dynamics scenario could not. Against main, band
+L got faster and cheaper, but band O, ESP-NOW and the two band L clusters got 14 to 37 % slower.
+Ablations, one step removed at a time on eight seeds, found two more causes:
+
+8. **Phases where uploads are short.** Under band O's duty cycle, budgeted per hour, an uploader
+   sends its object in a burst of seconds at the full rate; held to one phase in K, the median
+   upload took 39 s instead of 4 s. Hidden uploads that short rarely meet, so there was nothing
+   to save: band O had 2 % collisions without phases. An announcer now divides its listening time
+   only under polite access (PROTOCOL.md §4). In the band O scenario on 15 km² the median went
+   from 13.4 back to 9.5 minutes.
+9. **An announcer's HAVE counted as an offer.** In the two clusters, removing step 5 made things
+   faster again, which pointed at the rendezvous. A trace of the world that slowed most showed
+   the manifest crossing to the other cluster in 27 minutes instead of 12: the asking announcer
+   granted it three times in a row to the source, which was itself an announcer and never
+   uploads, and each grant waited out `T_grant`. The source's HAVE had counted as an offer, and
+   the followers that would have offered had cancelled theirs on hearing it. With content and
+   control on one timer the announcers' gossip had mostly missed the rendezvous, which hid the
+   fault; step 5 exposed it. An announcer's HAVE is no longer an offer (PROTOCOL.md §4), and the
+   smoke test `announcers_are_never_granted_uploads` fails without the rule.
+
+All nine steps, the scenarios of §9.3 (SNAC music and speech alternating, eight seeds each):
+
+| Scenario | Main: delivered (worst), median, bulk frames | This design | Frames |
+|---|---|---|---|
+| Band O neighbourhood | 100 % (100), 8.7 min, 13,483 | 100 % (100), 8.8 min | unchanged |
+| Band L neighbourhood | 100 % (100), 21.5 min, 55,357 | 100 % (100), 21.2 min | −41 % |
+| Band O, 100 nodes on 15 km² | 100 % (99.9), 9.8 min, 88,813 | 100 % (100), 9.6 min | −22 % |
+| Band L, 100 nodes on 15 km² | 100 % (100), 46.9 min, 380,782 | 100 % (100), **34.3 min** | −28 % |
+| ESP-NOW neighbourhood | 100 % (100), 16.4 min, 96,988 | 100 % (100), 15.1 min | −17 % |
+| Two clusters, band L | 100 % (100), 22.6 min, 20,048 | 100 % (100), 20.3 min | −13 % |
+| LoRa only, 5 km | 100 % (100), 47.7 min, 2,509 | 100 % (100), 48.0 min | unchanged |
+| Town, band O | 100 % (100), 18.0 min, 213,033 | 100 % (100), 17.7 min | +3 % |
+| Town, band L | 100 % (99.9), 79.4 min, 1,293,710 | 100 % (100), **49.3 min** | −28 % |
+
+Every world of every scenario now delivers everything, and none is slower beyond the spread of
+its seeds. The band L town, the hardest case, gets its programmes half an hour sooner with a
+quarter less airtime.
+
+The smoke test `hidden_uploaders_take_turns_at_their_announcer` (six sources in a 900 m ring
+around a station, band L) fails without phases, where 63 % of its upload frames collided, and
+now sees 0.4 %.
+
+### 9.7 Open
+
+- **The announcer talks over its uploaders.** With collisions gone the largest loss left is the
+  announcer's own carousel: 1–5 % of upload frames in the dynamics worlds, and 26 % in the ring
+  smoke test, arrive while the announcer is transmitting. Carrier sensing does not prevent it,
+  because an uploader the announcer can decode may still be below the clear-channel threshold,
+  15 dB above sensitivity (ETSI EN 300 220-2 Table 18). The announcer knows the phases it gave
+  out; staying silent in a phase whose uploader it has heard recently is the next step.
 - All 50 nodes of the dynamics scenario start at the same instant. In band L nobody can hear an
   announcer that does not exist yet, so almost every node becomes announcer within the first
   quarter hour before they find each other; the network is then stable for the remaining 71
