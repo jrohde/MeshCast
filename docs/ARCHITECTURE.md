@@ -13,7 +13,7 @@ The three hardware shapes that exist today:
 
 | Shape | Hardware | Carriers | Typical outcome |
 |---|---|---|---|
-| **Edge node** | ESP32-S3 + SX1262: Seeed XIAO ESP32S3 + Wio-SX1262 (8 MB PSRAM), Heltec V3, LilyGo T-series | sub-GHz GFSK + LoRa, ESP-NOW LR, BLE to phone, optional SD and I2S audio | follower or source; announcer in small or offline cells |
+| **Edge node** | ESP32-S3 + SX1262: Seeed XIAO ESP32S3 + Wio-SX1262 (8 MB PSRAM), Heltec V3, LilyGo T-series | sub-GHz GFSK + LoRa, ESP-NOW LR, BLE to phone, optional SD; carries audio as codes and does not decode it (§6) | follower or source; announcer in small or offline cells |
 | **Station** | Linux (Raspberry Pi / CM4) + RAK2287 (SX1302) in an upcycled Helium miner; or any Linux box with an SX1262/SX1302 | sub-GHz (8-channel LoRa RX, 1 FSK RX, single TX), Ethernet/IP, storage, transcoding | announcer of a district; internet seeder |
 | **Phone app** | Android/iOS | BLE to an edge node; optional internet for the node | the human interface: library, subscriptions, playback, microphone |
 
@@ -40,8 +40,8 @@ solved, bridging can be reconsidered then.
 ```mermaid
 flowchart LR
     subgraph Source["Source (any node)"]
-        P[Phone app: pick track / record bulletin] -->|BLE| E1[Edge node]
-        E1 -->|encode Opus, hash, sign manifest| L1[(Local library)]
+        P[Phone app: record bulletin or pick track, encode SNAC] -->|BLE| E1[Edge node]
+        E1 -->|hash, sign manifest| L1[(Local library)]
     end
 
     L1 -->|GOSSIP HAVE + MANIFEST_ANNOUNCE on LoRa| A
@@ -59,15 +59,15 @@ flowchart LR
     B -->|GOSSIP HAVE| A2[Announcer of the next cell]
     A2 -->|carousel| F3[Followers there]
 
-    F1 -->|scheduled playback from local copy| SPK1((speaker / phone))
-    F3 -->|same schedule, same time| SPK2((speaker / phone))
+    F1 -->|BLE: codes to the phone, decoded ahead, played on schedule| SPK1((phone / station))
+    F3 -->|same schedule, same time| SPK2((phone / station))
 ```
 
-Read it left to right: a human makes content on a phone; the edge node encodes it and signs the
-channel manifest; the cell's announcer learns about it by gossip and pulls it (or, with internet,
+Read it left to right: a human makes content on a phone, which encodes it (PROTOCOL.md §1.1);
+the edge node hashes it and signs the channel manifest; the cell's announcer learns about it by gossip and pulls it (or, with internet,
 fetches it from a station anywhere); the carousel broadcasts it to every follower; bridge nodes
-that hear two announcers carry it to the next cell; at the scheduled time every node plays its own
-copy. No audio ever crosses the air in real time.
+that hear two announcers carry it to the next cell; every follower's phone decodes its own copy
+ahead of time and plays it at the scheduled time. No audio ever crosses the air in real time.
 
 ## 4. Implementation stack
 
@@ -77,9 +77,9 @@ Rust everywhere, one Cargo workspace:
 |---|---|---|
 | `core` | `no_std`, no allocator assumptions beyond a bounded arena | objects, symbols, manifests (CBOR, Ed25519), frames and parsers, carousel, gossip, announcer election, EtherFatsoen gate, EtherDiscipline accounting, region profiles. No I/O: it consumes events (frame received, timer, RSSI sample) and emits actions (transmit frame, arm timer). |
 | `sim` | host | discrete-event simulator driving many `core` instances through modelled radios (path loss with shadowing, capture effect, hidden nodes, per-carrier bit rates from the datasheets), scenario files, metrics export |
-| `station` | Linux | `core` + SX1302 via `libloragw` bindings (as ChirpStack Concentratord does) or SX1262 over SPI, object store on disk, Opus transcoding, HTTPS seeder/fetcher, metrics endpoint |
-| `firmware` | ESP32-S3 (`esp-hal`, `embassy`), later nRF52 (`embassy-nrf`) | `core` + SX126x driver (GFSK and LoRa), ESP-NOW and BLE via ESP-IDF bindings where Rust crates fall short, SD/flash object store, I2S playback |
-| `app` | Flutter or native (later) | BLE, library, playback, recording |
+| `station` | Linux | `core` + SX1302 via `libloragw` bindings (as ChirpStack Concentratord does) or SX1262 over SPI, object store on disk, SNAC encoding of ingested tracks and decoding for a speaker, HTTPS seeder/fetcher, metrics endpoint |
+| `firmware` | ESP32-S3 (`esp-hal`, `embassy`), later nRF52 (`embassy-nrf`) | `core` + SX126x driver (GFSK and LoRa), ESP-NOW and BLE via ESP-IDF bindings where Rust crates fall short, SD/flash object store; no audio decoding (§6) |
+| `app` | Flutter or native (later) | BLE, library, recording and SNAC encoding, SNAC decoding ahead of playback |
 
 Why Rust rather than C++ (the language of Meshtastic and MeshCore):
 
@@ -109,11 +109,26 @@ scheduled first, never the newest manifest of a followed channel.
 
 ## 6. Audio
 
-Encoding happens where the CPU is: on the phone (recording bulletins) or on a station
-(transcoding uploads). Edge nodes only decode. Opus at 16–24 kbit/s for music, 8 kbit/s for
-speech; Codec2 (1.2–3.2 kbit/s) as an option for bulletins where every byte counts. An edge node
-plays over I2S to a small amplifier, or hands the object to the phone over BLE and lets the phone
-play it.
+Audio travels as the codes of a neural codec: SNAC 24 kHz for speech (0.98 kbit/s) and SNAC
+32 kHz for music (1.88 kbit/s); PROTOCOL.md §1.1 pins both and FEASIBILITY.md §8 has the listening
+tests and timings behind the choice. A 3-minute track is 42 kB, a 5-minute bulletin 37 kB.
+
+The codec decides where work happens:
+
+- **Encoding** runs once, at the source: the phone that records a bulletin, or the station that
+  ingests a track.
+- **Decoding** runs on the device that plays: the phone, or a station with a speaker. It happens
+  ahead of playback, when an object completes, and the result is kept as ordinary audio until the
+  scheduled time. Real-time decoding is not needed; a Pixel 4a from 2020 decodes music at 0.27×
+  real time on one core in a browser, so an hour of music takes under four hours of background
+  work on the slowest path measured.
+- **Dongles never decode.** An ESP32-S3 has neither the memory (the music decoder has 38.5 M
+  parameters) nor the arithmetic for it. A dongle carries the codes as opaque bytes and hands
+  completed objects to the phone over BLE.
+
+The decoder weights ship with the app and the station software (77 MB and 26 MB as fp16). The
+runtime on the phone is an open choice for Phase 1: onnxruntime is the fastest path measured so
+far (FEASIBILITY.md §8.3).
 
 ## 7. What is deliberately not here
 

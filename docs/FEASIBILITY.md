@@ -117,16 +117,19 @@ second of airtime than LoRa SF7/250 but reaches a third as far.
 
 ## 4. Throughput per transmitter, by regime
 
-| Regime | Raw rate | Airtime allowed | Average | Per hour | Opus music (24 kbit/s) per hour |
-|---|---|---|---|---|---|
-| EU band O, 500 mW, 10 % DC | 100–150 kbit/s | 10 % | 10–15 kbit/s | 4.5–6.8 MB | 25–37 min |
-| EU band L, 25 mW, polite + AFA | 100 kbit/s | up to ~42 % | ~40 kbit/s | ~19 MB | ~1.7 h |
-| ESP-NOW LR, 100 mW | 50–100 kbit/s (distance-dependent) | 100 % | 50–100 kbit/s | 22–45 MB | 2–4 h |
-| US 902–928 MHz, FCC 15.247 digital modulation, 1 W | 300 kbit/s (≥ 500 kHz 6 dB bandwidth) | 100 % | 300 kbit/s | 135 MB | ~12 h |
-| Internet | n/a | n/a | n/a | unlimited | unlimited |
+| Regime | Raw rate | Airtime allowed | Average | Per hour | Opus music (24 kbit/s) per hour | SNAC music (1.88 kbit/s) per hour |
+|---|---|---|---|---|---|---|
+| EU band O, 500 mW, 10 % DC | 100–150 kbit/s | 10 % | 10–15 kbit/s | 4.5–6.8 MB | 25–37 min | 5.3–8 h |
+| EU band O, LoRa SF7/125, 10 % DC | 5.47 kbit/s | 10 % | ~0.55 kbit/s | ~0.25 MB | ~1.4 min | ~17 min |
+| EU band L, 25 mW, polite + AFA | 100 kbit/s | up to ~42 % | ~40 kbit/s | ~19 MB | ~1.7 h | ~22 h |
+| ESP-NOW LR, 100 mW | 50–100 kbit/s (distance-dependent) | 100 % | 50–100 kbit/s | 22–45 MB | 2–4 h | 26–53 h |
+| US 902–928 MHz, FCC 15.247 digital modulation, 1 W | 300 kbit/s (≥ 500 kHz 6 dB bandwidth) | 100 % | 300 kbit/s | 135 MB | ~12 h | ~160 h |
+| Internet | n/a | n/a | n/a | unlimited | unlimited | unlimited |
 
-Opus at 16 kbit/s mono (speech, or lo-fi music) halves the file sizes; Codec2 speech at
-1.2 kbit/s makes a 5-minute bulletin a 45 kB object.
+The LoRa row is computed, not measured: SF7 at 125 kHz and coding rate 4/5 is
+7 × 125 000 / 2⁷ × 4/5 = 5.47 kbit/s on air, before headers. The last column is the codec chosen
+in §8: an hour of music is 0.84 MB, an hour of speech (SNAC 24 kHz, 0.98 kbit/s) 0.44 MB. All
+averages are per transmitter and before protocol overhead.
 
 ## 5. Why it scales
 
@@ -159,7 +162,9 @@ listeners (the system naturally favours popular content, like Usenet did).
 
 The simulator in `sim/` runs the real `meshcast-core` protocol on modelled radios (log-distance
 path loss, exponent 3, 6 dB shadowing, capture, half-duplex, CCA, per-band accounting). Tracks are
-540 kB (3 minutes of Opus at 24 kbit/s). Every number below is reproducible with the command
+540 kB (3 minutes of Opus at 24 kbit/s). §8 later replaced Opus by SNAC, which makes a track
+42 kB, so these runs load the network about 13 times harder than the chosen codec will; they
+have not been re-run at the new size yet. Every number below is reproducible with the command
 shown; seeds are fixed. These are simulation results, not measurements: Phase 1 checks them
 against real radios.
 
@@ -501,3 +506,105 @@ and a newcomer's first WANT is answered like any other.
 - Whether 0–500 ms jitter and a 30 % occupancy target are the right values in a live band with
   LoRaWAN and other users: Phase 2 measurements.
 - Announcer-to-announcer exchange without bridge followers (PROTOCOL.md open question 7).
+
+## 8. The audio codec: measured by ear and by clock
+
+Until Phase 0 ended, every number here assumed Opus at 24 kbit/s: 540 kB per 3-minute track.
+Neural audio codecs turn audio into a short stream of integer codes and back, and some of them
+now reach listenable music at about 2 kbit/s. This section records how the codec was chosen.
+The listening tests and timings were run once, on the maintainer's own AI-generated tracks and
+hardware; the scripts are not in the repository (they drive Python reference implementations,
+and the project has no Python), so the method is described in enough detail to repeat it.
+
+### 8.1 Listening tests
+
+Method: 30-second excerpts from 1:00 of five of the maintainer's tracks (brass, reggae, hip-hop,
+a quiet song, dance), each encoded and decoded only from the codes that would be transmitted,
+stored losslessly, and presented blind in a fixed random order with the original hidden among
+them. One listener, headphones, absolute category rating from 1 (bad) to 5 (excellent).
+
+| Variant | kbit/s | kB per 3 min | Mean rating, 5 tracks |
+|---|---|---|---|
+| Original (hidden) | 1536 | 34 560 | 4.2 |
+| **SNAC 32 kHz** | **1.88** | **42** | **3.8** |
+| Opus 24, mono | 26.8 (measured, incl. Ogg) | 603 | 3.6 |
+| SNAC 44 kHz | 2.6 | 58 | 3.4 |
+| EnCodec 48 kHz stereo, 6 kbit/s | 6.1 | 136 | 3.4 |
+| EnCodec 24 kHz, 6 / 3 / 1.5 kbit/s | 6 / 3 / 1.5 | 135 / 68 / 34 | 3.2 / 2.6 / 1.8 |
+| Opus 12 / 6, mono | 12.4 / 7.0 | 280 / 159 | 2.6 / 1.6 |
+| WavTokenizer medium (music), 75 tokens/s | 0.9 | 20 | 2.6 |
+| WavTokenizer large, 40 tokens/s | 0.48 | 11 | 1.8 |
+| WavTokenizer large, 75 tokens/s ("speech" checkpoint) | 0.9 | 20 | 1.0 |
+
+A second round on three of the tracks added Vocos, a light decoder for EnCodec codes, at 12, 6,
+3 and 1.5 kbit/s: 2.7, 2.3, 1.3 and 1.0, below EnCodec's own decoder at the same bit rate
+(Vocos's published EnCodec model is trained on speech). The anchors repeated round one exactly
+(SNAC 32 kHz 3.7, Opus 24 3.7, WavTokenizer 2.3 on the same three tracks), which says the
+ratings are consistent, not that they generalise: one listener, five tracks.
+
+SNAC's 24 kHz model, trained on speech, was heard on the same music on a phone and judged not
+good enough for music.
+
+Sources: SNAC ([code and model cards](https://github.com/hubertsiuzdak/snac), MIT),
+WavTokenizer ([code](https://github.com/jishengpeng/WavTokenizer), MIT), EnCodec
+([code](https://github.com/facebookresearch/encodec), MIT), Vocos
+([code](https://github.com/gemelo-ai/vocos), MIT).
+
+### 8.2 What decoding costs
+
+Decoding runs on every device that plays, so its cost decides where playback can happen.
+Measured on an AMD Ryzen 7 255 (one core unless stated), 30 s of the same excerpt:
+
+| Decoder | Parameters | Multiply-adds per second of audio | PyTorch 2.5, 1 core | onnxruntime 1.30 native | onnxruntime-web 1.23 (WebAssembly), 1 core |
+|---|---|---|---|---|---|
+| SNAC 32 kHz | 38.5 M | 18.3 G | 0.9× real time | 1.8× (1 core), 3.3× (4 cores) | 0.73× |
+| SNAC 24 kHz | 13.1 M | 4.9 G | 3.5× | | 2.4× |
+| SNAC 44 kHz | 38.5 M | not counted (same network at 44.1 kHz) | | | 0.56× |
+| WavTokenizer (40 / 75 tokens/s) | 63 M | 2.6 / 4.8 G | 24× / 13× | | |
+| EnCodec 24 kHz | 7.4 M | 1.2 G | 20× | | |
+| Vocos on EnCodec codes | 8.0 M | 0.6 G | 90× | | |
+
+Multiply-adds are PyTorch's `FlopCounterMode` count halved. The ONNX models are the SNAC decoders
+exported with the noise injection, local attention and activation rewritten as plain operators;
+their output matches PyTorch to 118–124 dB signal-to-noise ratio.
+
+On a phone, the same page ran in the Claude app on a Pixel 4a (2020, Snapdragon 730G,
+Android 13), onnxruntime-web on one core: **SNAC 24 kHz 0.80×, SNAC 32 kHz 0.27×, SNAC 44 kHz
+0.19× real time**, each matching the desktop output to 123–124 dB. The browser's WebGPU path on
+the phone's Adreno 618 returned wrong audio (0–1 dB against the desktop) and then hung, so the
+graphics chip is untested rather than slow. On the desktop, native onnxruntime was 2.5× faster
+than WebAssembly on one core; applying that ratio, a native app on the Pixel 4a would decode
+music at roughly 0.7× real time per big core. That is an estimate, not a measurement.
+
+Repackagings of SNAC for other runtimes were checked and do not help yet: Vokra (a Rust runtime,
+pre-1.0) decoded 30 s of SNAC 44 kHz in 112 s using 12 GB; CrispASR's GGUF of SNAC 24 kHz is
+full precision because, per its model card, 8-bit quantisation damaged the codec output.
+
+### 8.3 Decision
+
+- **Music: SNAC 32 kHz, 1.88 kbit/s.** Rated above Opus 24 at 14 times fewer bytes. A 3-minute
+  track is 42 kB, one source block.
+- **Speech: SNAC 24 kHz, 0.98 kbit/s.** Half the bytes and a quarter of the decoding work of the
+  music model. Kept separate from music by choice: two models are more to maintain, but speech and
+  music are different kinds of programme and each gets the model made for it.
+- **Decode ahead, never in real time.** Tracks arrive minutes to hours before they play, so a
+  player decodes each object when it completes. The slowest path measured, one phone core in a
+  browser, needs under four hours of background work per hour of music.
+- **Only players decode.** Dongles carry codes and hand them to the phone; they have neither the
+  memory nor the arithmetic for a 38.5 M-parameter decoder.
+
+PROTOCOL.md §1.1 pins both models to exact weights and defines the payload layout.
+
+### 8.4 Open
+
+- SNAC 24 kHz has not been rated blind on the maintainer's own spoken programmes; the choice rests
+  on the model card and the demo samples.
+- Energy: how much battery a phone spends per hour of music, on the processor and on the graphics
+  chip, is unmeasured. The browser test has a battery mode, but it needs a working WebGPU path.
+- A lighter decoder for the same SNAC codes, trained on music, would keep the objects valid and cut
+  the decoding cost. Vocos shows the size (8 M parameters, 0.6 G multiply-adds per second) is
+  possible; whether the quality is, nobody has measured.
+- Opus as a fallback for players without a neural decoder, for example a dongle with a speaker
+  (PROTOCOL.md open question 12).
+- The simulations of §7 used 540 kB tracks and should be re-run at 42 kB.
+
