@@ -26,6 +26,7 @@ of yours can spend. Anything above one is a lever.
 |---|---|---|---|
 | **Channel flood** | Many signed channels with large catalogues | An announcer serves every channel it learns of, so it tries to carry all of them | Unbounded |
 | **WANT flood** | One 50-byte gossip asking for an object | The announcer puts a 42 kB track in its carousel (540 kB before the codec change) | ~800× |
+| **Rendition flood** | WANTs, as a device that cannot decode, for the rendition of every object a channel lists | The cell's carousel carries each as Opus (PROTOCOL.md §1.2): 367 kB for a 3-minute song at 16 kbit/s | ~7 000× |
 | **NACK amplification** | One 30-byte NACK, claiming to be an announcer | Every holder that hears it lines up an answer; the best-placed one sends up to 40 symbols | ~300× |
 | **Grant hijack** | An offer, then silence | The announcer waits `T_grant` (10 min) before reassigning, once per object | Stalls delivery |
 | **Election capture** | Beacons claiming the maximum score | You become announcer and can then simply not transmit; the cell starves | Denial of a whole cell |
@@ -65,9 +66,13 @@ notices the limit exists.
    announcers the node has heard itself; a score is trusted only as far as the beacon's own
    carousel round counter shows the announcer is doing anything. Both are claims that cost
    everyone, so both should need evidence.
-3. **Bounded generosity.** An announcer serves at most so many channels, chosen by how many
+3. **Renditions at the speed of listening.** A device cannot play faster than real time, so a
+   node that asks for renditions of more audio per hour than an hour holds is not listening.
+   An announcer serves each follower renditions at most at the rate its profile plays; this is
+   the request budget of item 1 with a limit that follows from what renditions are for.
+4. **Bounded generosity.** An announcer serves at most so many channels, chosen by how many
    distinct followers asked and for how long, rather than everything it hears of.
-4. **Known peers, optionally.** A cell may require that requests come from a node whose key it
+5. **Known peers, optionally.** A cell may require that requests come from a node whose key it
    has seen before, which makes the attacks above cost an identity rather than nothing. This is
    a deployment choice, not a default: MeshCast is meant to work with strangers.
 

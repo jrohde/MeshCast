@@ -929,3 +929,80 @@ Every world delivers everything. In the dynamics scenario a bulletin arrives in 
   Judged on one seed it looked worse on every count; judged on eight it is a trade, not yet
   adopted.
 
+
+## 10. Renditions: sound for devices that cannot decode
+
+A board with a speaker but no neural decoder, such as a LilyGo T-Deck Pro, gets each programme as
+an Opus rendition made from the codes in its cell (PROTOCOL.md §1.2). The simulator models it:
+sources name one rendition per audio object in a rendition table, a number of followers cannot
+decode and want renditions instead of codes, and nodes that decode make renditions when granted.
+Two draft profiles: Opus at 16 kbit/s for music and 8 for speech, and a leaner 12 and 6. A
+3-minute song is then 367 or 275 kB against 43 kB of codes, a 3-minute talk 183 or 137 kB
+against 22 kB: six to eight times the codes (arithmetic: the codes' duration at the profile's bit
+rate). The schedule plays one object per source per hour; a device asks for a rendition
+`T_render_ahead` (30 min) before its slot. Eight seeds each, 12 hours.
+
+**Naming renditions costs nothing.** A manifest that names a rendition table and no device that
+asks: 7,795 bulk frames against 7,800 in the band O neighbourhood. Listing the renditions in every
+manifest entry instead cost 4 % more frames, because manifests are repeated every five minutes.
+
+**Where a device asks, a cell pays for what it plays, once.** In the band O neighbourhood every
+rendition arrives before its slot, and the cost does not depend on how many devices listen:
+
+| Band O neighbourhood | 1 small device | 5 | 20 |
+|---|---|---|---|
+| Renditions before their slot, 16/8 kbit/s | 100 % | 100 % | 100 % |
+| Rendition frames, 16/8 (codes: 7,800 frames in all) | 27,520 | 27,520 | 27,520 |
+| Rendition frames, 12/6 | 20,640 | 20,640 | 20,640 |
+
+27,520 frames is the 5.5 MB of twenty renditions sent exactly once. The codes still reach every
+other follower in the same time (music median 10.5 to 10.9 minutes, against 11.0 without
+renditions).
+
+With several cells, each cell where a device asks carries its own copy, and a cell whose
+announcer cannot make it first fetches it from a node that can. Renditions at 16/8 kbit/s, every
+node that decodes able to make them:
+
+| Scenario | Small devices | Before their slot | Bulk frames, with (without) renditions | Codes: music median, with (without) |
+|---|---|---|---|---|
+| Band L neighbourhood | 1 | 100 % | 47,021 (18,837) | 22.6 (22.4) min |
+| Band L neighbourhood | 5 | 99.9 % | 73,655 (18,837) | 23.4 (22.4) min |
+| Band L neighbourhood | 20 | 99.6 % | 90,548 (18,837) | 22.4 (22.4) min |
+| Band O, 15 km² | 5 | 99.0 % | 153,537 (44,647) | 10.9 (10.5) min |
+| Band O, 15 km² | 20 | 98.7 % | 289,359 (44,647) | 10.3 (10.5) min |
+| Band L, 15 km² | 5 | 96.0 % | 295,528 (131,452) | 41.8 (36.6) min |
+| Band L, 15 km² | 20 | 94.6 % | 687,369 (131,452) | 44.7 (36.6) min |
+
+Every follower that decodes still gets every object. Twenty devices scattered over 15 km² make
+the cells carry five to six and a half times the airtime, and in band L the codes arrive a fifth
+later; the 12/6 profile saves 30 % of the rendition frames (389,493 against 554,417) at the same
+punctuality (95.3 % before their slot).
+
+**A rendition costs what listening costs.** A device plays in real time, so a cell carries a
+rendition's bit rate for as long as someone listens to a programme nobody else there has asked
+for. A band O announcer averages 10 to 15 kbit/s (§1): one 16 kbit/s stream of continuous music
+does not fit, and in band L (about 40 kbit/s) two do. The scenarios above schedule three minutes
+per source per hour, well within that. Renditions over the sub-GHz cell therefore suit bulletins,
+a few programmes an hour and the occasional pick, not continuous music radio on a small board.
+For that, the last hop needs more room than the cell has: ESP-NOW from a nearby station, or a
+decoder on the device (ROADMAP.md).
+
+**Who makes them matters.** When only stations make renditions and the station announces for
+another cell, it cannot upload to the cell that asks: announcers serve their own cells. In the
+band L scenarios, 14 to 48 % of renditions then arrived before their slot on 15 km² and 62 to
+96 % in the neighbourhood, against 95 to 100 % when every node that decodes can make them. So
+renditions need a node that decodes in or near each cell where a device asks, which in practice
+is a phone behind a dongle.
+
+**Asking earlier does not help.** In band L on 15 km² with five devices, every late rendition
+belonged to the first slot, an hour after the whole catalogue was published at once, while the cell was still carrying
+the codes (music median 42 minutes). Asking two hours ahead instead of thirty minutes put more
+renditions in flight during that hour and delivered fewer on time (94.1 % against 96.0 %).
+
+**Two faults found on the way.** Each rendition was first made by every node that heard the ask,
+before offering; now a node offers what it could make and makes it only when granted (20
+renditions made for 20 objects, not 31). And a node that became announcer never fetched the
+codes of the channels it had followed as a device that cannot decode, nor, in general, the
+objects of channels it had not followed; its cell then went without. A new announcer now adopts
+the manifests it holds again, as an announcer: with 20 such devices in a band L neighbourhood
+the other followers' deliveries went from 95 % (worst world 65 %) back to 100 %.
