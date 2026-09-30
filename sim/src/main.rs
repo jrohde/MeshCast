@@ -44,12 +44,26 @@ struct Common {
     /// Size of one track in kB (540 kB ≈ 3 min of Opus at 24 kbit/s).
     #[arg(long, default_value_t = 540)]
     track_kb: u32,
+    /// Publishing mix that overrides --track-kb, e.g.
+    /// "snac-music:42,snac-speech:22,opus-music:540,opus-speech:180".
+    #[arg(long)]
+    mix: Option<String>,
+    /// Run this many seeds (seed, seed+1, ...) in parallel and report the spread. A single run
+    /// is one throw of the dice; compare designs on ensembles.
+    #[arg(long, default_value_t = 1)]
+    seeds: u64,
     /// Write full metrics as JSON here.
     #[arg(long)]
     out: Option<String>,
     /// Print role changes as they happen.
     #[arg(long, default_value_t = false)]
     verbose: bool,
+}
+
+impl Common {
+    fn mix_items(&self) -> Vec<scenario::MixItem> {
+        self.mix.as_deref().map(|m| scenario::parse_mix(m).unwrap_or_else(|e| panic!("--mix: {e}"))).unwrap_or_default()
+    }
 }
 
 #[derive(Subcommand)]
@@ -152,6 +166,7 @@ struct Report {
     spec: ScenarioSpec,
     phys: Vec<radio::Phy>,
     objects: Vec<ObjectSummary>,
+    by_kind: Vec<KindSummary>,
     frames_sent: u64,
     frames_delivered: u64,
     frames_collided: u64,
@@ -187,6 +202,46 @@ struct FailoverReport {
     announcer_after_revive: Option<u32>,
 }
 
+/// Delivery per kind of object in the publishing mix.
+#[derive(Serialize, Clone)]
+struct KindSummary {
+    label: String,
+    objects: usize,
+    kb: u32,
+    /// Follower completions over follower-object pairs.
+    complete: f64,
+    /// Mean over objects of each object's median completion time.
+    p50_mean_h: Option<f64>,
+    /// Worst object's 90th-percentile completion time.
+    p90_max_h: Option<f64>,
+}
+
+fn by_kind(objects: &[ObjectSummary]) -> Vec<KindSummary> {
+    let mut labels: Vec<String> = Vec::new();
+    for o in objects {
+        if !labels.contains(&o.label) {
+            labels.push(o.label.clone());
+        }
+    }
+    labels
+        .into_iter()
+        .map(|label| {
+            let os: Vec<&ObjectSummary> = objects.iter().filter(|o| o.label == label).collect();
+            let pairs: usize = os.iter().map(|o| o.followers).sum();
+            let done: usize = os.iter().map(|o| o.complete).sum();
+            let p50: Vec<f64> = os.iter().filter_map(|o| o.p50_h).collect();
+            KindSummary {
+                objects: os.len(),
+                kb: os[0].bytes / 1024,
+                complete: if pairs > 0 { done as f64 / pairs as f64 } else { 0.0 },
+                p50_mean_h: if p50.len() == os.len() && !p50.is_empty() { Some(p50.iter().sum::<f64>() / p50.len() as f64) } else { None },
+                p90_max_h: if os.iter().all(|o| o.p90_h.is_some()) { os.iter().filter_map(|o| o.p90_h).fold(None, |a: Option<f64>, x| Some(a.map_or(x, |a| a.max(x)))) } else { None },
+                label,
+            }
+        })
+        .collect()
+}
+
 fn main() {
     let cli = Cli::parse();
     match cli.cmd {
@@ -199,6 +254,7 @@ fn main() {
                 sources: 1,
                 tracks: common.tracks,
                 track_kb: common.track_kb,
+                mix: common.mix_items(),
                 hours: common.hours,
                 seed: common.seed,
                 bulk: common.bulk,
@@ -220,6 +276,7 @@ fn main() {
                 sources,
                 tracks: common.tracks,
                 track_kb: common.track_kb,
+                mix: common.mix_items(),
                 hours: common.hours,
                 seed: common.seed,
                 bulk: common.bulk,
@@ -252,6 +309,7 @@ fn main() {
                 sources: 1,
                 tracks: common.tracks,
                 track_kb: common.track_kb,
+                mix: common.mix_items(),
                 hours: common.hours,
                 seed: common.seed,
                 bulk: common.bulk,
@@ -276,6 +334,7 @@ fn main() {
                 sources: 1,
                 tracks: common.tracks,
                 track_kb: common.track_kb,
+                mix: common.mix_items(),
                 hours: common.hours,
                 seed: common.seed,
                 bulk: common.bulk,
@@ -326,9 +385,46 @@ fn budget(exponent: f64) {
 }
 
 fn run(spec: ScenarioSpec, common: &Common, failover: Option<(f64, f64)>) {
+    if common.seeds <= 1 {
+        let (report, wall) = simulate(spec, common.verbose, failover);
+        print_report(&report, wall);
+        if let Some(path) = &common.out {
+            fs::write(path, serde_json::to_string_pretty(&report).unwrap()).expect("write report");
+            println!("\nfull report written to {path}");
+        }
+        return;
+    }
+    let seeds: Vec<u64> = (0..common.seeds).map(|i| spec.seed + i).collect();
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let results = std::sync::Mutex::new(Vec::new());
+    let workers = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).min(seeds.len());
+    let t0 = std::time::Instant::now();
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| loop {
+                let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let Some(&seed) = seeds.get(i) else { break };
+                let mut s = spec.clone();
+                s.seed = seed;
+                let (report, _) = simulate(s, false, failover);
+                results.lock().unwrap().push(report);
+            });
+        }
+    });
+    let mut reports = results.into_inner().unwrap();
+    reports.sort_by_key(|r| r.spec.seed);
+    let ensemble = Ensemble::of(&reports);
+    ensemble.print(t0.elapsed());
+    if let Some(path) = &common.out {
+        fs::write(path, serde_json::to_string_pretty(&ensemble).unwrap()).expect("write report");
+        println!("\nensemble written to {path}");
+    }
+}
+
+fn simulate(spec: ScenarioSpec, verbose: bool, failover: Option<(f64, f64)>) -> (Report, std::time::Duration) {
     let params = Params::default();
     let mut built = build(&spec, params);
-    built.engine.verbose = common.verbose;
+    built.engine.verbose = verbose;
     let until: Millis = (spec.hours * 3.6e6) as Millis;
     let mut fo_killed = None;
     if let Some((kill_h, revive_h)) = failover {
@@ -355,6 +451,7 @@ fn run(spec: ScenarioSpec, common: &Common, failover: Option<(f64, f64)>) {
         times.sort_by(|a, b| a.partial_cmp(b).unwrap());
         objects.push(ObjectSummary {
             object: format!("{:?}", id),
+            label: info.label.clone(),
             source: info.source,
             index: info.index,
             bytes: info.bytes,
@@ -366,6 +463,7 @@ fn run(spec: ScenarioSpec, common: &Common, failover: Option<(f64, f64)>) {
         });
     }
     objects.sort_by_key(|o| (o.source, o.index));
+    let kinds = by_kind(&objects);
 
     // Announcers at the end.
     let bulk_c = eng.phys.iter().position(|p| p.kind != CarrierKind::LoraControl).unwrap_or(1);
@@ -478,16 +576,76 @@ fn run(spec: ScenarioSpec, common: &Common, failover: Option<(f64, f64)>) {
         announcers_final,
         role_events: m.role_events.len(),
         airtime_share,
+        by_kind: kinds,
         occupancy_p50_bulk: occ_p50,
         occupancy_max_bulk: occ_max,
         delivered_bytes_per_hour_per_announcer: dbph,
         failover: fo,
         core_stats,
     };
-    print_report(&report, wall);
-    if let Some(path) = &common.out {
-        fs::write(path, serde_json::to_string_pretty(&report).unwrap()).expect("write report");
-        println!("\nfull report written to {path}");
+    if std::env::var("MESHCAST_DEBUG_WANTS").is_ok() {
+        for (i, n) in eng.nodes.iter().enumerate() {
+            if n.node.role(bulk_c) == meshcast_core::node::Role::Announcer || i < 3 {
+                println!("WANTS node {i} (id {}): {}", n.node.id().0, n.node.want_report());
+            }
+        }
+    }
+    (report, wall)
+}
+
+/// One seed's headline numbers, kept in an ensemble.
+#[derive(Serialize)]
+struct SeedLine {
+    seed: u64,
+    delivered: f64,
+    bulk_sent: u64,
+    by_kind: Vec<KindSummary>,
+}
+
+/// Several seeds of one scenario: the spread is the result, not any single run.
+#[derive(Serialize)]
+struct Ensemble {
+    spec: ScenarioSpec,
+    seeds: Vec<SeedLine>,
+}
+
+fn delivered(r: &Report) -> f64 {
+    let pairs: usize = r.objects.iter().map(|o| o.followers).sum();
+    let done: usize = r.objects.iter().map(|o| o.complete).sum();
+    if pairs > 0 { done as f64 / pairs as f64 } else { 0.0 }
+}
+
+impl Ensemble {
+    fn of(reports: &[Report]) -> Ensemble {
+        Ensemble {
+            spec: reports[0].spec.clone(),
+            seeds: reports
+                .iter()
+                .map(|r| SeedLine { seed: r.spec.seed, delivered: delivered(r), bulk_sent: r.bulk_sent, by_kind: by_kind(&r.objects) })
+                .collect(),
+        }
+    }
+
+    fn print(&self, wall: std::time::Duration) {
+        let n = self.seeds.len();
+        let d: Vec<f64> = self.seeds.iter().map(|s| s.delivered * 100.0).collect();
+        let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len() as f64;
+        let min = |v: &[f64]| v.iter().cloned().fold(f64::INFINITY, f64::min);
+        let max = |v: &[f64]| v.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let s = &self.spec;
+        println!("ensemble of {n} seeds ({}..{}), {} nodes on {} km², {} h, {:.0} s wall",
+            self.seeds[0].seed, self.seeds[n - 1].seed, s.nodes, s.area_km2, s.hours, wall.as_secs_f64());
+        println!("  delivered      mean {:5.1} %  min {:5.1} %  max {:5.1} %   per seed: {}", mean(&d), min(&d), max(&d),
+            d.iter().map(|x| format!("{x:.1}")).collect::<Vec<_>>().join(" "));
+        let frames: Vec<f64> = self.seeds.iter().map(|s| s.bulk_sent as f64).collect();
+        println!("  bulk frames    mean {:.0}  min {:.0}  max {:.0}", mean(&frames), min(&frames), max(&frames));
+        for (i, k) in self.seeds[0].by_kind.iter().enumerate() {
+            let c: Vec<f64> = self.seeds.iter().map(|s| s.by_kind[i].complete * 100.0).collect();
+            let p50: Vec<f64> = self.seeds.iter().filter_map(|s| s.by_kind[i].p50_mean_h).map(|h| h * 60.0).collect();
+            let p90: Vec<f64> = self.seeds.iter().filter_map(|s| s.by_kind[i].p90_max_h).map(|h| h * 60.0).collect();
+            let m = |v: &[f64]| if v.len() == n { format!("{:6.1} min (min {:5.1}, max {:5.1})", mean(v), min(v), max(v)) } else { format!("{} of {n} seeds complete", v.len()) };
+            println!("  {:<12} {:>4} kB  complete mean {:5.1} % min {:5.1} %  median {}  worst p90 {}", k.label, k.kb, mean(&c), min(&c), m(&p50), m(&p90));
+        }
     }
 }
 
@@ -516,6 +674,11 @@ fn print_report(r: &Report, wall: std::time::Duration) {
     for o in &r.objects {
         let f = |x: Option<f64>| x.map(|v| format!("{v:.2}")).unwrap_or_else(|| "-".into());
         println!("  {:<10} {:>4} {:>7} {:>9} {:>9} {:>8} {:>8} {:>8}", o.object, o.source, o.bytes / 1024, o.followers, o.complete, f(o.p50_h), f(o.p90_h), f(o.max_h));
+    }
+    println!("\nby kind (follower completions; mean of per-object median; worst per-object p90):");
+    for k in &r.by_kind {
+        let f = |x: Option<f64>| x.map(|v| format!("{v:.2} h")).unwrap_or_else(|| "-".into());
+        println!("  {:<12} {:>3} objects of {:>4} kB: {:>6.1} % complete, p50 {:>8}, p90 {:>8}", k.label, k.objects, k.kb, k.complete * 100.0, f(k.p50_mean_h), f(k.p90_max_h));
     }
     if let Some(fo) = &r.failover {
         println!("\nfailover: {:?}", fo);
@@ -561,6 +724,7 @@ fn run_dynamics(nodes: usize, area_km2: f64, stations: usize, channels: usize, f
         sources: channels,
         tracks: window,
         track_kb: bulletin_kb,
+        mix: vec![scenario::MixItem { label: "speech".into(), kb: bulletin_kb }],
         hours: common.hours,
         seed: common.seed,
         bulk: common.bulk,
@@ -657,7 +821,7 @@ fn run_dynamics(nodes: usize, area_km2: f64, stations: usize, channels: usize, f
                 built.engine.nodes[node].node.publish(&m, &[(o.meta(), None)]);
                 built.engine.poke(node);
                 let followers: Vec<usize> = (0..nodes).filter(|&i| subs[i].contains(&c)).collect();
-                built.tracks.insert(o.id.short(), TrackInfo { source: node, index: next_index[c] - 1, bytes: o.len, followers: followers.clone() });
+                built.tracks.insert(o.id.short(), TrackInfo { label: "speech".into(), source: node, index: next_index[c] - 1, bytes: o.len, followers: followers.clone() });
                 pubs.push((o.id.short(), t, followers));
             }
             2 => {

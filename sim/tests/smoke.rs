@@ -12,6 +12,7 @@ fn spec(bulk: BulkPreset, positions: Vec<(f64, f64)>, sources: Vec<usize>, stati
         sources: sources.len(),
         tracks: 2,
         track_kb: 200,
+        mix: Vec::new(),
         hours,
         seed: 42,
         bulk,

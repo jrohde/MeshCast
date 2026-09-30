@@ -501,6 +501,19 @@ impl Node {
         self.carriers.iter().any(|c| c.election.as_ref().map(|e| e.is_announcer()).unwrap_or(false))
     }
 
+    /// Diagnostic: every wanted object with its progress, grant and timers.
+    pub fn want_report(&self) -> alloc::string::String {
+        use core::fmt::Write;
+        let mut s = alloc::string::String::new();
+        for id in &self.wants {
+            let p = self.progress.get(id).copied().unwrap_or_default();
+            let prog = self.store.entry(id).map(|e| e.progress());
+            let _ = write!(s, "{:?} have={:?} grant={:?} last_progress={} last_want={} | ", id, prog, self.grants.get(id), p.last_progress, p.last_want);
+        }
+        let _ = write!(s, "now={} next_gossip={} offers={}", self.now, self.next_gossip, self.offers.len());
+        s
+    }
+
     pub fn wants(&self) -> &BTreeSet<ShortId> {
         &self.wants
     }

@@ -50,6 +50,7 @@ impl Metrics {
 #[derive(Debug, Serialize)]
 pub struct ObjectSummary {
     pub object: String,
+    pub label: String,
     pub source: usize,
     pub index: usize,
     pub bytes: u32,
