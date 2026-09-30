@@ -608,3 +608,166 @@ PROTOCOL.md §1.1 pins both models to exact weights and defines the payload layo
   (PROTOCOL.md open question 12).
 - The simulations of §7 used 540 kB tracks and should be re-run at 42 kB.
 
+## 9. After the codec change: ensembles, mixed traffic and four faults
+
+With 42 kB tracks (§8) the Phase 0 scenarios were run again, and with them a question §7 never
+asked: how much does one run say? This section records what that turned up. Every number in
+this section is an ensemble of eight seeds (`meshcast-sim ... --seeds 8`), given as the mean and
+the worst seed; the scenarios are those of §7 with 8 objects per source where §7 used fewer, so
+that a mix of four kinds has at least two of each. `--mix` sets what each source publishes, for
+example `snac-music:42,snac-speech:22`.
+
+### 9.1 One run is one throw of the dice
+
+The band L neighbourhood of §7.7 (50 nodes, 1 km², 540 kB tracks, 6 h) delivered 100 % on seed 1.
+On eight seeds the same code delivers 100, 88.6, 100, 95.2, 99.6, 100, 92.7 and 87.4 %: a mean
+of 95.4 %. Nothing in the protocol changed between those runs, only the random draws, and the
+spread is wide enough to hide a fault or invent an improvement. From here on designs are
+compared on ensembles; the single-seed tables of §7 stand as they were measured.
+
+### 9.2 Four faults
+
+The ensembles exposed a band L neighbourhood that stalled at 66 % on one seed while its
+neighbours delivered everything. A trace of each announcer's want list (`MESHCAST_DEBUG_WANTS=1`)
+showed two announcers asking every few minutes, for hours, for objects the other cell held, and
+never getting them.
+
+1. **Offers went where the asker does not listen.** An announcer's ask reaches the other cell in
+   the rendezvous, when every node is on the meeting channel. The holders there answered with an
+   offer a few seconds later, on their own cell's hop sequence, which the asking announcer never
+   visits. Rule now: a frame goes where its addressee listens; an offer to another cell's
+   announcer waits for the rendezvous.
+2. **A grant that had delivered once never lapsed.** The rule kept a grant alive if any symbol had
+   arrived after it was given, so an uploader that sent a few symbols and fell silent stayed
+   responsible for hours. PROTOCOL.md already said the right thing (a grant lapses after
+   `T_grant` without a symbol); the code now does it, counted from the last symbol.
+3. **Symbols that arrived before their object's metadata were counted but not kept.** A node
+   that collected an object before it knew what the object was stored a tally of symbols and no
+   payload; when the metadata arrived the object was complete, with a buffer of zeros, and
+   nothing announced the completion. For a manifest that meant a node could hold a "complete"
+   manifest it could not read. Rules now: whoever counts a symbol keeps it, and an object
+   completes once, with the same consequences, however it got there. (Found because the
+   simulator reported objects as undelivered that the nodes held.)
+4. **Small objects waited behind large ones** (§9.4).
+
+Faults 1 and 2, SNAC objects, before and after (8 seeds each):
+
+| Scenario | Before: delivered, mean (worst) | After | Bulk frames |
+|---|---|---|---|
+| Band O neighbourhood | 100 % (100) | 100 % (100) | unchanged |
+| Band L neighbourhood | 99.0 % (95.0) | **100 % (100)** | −31 % |
+| Band O, 100 nodes on 15 km² | 99.9 % (99.6) | 99.9 % (99.6) | −7 % |
+| Band L, 100 nodes on 15 km² | 98.9 % (95.8) | **99.9 % (99.3)** | −15 % |
+| ESP-NOW neighbourhood | 98.2 % (91.4) | **99.8 % (98.5)** | −31 % |
+| Two clusters, band L | 98.7 % (89.5) | **100 % (100)** | −32 % |
+| LoRa only, 5 km | 100 % (100) | 100 % (100) | unchanged |
+| Town, band O (200 nodes, 30 km²) | 100 % (100) | 100 % (100) | +5 % |
+| Town, band L | 99.9 % (99.7) | **100 % (100)** | −15 % |
+
+Single-channel carriers are untouched, as they should be: there is no other channel to be on.
+The two-cluster world that stalled at 89.5 % is now a smoke test (`sim/tests/smoke.rs`) that
+fails without the two fixes. The remaining 0.1 % in band O at 15 km² was fault 3, a measurement
+that missed objects the nodes held.
+
+### 9.3 SNAC-sized objects, all fixes
+
+All four fixes, SNAC music (42 kB) and speech (22 kB) alternating, 8 seeds, next to the same
+scenario with 540 kB tracks on one seed before these fixes:
+
+| Scenario | 540 kB Opus, one seed (§7 code) | SNAC 42 + 22 kB, 8 seeds: delivered, mean (worst) | median | bulk frames |
+|---|---|---|---|---|
+| Band O neighbourhood (50 nodes, 1 km², 3 h) | 100.0 %, median 66 min | 100.0 % (100.0) | 9 min | 13,483 |
+| Band L neighbourhood (50 nodes, 1 km², 6 h) | 91.4 %, median 90 min | 100.0 % (100.0) | 22 min | 55,357 |
+| Band O, 100 nodes on 15 km² (12 h) | 100.0 %, median 156 min | 100.0 % (99.9) | 10 min | 88,813 |
+| Band L, 100 nodes on 15 km² (12 h) | 98.7 %, median 355 min | 100.0 % (100.0) | 47 min | 380,782 |
+| ESP-NOW neighbourhood (30 nodes, 6 h) | 99.4 %, median 57 min | 100.0 % (100.0) | 16 min | 96,988 |
+| Two clusters 1.8 km apart, band L (12 h) | 100.0 %, median 68 min | 100.0 % (100.0) | 23 min | 20,048 |
+| LoRa only, two nodes 5 km apart (24 h) | 100.0 %, median 793 min | 100.0 % (100.0) | 48 min | 2,509 |
+| Town, band O (200 nodes, 30 km², 24 h) | 87.4 %, median 572 min | 100.0 % (100.0) | 18 min | 213,033 |
+| Town, band L (200 nodes, 30 km², 24 h) | 100.0 %, median 633 min | 100.0 % (99.9) | 79 min | 1,293,710 |
+
+Delivery is complete everywhere, and a track that took hours now takes minutes: over LoRa alone,
+48 minutes instead of 13 hours. In the dynamics scenario of §7.6 (8 channels, daily bulletins,
+subscription churn) a new bulletin reaches its followers in 1.8 minutes in band O and 6 in band L
+at 22 kB, against 6.6 and 20 at 300 kB; every follower that is on holds the current window of
+every channel it follows, in both bands.
+
+### 9.4 Mixed traffic and Smith's rule
+
+A network may carry SNAC objects next to much larger ones: Opus renditions (PROTOCOL.md open
+question 12), web bundles, firmware. With four kinds mixed (SNAC music 42 kB, SNAC speech 22 kB,
+Opus music 540 kB, Opus speech 180 kB), SNAC music in the band O neighbourhood took 27 minutes
+instead of 9. Two places decided the order in which objects travel, and neither looked at size:
+the carousel sorted by how many followers wanted an object, and the announcer asked holders for
+objects in id order, which is hash order, which is random. A holder uploads one object at a time,
+so a 540 kB object asked for first held up every small object of its source.
+
+The rule for one transmitter serving many waiting listeners is old: to minimise their total
+wait, send in order of weight over length (Smith's rule). Here the weight is the number of
+listeners, so **everywhere one sender chooses among objects, it takes the most listeners per
+byte first**: the carousel's order, and the order in which an announcer asks. Among objects of
+one size it is most-wanted first, as before; every wanted object is still sent every round.
+
+SNAC and Opus mixed, 8 seeds, the carousel already ordered by listeners per byte, and the ask
+order changed from object id to the same rule:
+
+| Scenario | SNAC music, median: ask in id order | Smith's rule | Opus music, median: id order | Smith's rule |
+|---|---|---|---|---|
+| Band O neighbourhood | 27 min | **9 min** | 31 min | 37 min |
+| Band L neighbourhood | 37 min | **23 min** | 47 min | 53 min |
+| Band O, 15 km² | 27 min | **10 min** | 60 min | 69 min |
+| Band L, 15 km² | 99 min | **43 min** | 158 min | 183 min |
+| ESP-NOW neighbourhood | 23 min | **17 min** | 35 min | 41 min |
+| Two clusters, band L | 33 min | **28 min** | 61 min | 73 min |
+| LoRa only, 5 km | 169 min | **41 min** | 370 min | 410 min |
+| Town, band O | 69 min | **19 min** | 188 min | 188 min |
+| Town, band L | 180 min | **64 min** | 267 min | 338 min |
+
+Small objects stop waiting behind large ones, most of all where the channel is slowest (LoRa
+alone: 169 to 41 minutes); the large ones pay a little, as Smith's rule says they must. Delivery
+stays at 100 % in every scenario.
+
+### 9.5 What an Opus rendition on the air costs
+
+PROTOCOL.md open question 12 asks whether Opus should travel as a second rendition of a
+programme. The simulator's closest case is a source whose objects are half SNAC and half Opus;
+with every fix in place:
+
+| Scenario | Bulk frames, SNAC only | SNAC and Opus mixed | Ratio |
+|---|---|---|---|
+| Band O neighbourhood | 13,483 | 42,441 | 3.1× |
+| Band L neighbourhood | 55,357 | 241,301 | 4.4× |
+| Band O, 15 km² | 88,813 | 300,144 | 3.4× |
+| Band L, 15 km² | 380,782 | 2,275,480 | 6.0× |
+| ESP-NOW neighbourhood | 96,988 | 468,667 | 4.8× |
+| Two clusters, band L | 20,048 | 116,712 | 5.8× |
+| LoRa only, 5 km | 2,509 | 9,234 | 3.7× |
+| Town, band O | 213,033 | 1,280,239 | 6.0× |
+| Town, band L | 1,293,710 | 7,606,850 | 5.9× |
+
+Half the programmes as Opus cost three to six times the airtime of all of them as SNAC. A real
+second rendition, of every programme and alongside its SNAC codes, costs more still. That is the
+measured price of the on-air answer to question 12; the local answer (a player re-encodes what it
+has decoded, for a speaker next to it) costs nothing on the air.
+
+### 9.6 Open
+
+- **Hidden uploaders collide at their announcer.** In the band L dynamics scenario uploads vary
+  from 169 to 2 085 per 72 hours across eight seeds. Classifying every upload frame at the
+  announcer it was meant for (`upload_outcome` in the simulator) shows why: in the bad worlds a
+  third of them collide, and nearly every collision is with another uploader sending to the same
+  announcer, a holder it cannot hear. Capping concurrent grants trades this for delay: at one
+  grant per announcer collisions fall from 35 % to 1 % and uploads by half, but the median
+  bulletin takes 27 minutes instead of 6 and the worst p90 goes from 64 to 911 minutes. The next
+  idea to test is that the receiver divides its listening time: an announcer gives each
+  concurrent uploader its own phase of the dwell, so hidden uploaders never overlap yet each
+  still spends its own budget.
+- All 50 nodes of the dynamics scenario start at the same instant. In band L nobody can hear an
+  announcer that does not exist yet, so almost every node becomes announcer within the first
+  quarter hour before they find each other; the network is then stable for the remaining 71
+  hours. Letting a node that follows nobody sit on the base hop sequence (where the first
+  announcer of any area transmits) instead of scanning cut role events by a third over eight
+  seeds (257 to 165) and uploads by a sixth, but a bulletin took 7.8 minutes instead of 6.2.
+  Judged on one seed it looked worse on every count; judged on eight it is a trade, not yet
+  adopted.
+

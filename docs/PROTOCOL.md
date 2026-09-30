@@ -29,6 +29,12 @@ all objects.
   consecutive source blocks; each block is independently repairable. A 3-minute music track
   (§1.1) is 42 kB, one block; the 540 kB objects the Phase 0 simulations used (3 minutes of
   24 kbit/s Opus) are 3 blocks.
+- **Symbols before metadata**: a node can collect symbols of an object before it knows what the
+  object is (an announcer overhearing a neighbouring carousel, or a manifest's symbols arriving
+  before its announcement). It keeps their payloads, not just a count, and the object completes
+  when its metadata arrives: once, with the same consequences as completing by a symbol (a
+  manifest is adopted, the want is dropped). Only an object too large for the node to keep at
+  all is tracked by count alone, as every large object is.
 - **Integrity**: v0 verifies the full object hash on completion and discards the object on
   mismatch. v1 option: a Merkle root over symbol hashes in the manifest so a poisoned symbol can be
   rejected on arrival (costs 4 bytes per symbol in the manifest).
@@ -210,9 +216,13 @@ The announcer maintains a **carousel set**: every object (including manifests) t
 the cell wants, as learned from GOSSIP and MANIFEST_ANNOUNCE, that the announcer has. A round is:
 
 1. `BEACON` on the bulk carrier.
-2. For each object in the set, ordered rarest-first (fewest HAVEs among heard nodes) with new
-   manifests first: emit its symbols, one `BULK` frame each, subject to EtherFatsoen and
-   EtherDiscipline gating between frames.
+2. For each object in the set, manifests first and then **the most listeners served per byte**:
+   emit its symbols, one `BULK` frame each, subject to EtherFatsoen and EtherDiscipline gating
+   between frames. The listeners of an object are the followers asking for it; ordering by
+   listeners divided by size is Smith's rule, which minimises the total time listeners wait on
+   one shared transmitter. Among objects of one size it is simply most-wanted first; a small
+   object no longer waits behind a large one; and every wanted object is still sent every round,
+   so nothing starves.
 3. Merge NACKs received during the round; symbols named in NACKs are queued at the front of the
    next round.
 4. Objects that every heard follower reports complete leave the set.
@@ -244,10 +254,14 @@ No absolute signal level enters into it; the rank is relative to the holder's ow
 (`grant = NONE`) or a *grant* naming one uploader. Any node that holds the object, in the
 announcer's own cell or a neighbouring one, answers an open ask with an *offer*: one small GOSSIP
 carrying HAVE, after a random delay of up to `T_offer`, and not at all if it hears another
-holder's offer first. The announcer grants the first offer it hears and names that holder in its
-next WANT; only the named holder uploads, one object at a time (further grants queue), on the
-announcer's channel and in its slot. A grant lapses after `T_grant` without a symbol arriving,
-and the ask becomes open again. NACKs from an announcer are answered only by its granted
+holder's offer first. **A frame goes where its addressee listens**: an offer to the holder's own
+announcer goes out at once, but on a hopping carrier an offer to another cell's announcer waits
+for the rendezvous, the only time that announcer listens on a channel the holder can reach. The
+announcer grants the first offer it hears and names that holder in its next WANT; only the named
+holder uploads, one object at a time (further grants queue), on the announcer's channel and in
+its slot. A grant lapses after `T_grant` without a symbol arriving, counted from the grant or
+from the last symbol, whichever is later, and the ask becomes open again: an uploader that
+delivered once and then fell silent is no more responsible than one that never started. NACKs from an announcer are answered only by its granted
 uploader. This is the DHCP pattern, and it replaced "any holder answers after a random wait",
 which the simulator showed producing fourteen uploads per object per cell among holders that
 could not hear each other's suppression.
@@ -255,6 +269,10 @@ could not hear each other's suppression.
 **Ask only for what is not coming.** An announcer's WANT lists objects that have received no
 symbol for `T_nack_stall`; an object whose symbols are arriving is not asked for again, and a
 holder whose granted upload is flowing is not asked for a second object until it is done.
+**Ask first for the most listeners per byte**, the carousel's rule applied one step earlier: a
+holder uploads one object at a time, so the order of asking is the order of arriving, and a
+3-minute track must not wait behind a 540 kB object from the same source. (Asking in object-id
+order, as Phase 0 did, delayed small objects in mixed traffic about threefold.)
 Several holders may upload different objects to one announcer at the same time: each spends its
 own regulatory budget, and serialising them (tried in Phase 0) halves the cell's inbound rate.
 Holders on opposite sides of a cell that cannot hear each other's CCA are the known residual
@@ -452,7 +470,7 @@ arrives a few minutes later than it otherwise would. That is the entire user-vis
 | `meet_every` | 5 | every fifth dwell is on the common control-plane sequence |
 | `T_offer` | 0–3 s | random delay before a holder offers on an open ask |
 | repair wait | `T_suppress × (neighbours heard better than the asker) / (all neighbours)` + jitter | ungranted NACK answer |
-| `T_grant` | 10 min | a grant without any symbol arriving lapses |
+| `T_grant` | 10 min | a grant lapses this long after its last symbol (or after the grant, if none came) |
 | `T_slot` | 10 s | time slot when announcers in conflict share a channel |
 | `conflict_ttl`, `T_report_min` | 30 min, 60 s | conflict report lifetime and follower report rate limit |
 | `T_jitter` (tx) | 0–500 ms | random delay before control/metadata frames |
@@ -462,7 +480,9 @@ arrives a few minutes later than it otherwise would. That is the entire user-vis
 ## 9. Open questions
 
 1. Symbol size versus LoRa airtime: 200 B is right for GFSK; should LoRa-only cells use 64 B?
-2. Should the carousel prioritise by schedule proximity (what plays soonest) over rarest-first?
+2. Should the carousel prioritise by schedule proximity (what plays soonest)? It now orders by
+   listeners served per byte (§4); a playback deadline could weight that, but has not been
+   needed yet.
 3. Per-symbol authentication in v0 rather than v1, given that anyone can inject BULK frames?
 4. Multi-announcer cells on purpose (two bulk channels, two announcers) in dense areas?
 5. How does a node learn a channel id in the first place without internet? (QR code, spoken
@@ -491,6 +511,12 @@ arrives a few minutes later than it otherwise would. That is the entire user-vis
     and turn-taking uploads were tried and rejected. Next: measure where the band L town path
     stalls (grant latency, coinciding upload channels, or one-object-per-holder), and find a rule
     that is cheap where channels are plentiful without being unsafe where they are scarce.
+    After the codec change the cause was found with an ensemble and a want-list trace
+    (FEASIBILITY.md §9): holders sent offers for another cell's announcer at once, on their own
+    hop sequence, where that announcer never listens; and a grant whose uploader had delivered
+    once never lapsed, so an announcer kept naming a holder that had gone quiet. Offers now wait
+    for the rendezvous and grants lapse without progress; the band L neighbourhood went from
+    95–99 % on average (one seed at 66 %) to 100 % on every seed.
 12. Opus as a fallback for players without a neural decoder, for example a dongle with a speaker
     (Opus decoders run on ESP32-class chips). Content type 18 is reserved for it (§1.1). An Opus
     track costs about 14 times the airtime of the same track as SNAC codes, so the question is
