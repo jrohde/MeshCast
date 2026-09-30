@@ -865,14 +865,30 @@ The smoke test `hidden_uploaders_take_turns_at_their_announcer` (six sources in 
 around a station, band L) fails without phases, where 63 % of its upload frames collided, and
 now sees 0.4 %.
 
-### 9.7 Open
+### 9.7 The announcer keeps quiet in the phases it gave away
 
-- **The announcer talks over its uploaders.** With collisions gone the largest loss left is the
-  announcer's own carousel: 1–5 % of upload frames in the dynamics worlds, and 26 % in the ring
-  smoke test, arrive while the announcer is transmitting. Carrier sensing does not prevent it,
-  because an uploader the announcer can decode may still be below the clear-channel threshold,
-  15 dB above sensitivity (ETSI EN 300 220-2 Table 18). The announcer knows the phases it gave
-  out; staying silent in a phase whose uploader it has heard recently is the next step.
+With collisions gone, the largest loss left was the announcer's own carousel: 1 to 5 % of upload
+frames in the dynamics worlds, and 26 % in the ring smoke test, arrived while the announcer was
+transmitting. Carrier sensing does not prevent it: an uploader the announcer can decode may still
+be below the clear-channel threshold, 15 dB above sensitivity (ETSI EN 300 220-2 Table 18), and
+the other way round. The announcer knows the phases it gave out, so it now holds its carousel in
+a phase whose uploader it heard in the last two cycles (PROTOCOL.md §4). Eight seeds, band L:
+
+| Scenario | Before | Quiet announcer |
+|---|---|---|
+| Dynamics: upload frames that arrive | 97 % | 100 % |
+| Dynamics: bulletin median, worst p90 | 6.0 min, 21 min | 5.9 min, 13 min |
+| Neighbourhood (50 nodes, 1 km²) | 21.2 min, 32,530 frames | 21.0 min, 32,151 frames |
+| 100 nodes on 15 km² | 34.3 min, 273,649 frames | 29.8 min, 239,541 frames |
+| Two clusters | 20.3 min, 17,364 frames | 17.7 min, 16,524 frames |
+| Town (200 nodes, 30 km²) | 49.3 min, 937,091 frames | **43.2 min**, 845,799 frames |
+
+In the ring smoke test the frames arriving while the station transmits fell from 26 % to 1.7 %,
+and the uploads needed 43 % fewer frames, because fewer had to be repaired. Band O and ESP-NOW do
+not divide the listening time and are unchanged.
+
+### 9.8 Open
+
 - All 50 nodes of the dynamics scenario start at the same instant. In band L nobody can hear an
   announcer that does not exist yet, so almost every node becomes announcer within the first
   quarter hour before they find each other; the network is then stable for the remaining 71
