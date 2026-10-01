@@ -1006,3 +1006,79 @@ codes of the channels it had followed as a device that cannot decode, nor, in ge
 objects of channels it had not followed; its cell then went without. A new announcer now adopts
 the manifests it holds again, as an announcer: with 20 such devices in a band L neighbourhood
 the other followers' deliveries went from 95 % (worst world 65 %) back to 100 %.
+
+## 11. A node that keeps asking
+
+ABUSE.md names the lever: a 50-byte WANT makes an announcer send a whole object. The simulator
+now has an attacker (`--attackers`, sim/README.md): a follower that asks its announcer for every
+object of the scenario, eight per WANT, about once a minute at random times, under its own node id
+or under a fresh made-up one each time. One attacker sends about 700 WANTs in 12 hours.
+
+**What it cost before.** Nothing that listeners noticed, and a great deal that the spectrum did.
+Fresh content goes before repetition, so every follower still got every object as fast as before.
+But each WANT after a pass brought the object back for another, so the announcer repeated the
+whole catalogue for as long as the attacker asked: in the band O neighbourhood 196,090 bulk frames
+in 12 hours instead of 7,800, in band L 464,968 instead of 18,837, 25 times the normal traffic. In
+the living network of §7.6 the announcer's airtime went from 0.3 % to 8 % in band O, the legal
+limit, and to 14 % in band L.
+
+**Repetition that does not help is repeated ever more slowly** (PROTOCOL.md §4). The first
+repetition of an object comes at once; each further one waits 10, 20, 40, then at most 80 minutes
+after the pass before, until nobody has asked for the object for twice that wait. The rule looks
+at the object, not at who asks, so made-up ids do not get around it. Three things were measured
+on the way:
+
+- *A fixed wait of 10 minutes before every repetition* changed nothing in band O, where a pass of
+  the catalogue takes longer than that anyway, and made honest band L deliveries 7 to 11 % slower.
+  Letting the first repetition come at once kept them as fast as before.
+- *The ceiling is a trade.* With no ceiling the attacker got 4 times the normal traffic, but a
+  follower that started listening during the attack waited up to 11 hours for the repetition it
+  needed, and in three of sixteen worlds one follower was still behind at the end. Ceilings of 20,
+  40 and 80 minutes left nobody behind and bounded the announcer's airtime under attack at 2.8,
+  1.6 and 0.9 %; 80 minutes it is.
+- *The attacker made the election churn.* In one world it tripled the role changes, and each new
+  announcer starts with an empty carousel history, so the backoff began again. Announcers yielded
+  to any announcer named in a report with a higher score, even one they could not hear; the
+  attacker's WANTs named its own announcer once a minute. Announcers now yield only to beacons
+  they hear themselves (PROTOCOL.md §5.2). In the nine scenarios of §9.3 without an attacker that
+  changed nothing.
+- *Made-up names inflated the election.* The number of distinct neighbours heard is the largest
+  term of a node's score, and every made-up id counted at once: an attacker using a fresh id for
+  each WANT raised the score of every node that heard it, and one band L world changed roles
+  27,335 times in 72 hours instead of 259. A neighbour now counts only from its second frame
+  (PROTOCOL.md §5.1); the role changes went back to those without an attacker.
+- *Renditions flooded too.* An attacker asking for the rendition of every programme got each one
+  made and sent, eight times the size of the codes, and the devices that needed them were late:
+  75.6 % arrived before their slot in band O. An announcer now serves a rendition only from twice
+  `T_render_ahead` before its programme's slot until the programme has played (PROTOCOL.md §1.2).
+
+With all of it, against one attacker (a WANT about once a minute, made-up ids unless noted), eight
+seeds each. "Before" is the design without these rules, except in the last three rows, where it is
+the design with the earlier rules but without the one that row is about:
+
+| Scenario | Normal | Attacked, before | Attacked, now |
+|---|---|---|---|
+| Band O neighbourhood, 12 h: bulk frames | 7,800 | 196,090 | 45,130 (five attackers: 45,161) |
+| Band L neighbourhood, 12 h: bulk frames | 18,975 | 464,968 | 56,127 (five attackers: 85,925) |
+| Living network, band O: announcer airtime | 0.3 % | 8.0 % | 0.9 % |
+| Living network, band L: announcer airtime | 0.3 % | 13.8 % | 1.0 % |
+| Living network, band L: bulletin median | 5.8 min | | 6.0 min |
+| Living network, band L: role changes, worst world | 294 | 27,335 | 294 |
+| Rendition flood, band O: frames, devices on time | 35,292, 100 % | 197,945, 75.6 % | 149,301, 100 % |
+| Rendition flood, band L: frames, devices on time | 76,032, 99.8 % | 332,484, 95.6 % | 209,909, 99.4 % |
+
+Every listener still gets everything, the announcer's airtime under attack is about three times
+normal instead of the legal limit, and the made-up names no longer move the election. Without
+an attacker, the nine scenarios of §9.3 changed against the design without these rules by
+between −5 and +11 % in median delivery time and between −12 and +7 % in bulk frames; the
+11 % is the two-cluster world of 20 nodes, the noisiest of the nine, and the rest moved by 5 %
+or less.
+What remains: with its own id an attacker still raised the role changes by a third to a half in
+two of eight band L worlds, probably through the score's term for unused airtime, which an
+announcer loses while it repeats; and a rendition flood still costs a cell several times what
+its devices need, within the window around each slot.
+
+One measurement was an artefact and is recorded so that it is not repeated: an attacker sending at
+a fixed period from time zero sent every WANT on a dwell boundary, where it jammed the first frame
+of each upload, and band L bulletins took 45 % longer. With random timing they took 6.0 minutes
+against 5.8 without an attacker. Jamming is a radio problem, not a protocol one (ABUSE.md).
