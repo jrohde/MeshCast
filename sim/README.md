@@ -65,3 +65,14 @@ uploads). Results and their interpretation are in `docs/FEASIBILITY.md` §7.
   wants, `MA` manifest announcement, `OC` object completed, and at the end `MISSING` for every
   object a follower lacks and `NOLEN` for every want whose length the wanter does not know.
 - `MESHCAST_DEBUG_WANTS=1` traces each announcer's want list.
+
+## Attackers
+
+`--attackers N` makes N followers flood the announcer they follow with WANTs for every object of
+the scenario, at random times averaging `--attack-period-s` (default 60); `--attack-spoof` gives
+every WANT a fresh made-up node id, and `--attack-renditions` asks for renditions too. The report
+adds the attackers' frames; compare bulk frames and the followers' latency with a run without
+them. What the protocol does about it is in `docs/ABUSE.md` and `docs/FEASIBILITY.md` §11. (A
+fixed period from time zero turned out to put every WANT on a dwell boundary, where it jammed the
+start of each upload; that is a jammer, not a request flood, and the timing is random for that
+reason.)

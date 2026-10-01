@@ -57,15 +57,36 @@ notices the limit exists.
   its own announcer's carousel, which removes the easiest amplification path and, incidentally,
   960 000 repair answers from a 200-node town.
 - **Content verification on completion**, so poisoned symbols cost airtime and nothing else.
+- **Repetition that does not help is repeated ever more slowly** (PROTOCOL.md §4). A WANT flood
+  brought every object back for another pass as often as it was asked for: one simulated
+  attacker, about 700 WANTs in 12 hours, made a band O cell carry 25 times its normal traffic and
+  its announcer transmit at the legal limit, although every listener still got everything on
+  time. Now the first repetition of an object comes at once and each further one waits 10, 20, 40
+  and at most 80 minutes. The rule looks at the object, not at who asks, so made-up ids do not
+  get around it (FEASIBILITY.md §11 has the numbers).
+- **Announcers yield only to announcers they hear.** Yielding to an announcer named in a report
+  let anyone who repeated such a report make announcers step down and come back; a WANT flood
+  tripled the role changes in one simulated world. Reports now only feed the colouring.
+- **Renditions only around their slot.** An announcer serves a rendition of a scheduled programme
+  only from twice `T_render_ahead` before its slot until it has played, so a rendition flood gets
+  at most what a listener of every channel at once would get.
+- **A name counts once it has been heard twice.** Node ids are not authenticated, and every
+  made-up id counted towards the score of each node that heard it: one node sending WANTs under
+  a fresh id each minute made one simulated election change roles 27,335 times in 72 hours. A
+  neighbour now counts only from its second frame, so each made-up name costs the attacker a
+  frame every time it is used.
 
 ## What is not fixed yet, in the order it should be
 
 1. **Per-neighbour request budgets.** The rule above, as a token bucket per peer, on WANT, NACK
-   and offers. This is the general answer and subsumes several rows of the table.
-2. **Evidence before belief.** A colour count is accepted only up to the number of distinct
-   announcers the node has heard itself; a score is trusted only as far as the beacon's own
-   carousel round counter shows the announcer is doing anything. Both are claims that cost
-   everyone, so both should need evidence.
+   and offers. The repetition backoff now bounds what repeated asks cost without needing to know
+   who asks, which is what made-up names require; a budget per neighbour would still bound first
+   passes of objects nobody else wants, for attackers that keep one name.
+2. **Evidence before belief, the rest.** Neighbour counts and reports now need evidence (above).
+   Still open: a colour count is accepted only up to the number of distinct announcers the node
+   has heard itself, and a score in a beacon is trusted only as far as the beacon's own carousel
+   round counter shows the announcer is doing anything. Both are claims that cost everyone, so
+   both should need evidence.
 3. **Renditions at the speed of listening.** A device cannot play faster than real time, so a
    node that asks for renditions of more audio per hour than an hour holds is not listening.
    An announcer serves each follower renditions at most at the rate its profile plays; this is

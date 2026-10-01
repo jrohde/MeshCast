@@ -126,7 +126,9 @@ programme as Opus, made from the codes by a node that can decode them.
   availability does. Stations and phones make renditions (a dongle uploads what its phone made);
   dongles never decode.
 - **An announcer serves a rendition like any object**, while a follower wants it, and never
-  wants one for itself. If it can make it, it does; otherwise it asks, in its own cell and in the
+  wants one for itself. It serves a rendition of a scheduled programme only from twice
+  `T_render_ahead` before its slot (to allow for clocks) until the programme has played: an ask
+  outside that window is not a listener's, and serving it is what a rendition flood asks for. If it can make it, it does; otherwise it asks, in its own cell and in the
   rendezvous, and a node that can make it offers and uploads it. Announcers do not upload, so a
   station that announces makes renditions for its own cell only; a cell whose announcer cannot
   make them relies on a follower that can, or on a neighbouring cell's.
@@ -329,7 +331,19 @@ everyone is done. Each object gets one full pass (`max_passes` = 1) and then lea
 unless a new WANT arrives after that pass: a follower that caught most of it repairs the rest
 with a NACK, one that caught little asks again. Three passes per object, the earlier draft, cost
 35 to 49 % more airtime in every scenario and bought no speed; the repair does the work of the
-repeated passes, aimed (FEASIBILITY.md §9.8). Manifests are repeated at most every `T_always`
+repeated passes, aimed (FEASIBILITY.md §9.8).
+
+**Repetition that does not help is repeated ever more slowly.** The first time an object is asked
+for again it is passed again at once; each further repetition waits longer after the pass before:
+`T_want_min`, then twice, four and eight times that (10, 20, 40 and 80 minutes at the draft), and
+never longer. When nobody asks for the object for twice its current wait after a pass, it has
+rested and starts over. A repeated pass reaches everyone who missed the last one at once, so
+honest followers, who ask at most every `T_want_min` and stop once they hold the object, hardly
+notice; a node that keeps asking for everything, under its own id or under made-up ones, gets
+one repetition per object every 80 minutes instead of one per minute. The rule looks only at the
+object, so it needs no identity. Its ceiling is a trade: a lower one bounds an attacker more
+tightly, but a follower who starts listening during an attack waits up to that long for its
+first repetition (ABUSE.md, FEASIBILITY.md §11). Manifests are repeated at most every `T_always`
 (draft 5 min) when nothing else is wanted. A carousel with nothing to send is silent; the
 announcer then only beacons. (The first simulator runs looped manifests forever at the full duty
 cycle, which wasted the budget and caused half-duplex losses during uploads.)
@@ -468,14 +482,17 @@ ESP-NOW and follower on sub-GHz).
 
 | Term | Weight | Source |
 |---|---|---|
-| distinct `node_id`s heard in the last hour | 4 per node, capped at 64 nodes | GOSSIP / BEACON reception |
+| distinct `node_id`s heard more than once in the last hour | 4 per node, capped at 64 nodes | GOSSIP / BEACON reception |
 | mains powered | +64 | hardware |
 | fraction of regulatory airtime budget unused | 0–64 | EtherDiscipline accounting |
 | objects in the carousel set the node can serve | 1 per object, capped at 32 | library |
 | has IP uplink | +16 | discovery |
 
 A station on a roof with an SX1302, mains and internet scores near the maximum; a battery dongle
-in a drawer scores low.
+in a drawer scores low. A node id counts only once it has been heard a second time: names are not
+authenticated in GOSSIP, and when every made-up name counted at once, one node sending WANTs
+under a fresh name each minute inflated the scores of everyone who heard it, and the election in
+one simulated world changed roles 27,335 times in 72 hours instead of 259 (FEASIBILITY.md §11).
 
 ### 5.2 States
 
@@ -514,9 +531,12 @@ persist and EtherFatsoen shares the channel between them.
   score exceeds its own by more than `H` (draft 10 % of the max) or if scores are within `H` and
   the other `announcer_id` is numerically lower. Two announcers that cannot hear each other but
   are both heard by a node in between are detected by that node's GOSSIP (`announcer_id` field
-  differs from the announcer's own id); an announcer that sees GOSSIP naming a different announcer
-  with a higher score yields. Convergence to one announcer per connected cell takes at most a few
-  beacon intervals.
+  differs from the announcer's own id). That report makes them colour themselves apart (§5.3);
+  it is not a reason to yield. An announcer yields only to a beacon it hears itself: it cannot
+  follow an announcer it cannot hear, and yielding on reports let any node that repeated such a
+  report make announcers step down and come back, over and over (ABUSE.md; FEASIBILITY.md §11).
+  Removing it changed nothing in any scenario without an attacker. Convergence to one announcer
+  per connected cell takes at most a few beacon intervals.
 - **Hysteresis and challenge**: a returning former announcer (or any newcomer) whose score
   exceeds the incumbent's by more than `H` for `challenge_beacons` consecutive beacons steps up
   after a short random wait; the incumbent hears the better beacon and yields. Near-equal nodes
@@ -621,6 +641,7 @@ arrives a few minutes later than it otherwise would. That is the entire user-vis
 | `rssi_hysteresis` | 6 dB | a follower switches announcer only for a clearly stronger one |
 | `near_rssi` | sensitivity + 17 dB | beacon strength that means "same cell" for the tie-break |
 | `max_passes` | 1 | carousel passes per object unless re-wanted |
+| repetition spacing | 0, then `T_want_min` × 1, 2, 4, 8 | wait before an object is passed again; the level climbs with each repetition and resets after a rest of twice the wait |
 | `T_always` | 5 min | manifest repetition when idle |
 | `T_nack_stall` | 60 s | no progress on an ≥ 80 % object before a NACK |
 | `T_want_min` | 10 min | minimum interval between a follower's WANT frames |

@@ -33,6 +33,8 @@ pub struct Metrics {
     pub grants_to_announcers: u64,
     /// Bulk frames of renditions (PROTOCOL.md §1.2).
     pub bulk_sent_rendition: u64,
+    /// WANT frames sent by attackers.
+    pub attack_frames: u64,
     /// (node index, object) -> completion time.
     pub completions: BTreeMap<(usize, ShortId), Millis>,
     pub role_events: Vec<RoleEvent>,

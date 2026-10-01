@@ -24,6 +24,7 @@ fn spec(bulk: BulkPreset, positions: Vec<(f64, f64)>, sources: Vec<usize>, stati
         stations_at: Some(stations),
         sources_at: Some(sources),
         renditions: None,
+        attack: None,
     }
 }
 
@@ -203,4 +204,31 @@ fn small_listeners_get_renditions_before_their_slot() {
             assert_eq!(b.engine.metrics.bulk_sent_rendition, 0, "renditions sent where nobody asked");
         }
     }
+}
+
+#[test]
+fn a_want_flood_is_bounded() {
+    // One band O cell and a follower that asks for every object once a minute, each time under a
+    // made-up node id. Fresh content still reaches everyone, and repetition backs off per object
+    // whoever asks, so the cell carries a bounded multiple of its normal traffic instead of
+    // running at the duty-cycle limit (25 times the normal traffic before the backoff).
+    let positions: Vec<(f64, f64)> = (0..12).map(|i| (150.0 * (i % 4) as f64, 150.0 * (i / 4) as f64)).collect();
+    let mut frames = Vec::new();
+    for attack in [false, true] {
+        let mut s = spec(BulkPreset::GfskO, positions.clone(), vec![0], vec![5], 6.0);
+        s.tracks = 6;
+        s.mix = meshcast_sim::scenario::parse_mix("snac-music:42,snac-speech:22").unwrap();
+        if attack {
+            s.attack = Some(meshcast_sim::scenario::AttackSpec { attackers: 1, period_s: 60.0, spoof: true, renditions: false });
+        }
+        let mut b = build(&s, Params::default());
+        b.engine.run((s.hours * 3.6e6) as u64, 600_000);
+        for (id, t) in &b.tracks {
+            for &f in &t.followers {
+                assert!(b.engine.metrics.completions.contains_key(&(f, *id)), "node {f} missing {id:?} (attack {attack})");
+            }
+        }
+        frames.push(b.engine.metrics.bulk_sent);
+    }
+    assert!(frames[1] <= 8 * frames[0], "a WANT flood made the cell carry {} frames against {} without it", frames[1], frames[0]);
 }
