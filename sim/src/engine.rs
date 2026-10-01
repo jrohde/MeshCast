@@ -20,6 +20,8 @@ pub struct SimNode {
     pub node: Node,
     pub alive: bool,
     pub mains: bool,
+    /// An attacker that only sends what it injects: its own protocol never reaches the air.
+    pub mute: bool,
     wake_seq: u64,
     next_wake: Millis,
     /// Own transmissions per carrier (start, end), recent only.
@@ -62,13 +64,19 @@ pub struct Attacker {
     pub period_ms: Millis,
     /// Send each WANT under a fresh made-up node id instead of its own.
     pub spoof: bool,
+    /// Instead of asking, pose as an announcer that has everything and serves nothing.
+    pub lure: bool,
+    /// A lure claims the maximum score and full capability.
+    pub claim_max: bool,
+    /// A lure alternates its beacon and its HAVE, one frame per attempt.
+    beaconed: bool,
     cursor: usize,
     rng: Rng,
 }
 
 impl Attacker {
-    pub fn new(node: usize, period_ms: Millis, spoof: bool) -> Self {
-        Attacker { node, period_ms, spoof, cursor: 0, rng: Rng::new(0xA77A_C0DE ^ node as u64) }
+    pub fn new(node: usize, period_ms: Millis, spoof: bool, lure: bool, claim_max: bool) -> Self {
+        Attacker { node, period_ms, spoof, lure, claim_max, beaconed: false, cursor: 0, rng: Rng::new(0xA77A_C0DE ^ node as u64) }
     }
 }
 
@@ -137,6 +145,7 @@ impl Engine {
                 node,
                 alive: true,
                 mains,
+                mute: false,
                 wake_seq: 0,
                 next_wake: Millis::MAX,
                 own_tx: vec![VecDeque::new(); phys.len()],
@@ -178,6 +187,10 @@ impl Engine {
         if !self.nodes[i].alive || self.attack_ids.is_empty() {
             return;
         }
+        if self.attackers[k].lure {
+            self.lure(k);
+            return;
+        }
         let a = &mut self.attackers[k];
         let n = self.attack_ids.len().min(meshcast_core::frame::MAX_WANT);
         let want: Vec<_> = (0..n).map(|j| (self.attack_ids[(a.cursor + j) % self.attack_ids.len()], NodeId::NONE, 0u8)).collect();
@@ -195,6 +208,39 @@ impl Engine {
         let airtime = self.phys[carrier].to_core().airtime_ms(bytes.len());
         self.metrics.attack_frames += 1;
         self.tx_start(i, carrier, channel, bytes, airtime, FrameType::Gossip, None);
+    }
+
+    /// In the rendezvous, where every follower listens, beacon as an announcer and list objects
+    /// in HAVE; never carousel anything.
+    fn lure(&mut self, k: usize) {
+        let now = self.now;
+        let i = self.attackers[k].node;
+        let carrier = self.phys.iter().position(|p| p.kind != meshcast_core::frame::CarrierKind::LoraControl).unwrap_or(0);
+        // Where every follower listens: in the rendezvous on a hopping carrier, at any time on one
+        // that does not hop.
+        if self.phys[carrier].channels.len() > 1 && !self.nodes[i].node.in_meeting(carrier, now) {
+            return;
+        }
+        let a = &mut self.attackers[k];
+        let n = self.attack_ids.len().min(meshcast_core::frame::MAX_GOSSIP_IDS);
+        let have: Vec<_> = (0..n).map(|j| self.attack_ids[(a.cursor + j) % self.attack_ids.len()]).collect();
+        let beacon = !a.beaconed;
+        let (score, caps) = if a.claim_max { (meshcast_core::params::SCORE_MAX, meshcast_core::frame::CAP_MAINS | meshcast_core::frame::CAP_IP) } else { (0, 0) };
+        a.beaconed = beacon;
+        if !beacon {
+            a.cursor = (a.cursor + n) % self.attack_ids.len();
+        }
+        let node = &self.nodes[i].node;
+        let id = node.id();
+        let channel = node.channel(carrier, now);
+        let kind = self.phys[carrier].kind;
+        let b = meshcast_core::frame::Beacon { carrier: kind, announcer: id, score, caps, next_ms: 60_000, round: 0, utc: 0, time_quality: 0, colour: 0, colours: 1, upload_phases: 1, occupancy: [0; 4] };
+        let g = meshcast_core::frame::Gossip { node: id, announcer: id, announcer_colour: 0, announcer_colours: 1, heard: Vec::new(), have, want: Vec::new() };
+        let (f, ft) = if beacon { (Frame::Beacon(b), FrameType::Beacon) } else { (Frame::Gossip(g), FrameType::Gossip) };
+        let bytes = f.encode();
+        let airtime = self.phys[carrier].to_core().airtime_ms(bytes.len());
+        self.metrics.attack_frames += 1;
+        self.tx_start(i, carrier, channel, bytes, airtime, ft, None);
     }
 
     pub fn schedule_kill(&mut self, node: usize, t: Millis) {
@@ -362,6 +408,8 @@ impl Engine {
     fn apply(&mut self, i: usize, actions: Vec<Action>) {
         for a in actions {
             match a {
+                Action::Tx { .. } if self.nodes[i].mute => {}
+                Action::Role { .. } if self.nodes[i].mute => {}
                 Action::Tx { carrier, channel, bytes, airtime_ms, class: _, frame_type, upload_to } => self.tx_start(i, carrier, channel, bytes, airtime_ms, frame_type, upload_to),
                 Action::ObjectComplete { id, now } => {
                     if self.trace_grants {
@@ -485,6 +533,22 @@ impl Engine {
         if trace {
             if let Ok(Frame::Gossip(g)) = Frame::decode(&bytes) {
                 eprintln!("t={} GOSSIP from {} ann={:?} have={:?} want={:?} heard={:?}", now, from, g.announcer, g.have, g.want, g.heard);
+            }
+        }
+        if std::env::var("MESHCAST_TRACE_ANNOUNCE").is_ok() {
+            if let Ok(Frame::ManifestAnnounce(m)) = Frame::decode(&bytes) {
+                let heard: Vec<String> = reach.iter().filter(|(j, rx)| self.nodes[*j].alive && *rx >= phy.sensitivity_dbm && self.nodes[*j].node.channel(carrier, now) == channel).map(|(j, _)| self.nodes[*j].node.id().0.to_string()).collect();
+                println!("ANN {} {} carrier {} entries {} -> {}", now, self.nodes[from].node.id().0, carrier, m.entries.len(), heard.join(" "));
+            }
+        }
+        let trace_bcn = std::env::var("MESHCAST_TRACE_BEACONS").is_ok() && matches!(Frame::decode(&bytes), Ok(Frame::Beacon(_)));
+        if trace_bcn {
+            if let Ok(Frame::Beacon(b)) = Frame::decode(&bytes) {
+                let heard: Vec<String> = reach.iter().filter(|(j, rx)| self.nodes[*j].alive && *rx >= phy.sensitivity_dbm).map(|(j, rx)| {
+                    let jch = self.nodes[*j].node.channel(carrier, now);
+                    format!("{}{}:{:.0}/{}", self.nodes[*j].node.id().0, if jch == channel { "" } else { "x" }, rx, self.nodes[*j].node.score())
+                }).collect();
+                println!("BCN {} {} score {} ch {} colour {}/{} meet {} -> {}", now, self.nodes[from].node.id().0, b.score, channel, b.colour, b.colours, self.nodes[from].node.in_meeting(carrier, now), heard.join(" "));
             }
         }
         for &(j, rx) in &reach {

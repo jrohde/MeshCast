@@ -69,6 +69,10 @@ pub struct AttackSpec {
     pub spoof: bool,
     /// Ask for renditions as well as codes.
     pub renditions: bool,
+    /// Pose as an announcer that has everything and serves nothing.
+    pub lure: bool,
+    /// A lure claims the maximum score and full capability (otherwise nothing).
+    pub claim_max: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -298,7 +302,9 @@ pub fn build(spec: &ScenarioSpec, params: Params) -> Built {
         for _ in 0..a.attackers.min(pool.len()) {
             let k = ra.below(pool.len() as u64) as usize;
             let node = pool.swap_remove(k);
-            engine.attackers.push(crate::engine::Attacker::new(node, (a.period_s * 1000.0) as u64, a.spoof));
+            engine.attackers.push(crate::engine::Attacker::new(node, (a.period_s * 1000.0) as u64, a.spoof, a.lure, a.claim_max));
+            // A lure is nothing but its lies: it never serves, so its own protocol stays silent.
+            engine.nodes[node].mute = a.lure;
         }
         let mut ids: Vec<ShortId> = tracks.keys().copied().collect();
         if a.renditions {

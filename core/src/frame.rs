@@ -62,12 +62,20 @@ pub enum FrameType {
     Nack = 5,
 }
 
+/// Beacon capability bit: the announcer is mains powered.
+pub const CAP_MAINS: u8 = 0b10;
+/// Beacon capability bit: the announcer has an IP uplink.
+pub const CAP_IP: u8 = 0b01;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Beacon {
     /// Which bulk carrier kind this announcer runs a carousel on.
     pub carrier: CarrierKind,
     pub announcer: NodeId,
     pub score: u16,
+    /// What the announcer is, as opposed to what it happens to experience (PROTOCOL.md §5.1):
+    /// `CAP_MAINS | CAP_IP`. Compared as a number, so mains power outranks an uplink.
+    pub caps: u8,
     /// Milliseconds until the next beacon from this announcer on this carrier.
     pub next_ms: u16,
     /// Carousel round counter.
@@ -196,7 +204,7 @@ impl Frame {
         match self {
             Frame::Beacon(b) => {
                 out.push((VERSION << 4) | FrameType::Beacon as u8);
-                out.push(b.carrier as u8 & 0x07);
+                out.push((b.carrier as u8 & 0x07) | (b.caps & 0x03) << 3);
                 out.extend_from_slice(&b.announcer.0.to_le_bytes());
                 out.extend_from_slice(&b.score.to_le_bytes());
                 out.extend_from_slice(&b.next_ms.to_le_bytes());
@@ -296,6 +304,7 @@ impl Frame {
         let frame = match body[0] & 0x0F {
             1 => {
                 let carrier = CarrierKind::from_u8(flags & 0x07).ok_or(DecodeError::BadValue)?;
+                let caps = (flags >> 3) & 0x03;
                 let announcer = NodeId(c.u32()?);
                 let score = c.u16()?;
                 let next_ms = c.u16()?;
@@ -308,7 +317,7 @@ impl Frame {
                 let occ = c.bytes(4)?;
                 let mut occupancy = [0u8; 4];
                 occupancy.copy_from_slice(occ);
-                Frame::Beacon(Beacon { carrier, announcer, score, next_ms, round, utc, time_quality, colour, colours, upload_phases, occupancy })
+                Frame::Beacon(Beacon { carrier, announcer, score, caps, next_ms, round, utc, time_quality, colour, colours, upload_phases, occupancy })
             }
             2 => {
                 let object = c.short()?;
@@ -451,6 +460,7 @@ mod tests {
                 carrier: CarrierKind::GfskBulk,
                 announcer: NodeId(42),
                 score: 300,
+                caps: CAP_MAINS,
                 next_ms: 60000,
                 round: 7,
                 utc: 1_700_000_000,
@@ -478,7 +488,7 @@ mod tests {
 
     #[test]
     fn sizes() {
-        let b = Frame::Beacon(Beacon { carrier: CarrierKind::GfskBulk, announcer: NodeId(1), score: 0, next_ms: 0, round: 0, utc: 0, time_quality: 0, colour: 0, colours: 1, upload_phases: 1, occupancy: [0; 4] });
+        let b = Frame::Beacon(Beacon { carrier: CarrierKind::GfskBulk, announcer: NodeId(1), score: 0, caps: 0, next_ms: 0, round: 0, utc: 0, time_quality: 0, colour: 0, colours: 1, upload_phases: 1, occupancy: [0; 4] });
         assert_eq!(b.encode().len(), 30);
         let k = Frame::Bulk(Bulk { object: ShortId([0; 8]), block: 0, esi: 0, len: 1, payload: vec![] });
         assert_eq!(k.encode().len(), 220);

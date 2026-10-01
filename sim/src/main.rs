@@ -80,6 +80,13 @@ struct Common {
     /// Attackers ask for renditions too.
     #[arg(long, default_value_t = false)]
     attack_renditions: bool,
+    /// Attackers pose as announcers in the rendezvous that have every object, and serve nothing:
+    /// a lure for followers on an excursion (docs/ABUSE.md).
+    #[arg(long, default_value_t = false)]
+    attack_lure: bool,
+    /// Lures claim the maximum score and full capability instead of nothing.
+    #[arg(long, default_value_t = false)]
+    attack_claim_max: bool,
 }
 
 impl Common {
@@ -90,7 +97,7 @@ impl Common {
     }
 
     fn attack(&self) -> Option<scenario::AttackSpec> {
-        (self.attackers > 0).then(|| scenario::AttackSpec { attackers: self.attackers, period_s: self.attack_period_s, spoof: self.attack_spoof, renditions: self.attack_renditions })
+        (self.attackers > 0).then_some(scenario::AttackSpec { attackers: self.attackers, period_s: self.attack_period_s, spoof: self.attack_spoof, renditions: self.attack_renditions, lure: self.attack_lure, claim_max: self.attack_claim_max })
     }
 
     fn mix_items(&self) -> Vec<scenario::MixItem> {
@@ -207,6 +214,8 @@ struct Report {
     bulk_delivered: u64,
     announcers_final: Vec<u32>,
     role_events: usize,
+    challenges: u32,
+    excursions: u64,
     airtime_share: Vec<(usize, Vec<f64>)>,
     occupancy_p50_bulk: f64,
     occupancy_max_bulk: f64,
@@ -489,7 +498,7 @@ fn run(spec: ScenarioSpec, common: &Common, failover: Option<(f64, f64)>) {
 }
 
 fn simulate(spec: ScenarioSpec, verbose: bool, failover: Option<(f64, f64)>) -> (Report, std::time::Duration) {
-    let params = Params::default();
+    let params = params();
     let mut built = build(&spec, params);
     built.engine.verbose = verbose;
     let until: Millis = (spec.hours * 3.6e6) as Millis;
@@ -519,7 +528,7 @@ fn simulate(spec: ScenarioSpec, verbose: bool, failover: Option<(f64, f64)>) -> 
                     let n = &eng.nodes[f].node;
                     let ann = n.announcer_of(bulk_c);
                     let aj = (ann.0 as usize).wrapping_sub(1);
-                    eprintln!("MISSING node {} obj {:?} alive {} progress {:?} wants {} follows {:?} ann_has {:?}", f, id, eng.nodes[f].alive, n.object_progress(id), n.wants_object(id), ann, eng.nodes.get(aj).map(|a| a.node.holds(id)));
+                    eprintln!("MISSING node {} obj {:?} alive {} progress {:?} wants {} follows {:?} ann_has {:?} view {:?}", f, id, eng.nodes[f].alive, n.object_progress(id), n.wants_object(id), ann, eng.nodes.get(aj).map(|a| a.node.holds(id)), n.excursion_view(id));
                 }
             }
         }
@@ -607,6 +616,11 @@ fn simulate(spec: ScenarioSpec, verbose: bool, failover: Option<(f64, f64)>) -> 
     let n_ann = announcers_final.len().max(1) as f64;
     let dbph = delivered_bytes / hours / n_ann;
 
+    if std::env::var("MESHCAST_TRACE_ROLES").is_ok() {
+        for e in &m.role_events {
+            println!("ROLE {} {} {} {} {}", e.t_ms, e.node, e.carrier, e.role, e.announcer);
+        }
+    }
     // Failover analysis.
     let fo = fo_killed.map(|(victim, kill_h, revive_h)| {
         let kill_ms = (kill_h * 3.6e6) as Millis;
@@ -693,6 +707,8 @@ fn simulate(spec: ScenarioSpec, verbose: bool, failover: Option<(f64, f64)>) -> 
         bulk_delivered: m.bulk_delivered,
         announcers_final,
         role_events: m.role_events.len(),
+        challenges: eng.nodes.iter().map(|n| n.node.challenges()).sum(),
+        excursions: eng.nodes.iter().map(|n| n.node.stats.excursions).sum(),
         airtime_share,
         by_kind: kinds,
         occupancy_p50_bulk: occ_p50,
@@ -726,6 +742,9 @@ struct SeedLine {
     attack_frames: u64,
     carousel_first: u64,
     carousel_repeat: u64,
+    role_events: usize,
+    challenges: u32,
+    excursions: u64,
 }
 
 /// Several seeds of one scenario: the spread is the result, not any single run.
@@ -733,6 +752,16 @@ struct SeedLine {
 struct Ensemble {
     spec: ScenarioSpec,
     seeds: Vec<SeedLine>,
+}
+
+/// Protocol parameters: the defaults, with experiment overrides from the environment
+/// (MESHCAST_T_EXCURSION_MIN).
+fn params() -> Params {
+    let mut p = Params::default();
+    if let Some(m) = std::env::var("MESHCAST_T_EXCURSION_MIN").ok().and_then(|v| v.parse::<u64>().ok()) {
+        p.t_excursion_ms = m * 60_000;
+    }
+    p
 }
 
 fn delivered(r: &Report) -> f64 {
@@ -747,7 +776,7 @@ impl Ensemble {
             spec: reports[0].spec.clone(),
             seeds: reports
                 .iter()
-                .map(|r| SeedLine { seed: r.spec.seed, delivered: delivered(r), bulk_sent: r.bulk_sent, by_kind: by_kind(&r.objects), renditions: r.renditions.clone(), attack_frames: r.attack_frames, carousel_first: r.carousel_first, carousel_repeat: r.carousel_repeat })
+                .map(|r| SeedLine { seed: r.spec.seed, delivered: delivered(r), bulk_sent: r.bulk_sent, by_kind: by_kind(&r.objects), renditions: r.renditions.clone(), attack_frames: r.attack_frames, carousel_first: r.carousel_first, carousel_repeat: r.carousel_repeat, role_events: r.role_events, challenges: r.challenges, excursions: r.excursions })
                 .collect(),
         }
     }
@@ -772,6 +801,10 @@ impl Ensemble {
         let first: Vec<f64> = self.seeds.iter().map(|s| s.carousel_first as f64).collect();
         let rep: Vec<f64> = self.seeds.iter().map(|s| s.carousel_repeat as f64).collect();
         println!("  carousel       first passes mean {:.0}, repeated passes mean {:.0} (max {:.0})", mean(&first), mean(&rep), max(&rep));
+        let roles: Vec<f64> = self.seeds.iter().map(|s| s.role_events as f64).collect();
+        let ch: Vec<f64> = self.seeds.iter().map(|s| s.challenges as f64).collect();
+        let ex: Vec<f64> = self.seeds.iter().map(|s| s.excursions as f64).collect();
+        println!("  roles          role events mean {:.0} (max {:.0}), challenges mean {:.1} (max {:.0}), excursions mean {:.1} (max {:.0})", mean(&roles), max(&roles), mean(&ch), max(&ch), mean(&ex), max(&ex));
         for (i, k) in self.seeds[0].by_kind.iter().enumerate() {
             let c: Vec<f64> = self.seeds.iter().map(|s| s.by_kind[i].complete * 100.0).collect();
             let p50: Vec<f64> = self.seeds.iter().filter_map(|s| s.by_kind[i].p50_mean_h).map(|h| h * 60.0).collect();
@@ -800,7 +833,7 @@ fn print_report(r: &Report, wall: std::time::Duration) {
     }
     println!("\nframes: sent {} delivered {} collided {} half-duplex {} | bulk sent {} delivered {}",
         r.frames_sent, r.frames_delivered, r.frames_collided, r.frames_half_duplex, r.bulk_sent, r.bulk_delivered);
-    println!("announcers at end: {:?} ({} role events)", r.announcers_final, r.role_events);
+    println!("announcers at end: {:?} ({} role events, {} challenges, {} excursions)", r.announcers_final, r.role_events, r.challenges, r.excursions);
     println!("collisions by frame type [beacon,bulk,gossip,announce,nack]: meeting dwell {:?}, other {:?}", &r.collided_meeting[1..], &r.collided_other[1..]);
     println!("bulk sent by [others, announcers]: {:?}; bulk collisions [sender other/announcer][interferer other/announcer]: {:?}; upload-upload same object {} / other object {}", r.bulk_sent_by, r.bulk_collision_kinds, r.upload_same, r.upload_other);
     println!("bulk-channel occupancy at nodes: p50 {:.1} %, max {:.1} %", r.occupancy_p50_bulk, r.occupancy_max_bulk);
@@ -881,7 +914,7 @@ fn run_dynamics(nodes: usize, area_km2: f64, stations: usize, channels: usize, f
         renditions: common.renditions(),
         attack: common.attack(),
     };
-    let params = Params::default();
+    let params = params();
     let mut built = build(&spec, params);
     built.engine.verbose = common.verbose;
     let mut rng = Rng::new(common.seed ^ 0xD1);
@@ -1155,7 +1188,27 @@ fn run_dynamics(nodes: usize, area_km2: f64, stations: usize, channels: usize, f
     }
     println!("bulk frames received by uninterested nodes: {:.1} % of all bulk receptions", report.wasted_bulk_fraction * 100.0);
     println!("orphaned objects per node at the end (no manifest references them): {:.1}", orphans);
-    println!("uploads {}, announcers {}, role events {}", uploads, announcers_final, m.role_events.len());
+    {
+        // The cold start: how many announcers at a few moments after everyone switched on at once,
+        // and how many role changes in the first hour against the rest.
+        let bulk_c = eng.phys.iter().position(|p| p.kind != CarrierKind::LoraControl).unwrap_or(1);
+        let at = |t: Millis| {
+            let mut cur: BTreeMap<u32, bool> = BTreeMap::new();
+            for e in eng.metrics.role_events.iter().filter(|e| e.carrier == bulk_c && e.t_ms <= t) {
+                cur.insert(e.node, e.role == "Announcer");
+            }
+            cur.values().filter(|&&a| a).count()
+        };
+        if std::env::var("MESHCAST_TRACE_ROLES").is_ok() {
+            for e in &eng.metrics.role_events {
+                println!("ROLE {} {} {} {} {}", e.t_ms, e.node, e.carrier, e.role, e.announcer);
+            }
+        }
+        let first = eng.metrics.role_events.iter().filter(|e| e.t_ms < 3_600_000).count();
+        println!("cold start: announcers at 5/10/20/30/60 min: {}/{}/{}/{}/{}; role events in the first hour {}, after it {}",
+            at(300_000), at(600_000), at(1_200_000), at(1_800_000), at(3_600_000), first, eng.metrics.role_events.len() - first);
+    }
+    println!("uploads {}, announcers {}, role events {}, challenges {}, excursions {}", uploads, announcers_final, m.role_events.len(), eng.nodes.iter().map(|n| n.node.challenges()).sum::<u32>(), eng.nodes.iter().map(|n| n.node.stats.excursions).sum::<u64>());
     let sum = |f: fn(&meshcast_core::node::Stats) -> u64| eng.nodes.iter().map(|n| f(&n.node.stats)).sum::<u64>();
     println!("  of the uploads, repair answers {}; grants given {}, lapsed {}", sum(|s| s.repairs_started), sum(|s| s.grants_given), sum(|s| s.grants_lapsed));
     {

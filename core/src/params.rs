@@ -18,7 +18,7 @@ pub struct ElectionParams {
 
 impl Default for ElectionParams {
     fn default() -> Self {
-        ElectionParams { t_beacon_ms: 60_000, n_miss: 3, t_base_ms: 120_000, t_jitter_ms: 20_000, hysteresis: SCORE_MAX / 10, rssi_hysteresis_db: 6, challenge_beacons: 3 }
+        ElectionParams { t_beacon_ms: 60_000, n_miss: 3, t_base_ms: 60_000, t_jitter_ms: 10_000, hysteresis: SCORE_MAX / 10, rssi_hysteresis_db: 6, challenge_beacons: 3 }
     }
 }
 
@@ -129,6 +129,9 @@ pub struct Params {
     pub t_grant_ms: Millis,
     /// Holders answer an open ask with an offer after a random delay up to this.
     pub t_offer_ms: Millis,
+    /// A follower whose want has brought no symbol for this long follows, until it has the
+    /// object, another announcer it heard offering it (PROTOCOL.md §4, excursions).
+    pub t_excursion_ms: Millis,
 }
 
 impl Default for Params {
@@ -159,6 +162,7 @@ impl Default for Params {
             t_report_min_ms: 60_000,
             t_grant_ms: 600_000,
             t_offer_ms: 3_000,
+            t_excursion_ms: 2_400_000,
         }
     }
 }
