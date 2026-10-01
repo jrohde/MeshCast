@@ -51,9 +51,31 @@ enum Ev {
     TxEnd(u64),
     Kill(usize),
     Revive(usize),
+    Attack(usize),
+}
+
+/// A node that asks for more than it listens to (docs/ABUSE.md): every `period_ms` it sends a
+/// WANT, addressed to the announcer it follows, for the next objects of `ids` in turn.
+#[derive(Clone, Debug)]
+pub struct Attacker {
+    pub node: usize,
+    pub period_ms: Millis,
+    /// Send each WANT under a fresh made-up node id instead of its own.
+    pub spoof: bool,
+    cursor: usize,
+    rng: Rng,
+}
+
+impl Attacker {
+    pub fn new(node: usize, period_ms: Millis, spoof: bool) -> Self {
+        Attacker { node, period_ms, spoof, cursor: 0, rng: Rng::new(0xA77A_C0DE ^ node as u64) }
+    }
 }
 
 pub struct Engine {
+    /// Attackers, and the objects they ask for.
+    pub attackers: Vec<Attacker>,
+    pub attack_ids: Vec<meshcast_core::ids::ShortId>,
     /// Rendition objects, so their frames can be counted apart.
     pub rendition_ids: std::collections::HashSet<meshcast_core::ids::ShortId>,
     pub nodes: Vec<SimNode>,
@@ -124,7 +146,7 @@ impl Engine {
         }
         let mut metrics = Metrics::default();
         metrics.per_node_bulk = vec![(0, 0); n];
-        let mut e = Engine { rendition_ids: Default::default(), nodes, phys, heap: BinaryHeap::new(), seq: 0, tx_seq: 0, loss, reach, recent: HashMap::new(), txs: HashMap::new(), now: 0, metrics, verbose: false, trace_grants: std::env::var("MESHCAST_TRACE_GRANTS").is_ok(), next_sample: 0 };
+        let mut e = Engine { attackers: Vec::new(), attack_ids: Vec::new(), rendition_ids: Default::default(), nodes, phys, heap: BinaryHeap::new(), seq: 0, tx_seq: 0, loss, reach, recent: HashMap::new(), txs: HashMap::new(), now: 0, metrics, verbose: false, trace_grants: std::env::var("MESHCAST_TRACE_GRANTS").is_ok(), next_sample: 0 };
         for i in 0..n {
             e.schedule_wake(i, 1);
         }
@@ -134,6 +156,45 @@ impl Engine {
     fn push(&mut self, t: Millis, ev: Ev) {
         self.seq += 1;
         self.heap.push(Reverse((t, self.seq, ev)));
+    }
+
+    /// Start the attackers: each sends its first WANT after one period.
+    pub fn start_attacks(&mut self) {
+        for k in 0..self.attackers.len() {
+            let period = self.attackers[k].period_ms.max(2);
+            let t = self.now + self.attackers[k].rng.below(period);
+            self.push(t, Ev::Attack(k));
+        }
+    }
+
+    fn attack(&mut self, k: usize) {
+        let now = self.now;
+        let a = &mut self.attackers[k];
+        let (i, period, spoof) = (a.node, a.period_ms, a.spoof);
+        // Random timing, on average once a period: a WANT flood, not a jammer aimed at dwell
+        // starts (which is what a fixed period from zero turned out to be).
+        let next = now + period / 2 + a.rng.below(period.max(2));
+        self.push(next, Ev::Attack(k));
+        if !self.nodes[i].alive || self.attack_ids.is_empty() {
+            return;
+        }
+        let a = &mut self.attackers[k];
+        let n = self.attack_ids.len().min(meshcast_core::frame::MAX_WANT);
+        let want: Vec<_> = (0..n).map(|j| (self.attack_ids[(a.cursor + j) % self.attack_ids.len()], NodeId::NONE, 0u8)).collect();
+        a.cursor = (a.cursor + n) % self.attack_ids.len();
+        let carrier = self.phys.iter().position(|p| p.kind != meshcast_core::frame::CarrierKind::LoraControl).unwrap_or(0);
+        let node = &self.nodes[i].node;
+        let announcer = node.announcer_of(carrier);
+        if announcer.is_none() {
+            return;
+        }
+        let id = if spoof { NodeId(0x8000_0000 | (self.tx_seq as u32 & 0x7fff_ffff)) } else { node.id() };
+        let g = meshcast_core::frame::Gossip { node: id, announcer, announcer_colour: 0, announcer_colours: 1, heard: Vec::new(), have: Vec::new(), want };
+        let bytes = Frame::Gossip(g).encode();
+        let channel = node.channel(carrier, now);
+        let airtime = self.phys[carrier].to_core().airtime_ms(bytes.len());
+        self.metrics.attack_frames += 1;
+        self.tx_start(i, carrier, channel, bytes, airtime, FrameType::Gossip, None);
     }
 
     pub fn schedule_kill(&mut self, node: usize, t: Millis) {
@@ -205,6 +266,7 @@ impl Engine {
                     self.nodes[i].alive = false;
                     self.nodes[i].next_wake = Millis::MAX;
                 }
+                Ev::Attack(k) => self.attack(k),
                 Ev::Revive(i) => {
                     self.nodes[i].alive = true;
                     self.nodes[i].next_wake = Millis::MAX;
@@ -392,11 +454,12 @@ impl Engine {
             match Frame::decode(&bytes) {
                 Ok(Frame::Gossip(g)) if g.announcer == g.node => {
                     let meet = self.nodes[from].node.in_meeting(carrier, now);
+                    eprintln!("GS {} {} want={} have={} meet={} wants_len={}", now, from, g.want.len(), g.have.len(), meet, self.nodes[from].node.wants_len());
                     for (o, h, p) in &g.want {
                         if !h.is_none() {
                             eprintln!("GT {} {} {} {:?} {} meet={}", now, from, h.0 - 1, o, p, meet);
                         } else {
-                            eprintln!("GA {} {} {:?} meet={} ch={}", now, from, o, meet, channel);
+                            eprintln!("GA {} {} {:?} meet={} ch={} wants={}", now, from, o, meet, channel, self.nodes[from].node.wants_len());
                         }
                     }
                 }
@@ -407,6 +470,9 @@ impl Engine {
                     for o in &g.have {
                         eprintln!("OF {} {} {:?} meet={} ch={}", now, from, o, self.nodes[from].node.in_meeting(carrier, now), channel);
                     }
+                }
+                Ok(Frame::Bulk(b)) if upload_to.is_none() && b.esi == 0 && self.nodes[from].node.role(carrier) == meshcast_core::node::Role::Announcer => {
+                    eprintln!("CB {} {} {:?} block {} len {}", now, from, b.object, b.block, b.len);
                 }
                 Ok(Frame::Bulk(b)) if upload_to.is_some() => {
                     let a = upload_to.unwrap();

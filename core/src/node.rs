@@ -121,6 +121,10 @@ pub struct Stats {
     pub grants_received: u64,
     /// Renditions this node made on demand.
     pub renditions_made: u64,
+    /// Rendition asks refused because the programme is not about to play.
+    pub renditions_refused: u64,
+    /// Carousel symbol frames: [first pass, repeated passes].
+    pub carousel_frames: [u64; 2],
     /// Repair answers lined up; most are cancelled by hearing another holder answer first.
     pub repairs_queued: u64,
     pub manifests_adopted: u64,
@@ -149,6 +153,9 @@ struct Neighbor {
     colour: u8,
     /// Upload phases last announced (announcers only): how its listening time is divided.
     upload_phases: u8,
+    /// Frames heard from it while it has been in the table: a node heard once may be a name
+    /// someone made up (ABUSE.md), so it counts towards our score only from the second.
+    heard_count: u16,
     haves: BTreeSet<ShortId>,
 }
 
@@ -325,7 +332,7 @@ impl Node {
     pub fn new(cfg: NodeConfig, now: Millis) -> Self {
         let discipline = Accounting::new(cfg.profile, &cfg.rule_choice);
         let ctrl = cfg.carriers.iter().position(|c| c.kind == CarrierKind::LoraControl).unwrap_or(0);
-        let cp = CarouselParams { max_passes: cfg.params.max_passes, t_always_ms: cfg.params.t_always_ms, want_ttl_ms: cfg.params.want_ttl_ms };
+        let cp = CarouselParams { max_passes: cfg.params.max_passes, t_always_ms: cfg.params.t_always_ms, want_ttl_ms: cfg.params.want_ttl_ms, t_repass_ms: cfg.params.t_want_min_ms };
         let mut carriers = Vec::with_capacity(cfg.carriers.len());
         for c in &cfg.carriers {
             let bulk = c.kind.is_bulk();
@@ -392,7 +399,7 @@ impl Node {
     }
 
     fn carousel_params(&self) -> CarouselParams {
-        CarouselParams { max_passes: self.cfg.params.max_passes, t_always_ms: self.cfg.params.t_always_ms, want_ttl_ms: self.cfg.params.want_ttl_ms }
+        CarouselParams { max_passes: self.cfg.params.max_passes, t_always_ms: self.cfg.params.t_always_ms, want_ttl_ms: self.cfg.params.want_ttl_ms, t_repass_ms: self.cfg.params.t_want_min_ms }
     }
 
     // ---------------------------------------------------------------- public API
@@ -627,6 +634,11 @@ impl Node {
         self.in_rendezvous(carrier, now)
     }
 
+    /// Diagnostic: how many objects we want.
+    pub fn wants_len(&self) -> usize {
+        self.wants.len()
+    }
+
     /// Diagnostic: whether `id` is on our want list.
     pub fn wants_object(&self, id: &ShortId) -> bool {
         self.wants.contains(id)
@@ -779,6 +791,31 @@ impl Node {
         self.store.insert_complete(meta, None);
         self.stats.renditions_made += 1;
         true
+    }
+
+    /// Whether `id` is a rendition we should not serve now. A rendition is for listening as the
+    /// schedule plays: from twice `T_render_ahead` before a programme's slot (to allow for clocks)
+    /// until the programme has played. Before that no device needs it yet, after it nobody can
+    /// play it on time, and serving either is what a rendition flood asks for (ABUSE.md).
+    /// Renditions of unscheduled objects are served on request, like any object.
+    fn rendition_not_due(&self, id: &ShortId) -> bool {
+        let Some(&(parent, _)) = self.renditions.get(id) else { return false };
+        let now = self.now;
+        let ahead = 2 * self.cfg.params.t_render_ahead_ms;
+        let mut scheduled = false;
+        for i in self.manifests.values() {
+            let Some(m) = self.store.bytes(&i.short).and_then(|b| Manifest::decode(b).ok()) else { continue };
+            let Some(o) = m.objects.iter().find(|o| o.id.short() == parent) else { continue };
+            let plays_ms = o.kind.codec().map(|c| o.len as u64 * 8 * 1000 / c.bits_per_second().max(1) as u64).unwrap_or(0) as Millis;
+            for e in m.schedule.iter().filter(|e| e.object == parent) {
+                scheduled = true;
+                let slot = self.slot_ms(e.start);
+                if now + ahead >= slot && now <= slot + plays_ms {
+                    return false;
+                }
+            }
+        }
+        scheduled
     }
 
     /// Local time of a schedule entry's UTC start. The simulation's epoch is UTC 0; a real node
@@ -1000,7 +1037,7 @@ impl Node {
                 d = d.min(e.deadline());
             }
             let announcing = c.election.as_ref().map(|e| e.is_announcer()).unwrap_or(false);
-            let has_pending = !c.queue.is_empty() || c.upload.is_some() || (announcing && c.carousel.as_ref().map(|k| k.has_work(&self.store)).unwrap_or(false));
+            let has_pending = !c.queue.is_empty() || c.upload.is_some() || (announcing && c.carousel.as_ref().map(|k| k.has_work(&self.store, self.now)).unwrap_or(false));
             if has_pending {
                 let mut t = c.busy_until.max(c.pace_until).max(c.fatsoen.backoff_until).max(self.now + 1);
                 if c.queue.is_empty() {
@@ -1016,6 +1053,9 @@ impl Node {
             if announcing {
                 if let Some(due) = c.carousel.as_ref().and_then(|k| k.next_due()) {
                     d = d.min(due);
+                }
+                if let Some(t) = c.carousel.as_ref().and_then(|k| k.next_repass(&self.store)) {
+                    d = d.min(t.max(self.now + 1));
                 }
                 if c.p.channels.len() > 1 {
                     // A hopping announcer beacons at every dwell start.
@@ -1154,7 +1194,9 @@ impl Node {
     }
 
     fn compute_score(&self) -> u16 {
-        let mut s: u32 = (self.neighbors.len().min(64) * 4) as u32;
+        // Neighbours heard more than once: a made-up name costs a frame each time it is used.
+        let heard = self.neighbors.values().filter(|n| n.heard_count >= 2).count();
+        let mut s: u32 = (heard.min(64) * 4) as u32;
         if self.cfg.mains {
             s += 64;
         }
@@ -1945,6 +1987,9 @@ impl Node {
             self.discipline.record(band, now, airtime, center, bw);
         }
         self.stats.tx_frames[class as usize] += 1;
+        if matches!(cand, Cand::Carousel(Item::Symbol { .. })) {
+            self.stats.carousel_frames[!fresh as usize] += 1;
+        }
         self.stats.tx_by_type[frame_type as usize] += 1;
         self.stats.tx_airtime_ms[i] += airtime as u64;
         self.carriers[i].jittered = false;
@@ -2027,7 +2072,7 @@ impl Node {
         match f {
             Frame::Beacon(b) => self.rx_beacon(carrier, b, rssi, out),
             Frame::Bulk(b) => self.rx_bulk(carrier, b, out),
-            Frame::Gossip(g) => self.rx_gossip(carrier, g, rssi, out),
+            Frame::Gossip(g) => self.rx_gossip(carrier, g, rssi),
             Frame::ManifestAnnounce(m) => self.rx_announce(m, rssi),
             Frame::Nack(n) => self.rx_nack(n, rssi),
         }
@@ -2035,8 +2080,9 @@ impl Node {
 
     fn touch(&mut self, id: NodeId, rssi: i16) -> &mut Neighbor {
         let now = self.now;
-        let n = self.neighbors.entry(id).or_insert(Neighbor { last_heard: now, announcer: NodeId::NONE, score: 0, rssi, colour: 0, upload_phases: 1, haves: BTreeSet::new() });
+        let n = self.neighbors.entry(id).or_insert(Neighbor { last_heard: now, announcer: NodeId::NONE, score: 0, rssi, colour: 0, upload_phases: 1, heard_count: 0, haves: BTreeSet::new() });
         n.last_heard = now;
+        n.heard_count = n.heard_count.saturating_add(1);
         n.rssi = ((n.rssi as i32 + rssi as i32) / 2) as i16;
         n
     }
@@ -2235,7 +2281,7 @@ impl Node {
         }
     }
 
-    fn rx_gossip(&mut self, _carrier: usize, g: &Gossip, rssi: i16, out: &mut Vec<Action>) {
+    fn rx_gossip(&mut self, _carrier: usize, g: &Gossip, rssi: i16) {
         if g.node == self.cfg.id {
             return;
         }
@@ -2254,9 +2300,7 @@ impl Node {
             }
         }
         let me = self.cfg.id;
-        let score = self.score;
         let now = self.now;
-        let other_score = self.neighbors.get(&g.announcer).map(|n| n.score);
         // An announcer's HAVE lists what its carousel serves; it is not an offer, since
         // announcers do not upload. Only a follower's HAVE is one.
         let offering = g.announcer != g.node;
@@ -2297,6 +2341,12 @@ impl Node {
             let addressed = g.announcer == me;
             let mut new_wants = Vec::new();
             for (w, _, _) in g.want.iter().filter(|_| addressed) {
+                // A rendition is for a programme about to play: an ask far ahead of its slot is
+                // not a listener's, and the device will ask again when it is due.
+                if self.rendition_not_due(w) {
+                    self.stats.renditions_refused += 1;
+                    continue;
+                }
                 if let Some(car) = self.carriers[i].carousel.as_mut() {
                     car.on_want(*w, g.node, now);
                 }
@@ -2329,12 +2379,9 @@ impl Node {
                     self.gossip_soon();
                 }
             }
-            if !g.announcer.is_none() && g.announcer != me {
-                let t = self.carriers[i].election.as_mut().and_then(|e| e.on_conflict(now, g.announcer, other_score, me, score));
-                if let Some(t) = t {
-                    self.on_transition(i, t, out);
-                }
-            }
+            // A report that another announcer is heard somewhere is not a reason to yield to it:
+            // we cannot follow what we cannot hear. Announcers yield on hearing a better beacon
+            // themselves; reports only feed the colouring (§5.3).
         }
         // Holder side: an announcer (ours or a neighbouring cell's) tells us what it has and
         // wants. An open ask is answered with an offer; only the holder it then grants uploads.

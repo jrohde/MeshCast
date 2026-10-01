@@ -68,6 +68,18 @@ struct Common {
     /// Let every node that decodes make renditions, not only stations.
     #[arg(long, default_value_t = false)]
     players_render: bool,
+    /// Followers that flood their announcer with WANTs for every object (docs/ABUSE.md).
+    #[arg(long, default_value_t = 0)]
+    attackers: usize,
+    /// Seconds between an attacker's WANTs.
+    #[arg(long, default_value_t = 60.0)]
+    attack_period_s: f64,
+    /// Attackers send each WANT under a fresh made-up node id.
+    #[arg(long, default_value_t = false)]
+    attack_spoof: bool,
+    /// Attackers ask for renditions too.
+    #[arg(long, default_value_t = false)]
+    attack_renditions: bool,
 }
 
 impl Common {
@@ -75,6 +87,10 @@ impl Common {
         let r = self.renditions.as_deref()?;
         let (m, sp) = r.split_once(',').unwrap_or_else(|| panic!("--renditions: expected music,speech kbit/s"));
         Some(scenario::RenditionSpec { music_kbps: m.trim().parse().expect("--renditions music"), speech_kbps: sp.trim().parse().expect("--renditions speech"), small: self.small, players_render: self.players_render })
+    }
+
+    fn attack(&self) -> Option<scenario::AttackSpec> {
+        (self.attackers > 0).then(|| scenario::AttackSpec { attackers: self.attackers, period_s: self.attack_period_s, spoof: self.attack_spoof, renditions: self.attack_renditions })
     }
 
     fn mix_items(&self) -> Vec<scenario::MixItem> {
@@ -207,6 +223,10 @@ struct Report {
     upload_same: u64,
     upload_other: u64,
     renditions: Option<RenditionSummary>,
+    attack_frames: u64,
+    /// Carousel symbol frames on first passes and on repeated ones.
+    carousel_first: u64,
+    carousel_repeat: u64,
 }
 
 /// How followers that cannot decode were served (PROTOCOL.md §1.2).
@@ -299,6 +319,7 @@ fn main() {
                 stations_at: Some(vec![]),
                 sources_at: Some(vec![0]),
                 renditions: common.renditions(),
+                attack: common.attack(),
             };
             run(spec, &common, None);
         }
@@ -322,6 +343,7 @@ fn main() {
                 stations_at: None,
                 sources_at: None,
                 renditions: common.renditions(),
+                attack: common.attack(),
             };
             run(spec, &common, None);
         }
@@ -356,6 +378,7 @@ fn main() {
                 stations_at: Some(vec![n - 1]),
                 sources_at: Some(vec![0]),
                 renditions: common.renditions(),
+                attack: common.attack(),
             };
             run(spec, &common, None);
         }
@@ -382,6 +405,7 @@ fn main() {
                 stations_at: None,
                 sources_at: None,
                 renditions: common.renditions(),
+                attack: common.attack(),
             };
             run(spec, &common, Some((kill_at_h, revive_at_h)));
         }
@@ -654,6 +678,9 @@ fn simulate(spec: ScenarioSpec, verbose: bool, failover: Option<(f64, f64)>) -> 
         upload_same: m.upload_collision_same_object,
         upload_other: m.upload_collision_other_object,
         renditions,
+        attack_frames: m.attack_frames,
+        carousel_first: eng.nodes.iter().map(|n| n.node.stats.carousel_frames[0]).sum(),
+        carousel_repeat: eng.nodes.iter().map(|n| n.node.stats.carousel_frames[1]).sum(),
         per_node,
         spec: spec.clone(),
         phys: built.phys.clone(),
@@ -696,6 +723,9 @@ struct SeedLine {
     bulk_sent: u64,
     by_kind: Vec<KindSummary>,
     renditions: Option<RenditionSummary>,
+    attack_frames: u64,
+    carousel_first: u64,
+    carousel_repeat: u64,
 }
 
 /// Several seeds of one scenario: the spread is the result, not any single run.
@@ -717,7 +747,7 @@ impl Ensemble {
             spec: reports[0].spec.clone(),
             seeds: reports
                 .iter()
-                .map(|r| SeedLine { seed: r.spec.seed, delivered: delivered(r), bulk_sent: r.bulk_sent, by_kind: by_kind(&r.objects), renditions: r.renditions.clone() })
+                .map(|r| SeedLine { seed: r.spec.seed, delivered: delivered(r), bulk_sent: r.bulk_sent, by_kind: by_kind(&r.objects), renditions: r.renditions.clone(), attack_frames: r.attack_frames, carousel_first: r.carousel_first, carousel_repeat: r.carousel_repeat })
                 .collect(),
         }
     }
@@ -735,6 +765,13 @@ impl Ensemble {
             d.iter().map(|x| format!("{x:.1}")).collect::<Vec<_>>().join(" "));
         let frames: Vec<f64> = self.seeds.iter().map(|s| s.bulk_sent as f64).collect();
         println!("  bulk frames    mean {:.0}  min {:.0}  max {:.0}", mean(&frames), min(&frames), max(&frames));
+        let att: Vec<f64> = self.seeds.iter().map(|s| s.attack_frames as f64).collect();
+        if mean(&att) > 0.0 {
+            println!("  attack frames  mean {:.0}", mean(&att));
+        }
+        let first: Vec<f64> = self.seeds.iter().map(|s| s.carousel_first as f64).collect();
+        let rep: Vec<f64> = self.seeds.iter().map(|s| s.carousel_repeat as f64).collect();
+        println!("  carousel       first passes mean {:.0}, repeated passes mean {:.0} (max {:.0})", mean(&first), mean(&rep), max(&rep));
         for (i, k) in self.seeds[0].by_kind.iter().enumerate() {
             let c: Vec<f64> = self.seeds.iter().map(|s| s.by_kind[i].complete * 100.0).collect();
             let p50: Vec<f64> = self.seeds.iter().filter_map(|s| s.by_kind[i].p50_mean_h).map(|h| h * 60.0).collect();
@@ -842,6 +879,7 @@ fn run_dynamics(nodes: usize, area_km2: f64, stations: usize, channels: usize, f
         stations_at: None,
         sources_at: None,
         renditions: common.renditions(),
+        attack: common.attack(),
     };
     let params = Params::default();
     let mut built = build(&spec, params);
@@ -1019,6 +1057,16 @@ fn run_dynamics(nodes: usize, area_km2: f64, stations: usize, channels: usize, f
     }
     // A newcomer is caught up when it holds every object of every channel it follows.
     let mut caught = 0usize;
+    if std::env::var("MESHCAST_TRACE_GRANTS").is_ok() {
+        // Where the time of each later publication goes: to the announcers, then to the followers.
+        let anns: Vec<usize> = (0..nodes).filter(|&i| m_role_ever_announced(&eng.metrics, eng.nodes[i].node.id().0)).collect();
+        for (id, t, fl) in pubs.iter().filter(|(_, t, _)| *t > 0) {
+            let ann_t: Vec<String> = anns.iter().filter_map(|&a| eng.metrics.completions.get(&(a, *id)).map(|c| format!("{}:{:.1}", a, (*c - *t) as f64 / 60000.0))).collect();
+            let mut ft: Vec<f64> = fl.iter().filter_map(|f| eng.metrics.completions.get(&(*f, *id)).map(|c| (*c - *t) as f64 / 60000.0)).collect();
+            ft.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            eprintln!("PUB t={:.1}h {:?} announcers(min after) {:?} followers(min) first {:.1} median {:.1}", *t as f64 / 3.6e6, id, ann_t, ft.first().copied().unwrap_or(f64::NAN), ft.get(ft.len() / 2).copied().unwrap_or(f64::NAN));
+        }
+    }
     let mut catch_h: Vec<f64> = Vec::new();
     for (i, t_join, at_join) in &newcomers {
         if at_join.is_empty() {
@@ -1055,7 +1103,7 @@ fn run_dynamics(nodes: usize, area_km2: f64, stations: usize, channels: usize, f
                         let ann_has = eng.nodes.get(aj).map(|n| n.node.holds(&id));
                         let ch = &built.sources[c].channel;
                         eprintln!("  manifest: node {:?} ann {:?} source {:?} (seq {})", eng.nodes[i].node.manifest_state(ch), eng.nodes.get(aj).and_then(|n| n.node.manifest_state(ch)), eng.nodes[built.sources[c].node].node.manifest_state(ch), built.sources[c].seq);
-                        eprintln!("MISSING node {} obj {:?} kind {:?} len {} progress {:?} wants {} follows {:?} ann_has {:?} ann_wants {:?} source {} src_has {}", i, id, o.kind, o.len, eng.nodes[i].node.object_progress(&id), eng.nodes[i].node.wants_object(&id), ann, ann_has, eng.nodes.get(aj).map(|n| n.node.wants_object(&id)), built.sources[c].node, eng.nodes[built.sources[c].node].node.holds(&id));
+                        eprintln!("MISSING node {} attacker {} obj {:?} kind {:?} len {} progress {:?} wants {} follows {:?} ann_has {:?} ann_wants {:?} source {} src_has {}", i, eng.attackers.iter().any(|a| a.node == i), id, o.kind, o.len, eng.nodes[i].node.object_progress(&id), eng.nodes[i].node.wants_object(&id), ann, ann_has, eng.nodes.get(aj).map(|n| n.node.wants_object(&id)), built.sources[c].node, eng.nodes[built.sources[c].node].node.holds(&id));
                     }
                 }
             }
@@ -1154,4 +1202,9 @@ fn run_dynamics(nodes: usize, area_km2: f64, stations: usize, channels: usize, f
         fs::write(path, serde_json::to_string_pretty(&report).unwrap()).expect("write report");
         println!("full report written to {path}");
     }
+}
+
+/// Whether node `id` was ever announcer (from the recorded role events).
+fn m_role_ever_announced(m: &meshcast_sim::metrics::Metrics, id: u32) -> bool {
+    m.role_events.iter().any(|e| e.node == id && e.role == "Announcer")
 }

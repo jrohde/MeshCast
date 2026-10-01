@@ -12,6 +12,11 @@ use crate::Millis;
 
 const MAX_FRONT: usize = 4096;
 
+/// Repetitions back off to at most `t_repass` × 2^MAX_DOUBLINGS (80 minutes at the draft 10):
+/// longer bounded an attacker more tightly but left a follower who joined during an attack
+/// waiting for hours (FEASIBILITY.md §11).
+const MAX_DOUBLINGS: u8 = 3;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Item {
     Beacon { round: u16 },
@@ -23,6 +28,9 @@ pub struct CarouselParams {
     pub max_passes: u16,
     pub t_always_ms: Millis,
     pub want_ttl_ms: Millis,
+    /// Unit of the repetition backoff: the second repetition of an object waits this long after
+    /// the pass before, later ones up to eight times as long, however many ask (docs/ABUSE.md).
+    pub t_repass_ms: Millis,
 }
 
 #[derive(Clone, Debug)]
@@ -38,8 +46,11 @@ pub struct Carousel {
     front_set: BTreeSet<(ShortId, u16, u16)>,
     wants: BTreeMap<ShortId, BTreeMap<NodeId, Millis>>,
     always: BTreeSet<ShortId>,
-    /// Completed passes and the time the last pass ended.
-    passes: BTreeMap<ShortId, (u16, Millis)>,
+    /// Completed passes, the time the last pass ended, and how often in a row it was passed
+    /// again without resting (the backoff level).
+    passes: BTreeMap<ShortId, (u16, Millis, u8)>,
+    /// When an object was first asked for again after its last pass.
+    asked_since: BTreeMap<ShortId, Millis>,
     last_always: Option<Millis>,
     pub rebuilds: u64,
 }
@@ -59,6 +70,7 @@ impl Carousel {
             wants: BTreeMap::new(),
             always: BTreeSet::new(),
             passes: BTreeMap::new(),
+            asked_since: BTreeMap::new(),
             last_always: None,
             rebuilds: 0,
         }
@@ -66,6 +78,9 @@ impl Carousel {
 
     pub fn on_want(&mut self, id: ShortId, from: NodeId, now: Millis) {
         self.wants.entry(id).or_default().insert(from, now);
+        if self.passes.contains_key(&id) {
+            self.asked_since.entry(id).or_insert(now);
+        }
     }
 
     pub fn on_have(&mut self, id: ShortId, from: NodeId) {
@@ -132,15 +147,37 @@ impl Carousel {
         });
     }
 
-    fn eligible(&self, id: &ShortId, store: &MemStore) -> bool {
+    fn eligible(&self, id: &ShortId, store: &MemStore, now: Millis) -> bool {
         if !store.has_complete(id) {
             return false;
         }
         let Some(w) = self.wants.get(id) else { return false };
         match self.passes.get(id) {
             None => true,
-            Some(&(count, last_end)) => count < self.p.max_passes || w.values().any(|&t| t > last_end),
+            Some(&(count, last_end, level)) => count < self.p.max_passes || (w.values().any(|&t| t > last_end) && now >= last_end + self.spacing(level)),
         }
+    }
+
+    /// How long an object waits after a pass before it is passed again: the first repetition at
+    /// once, then ever more slowly, twice as long each time, until the object has rested.
+    fn spacing(&self, level: u8) -> Millis {
+        if level == 0 {
+            0
+        } else {
+            self.p.t_repass_ms << (level - 1).min(MAX_DOUBLINGS)
+        }
+    }
+
+    /// When the next object that is asked for again may be passed again, if any waits.
+    pub fn next_repass(&self, store: &MemStore) -> Option<Millis> {
+        self.wants
+            .iter()
+            .filter(|(id, _)| store.has_complete(id))
+            .filter_map(|(id, w)| {
+                let &(count, last_end, level) = self.passes.get(id)?;
+                (count >= self.p.max_passes && w.values().any(|&t| t > last_end)).then_some(last_end + self.spacing(level))
+            })
+            .min()
     }
 
     fn always_due(&self, now: Millis) -> bool {
@@ -148,8 +185,8 @@ impl Carousel {
     }
 
     /// Whether `peek` would return something now or at `next_due`.
-    pub fn has_work(&self, store: &MemStore) -> bool {
-        !self.front.is_empty() || self.idx < self.set.len() || !self.always.is_empty() || self.wants.keys().any(|id| self.eligible(id, store))
+    pub fn has_work(&self, store: &MemStore, now: Millis) -> bool {
+        !self.front.is_empty() || self.idx < self.set.len() || !self.always.is_empty() || self.wants.keys().any(|id| self.eligible(id, store, now))
     }
 
     /// When the idle carousel next has something to do (the manifest repetition), if anything.
@@ -169,7 +206,20 @@ impl Carousel {
         // byte first. Among objects of one size that is simply most-wanted first; a small object
         // no longer waits behind a large one, and every wanted object is still sent every round.
         let mut scored: Vec<(u64, u64, ShortId)> = Vec::new();
-        let wanted: Vec<ShortId> = self.wants.keys().filter(|id| self.eligible(id, store)).copied().collect();
+        let wanted: Vec<ShortId> = self.wants.keys().filter(|id| self.eligible(id, store, now)).copied().collect();
+        // A pass asked for again climbs one backoff level, unless nobody had asked for the
+        // object for twice its current spacing after its last pass, which starts it over.
+        for id in &wanted {
+            let max = self.p.max_passes;
+            let spacing = self.passes.get(id).map(|p| self.spacing(p.2).max(self.p.t_repass_ms));
+            let asked = self.asked_since.remove(id);
+            if let (Some(p), Some(spacing)) = (self.passes.get_mut(id), spacing) {
+                if p.0 >= max {
+                    let rested = asked.map(|t| t >= p.1 + 2 * spacing).unwrap_or(true);
+                    p.2 = if rested { 0 } else { p.2.saturating_add(1) };
+                }
+            }
+        }
         let include_always = self.always_due(now) || !wanted.is_empty();
         if include_always {
             for id in &self.always {
@@ -236,7 +286,7 @@ impl Carousel {
 
     fn finish_object(&mut self, now: Millis) {
         if let Some(id) = self.set.get(self.idx).copied() {
-            let e = self.passes.entry(id).or_insert((0, now));
+            let e = self.passes.entry(id).or_insert((0, now, 0));
             e.0 = e.0.saturating_add(1);
             e.1 = now;
         }

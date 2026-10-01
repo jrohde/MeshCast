@@ -60,6 +60,17 @@ pub struct RenditionSpec {
     pub players_render: bool,
 }
 
+/// Nodes that flood their announcer with WANTs (docs/ABUSE.md).
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct AttackSpec {
+    pub attackers: usize,
+    pub period_s: f64,
+    /// A fresh made-up node id on every WANT.
+    pub spoof: bool,
+    /// Ask for renditions as well as codes.
+    pub renditions: bool,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct ScenarioSpec {
     pub nodes: usize,
@@ -82,6 +93,7 @@ pub struct ScenarioSpec {
     pub stations_at: Option<Vec<usize>>,
     pub sources_at: Option<Vec<usize>>,
     pub renditions: Option<RenditionSpec>,
+    pub attack: Option<AttackSpec>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -280,5 +292,20 @@ pub fn build(spec: &ScenarioSpec, params: Params) -> Built {
         source_infos.push(SourceInfo { node: s, key, channel: chan, objects, seq: 1 });
     }
     engine.rendition_ids = tracks.values().filter_map(|t| t.rendition.map(|(id, _)| id)).collect();
+    if let Some(a) = spec.attack.as_ref().filter(|a| a.attackers > 0) {
+        let mut pool: Vec<usize> = (0..n).filter(|i| !stations.contains(i) && !sources.contains(i) && !small.contains(i)).collect();
+        let mut ra = Rng::new(spec.seed ^ 0xBAD);
+        for _ in 0..a.attackers.min(pool.len()) {
+            let k = ra.below(pool.len() as u64) as usize;
+            let node = pool.swap_remove(k);
+            engine.attackers.push(crate::engine::Attacker::new(node, (a.period_s * 1000.0) as u64, a.spoof));
+        }
+        let mut ids: Vec<ShortId> = tracks.keys().copied().collect();
+        if a.renditions {
+            ids.extend(tracks.values().filter_map(|t| t.rendition.map(|(id, _)| id)));
+        }
+        engine.attack_ids = ids;
+        engine.start_attacks();
+    }
     Built { small, engine, tracks, phys, sources: source_infos }
 }

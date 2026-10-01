@@ -164,20 +164,6 @@ impl Election {
 
     /// Someone's gossip names a different announcer than us while we are announcer. Only a
     /// clearly better score (from a beacon we heard) makes us yield; otherwise both persist.
-    pub fn on_conflict(&mut self, now: Millis, other: NodeId, other_score: Option<u16>, me: NodeId, my_score: u16) -> Option<Transition> {
-        if !self.is_announcer() || other == me || other.is_none() {
-            return None;
-        }
-        let Some(s) = other_score else { return None };
-        if s as i32 > my_score as i32 + self.p.hysteresis as i32 {
-            self.heard.entry(other).or_insert(Heard { last: now, rssi: i16::MIN / 2, score: s, next_ms: self.p.t_beacon_ms as u16, colour: 0, colours: 1 });
-            self.follow(now, other);
-            Some(Transition::BecameFollower(other))
-        } else {
-            None
-        }
-    }
-
     pub fn tick(&mut self, now: Millis, my_score: u16, rng: &mut Rng) -> Option<Transition> {
         match self.state {
             State::Follower => {
