@@ -708,3 +708,14 @@ arrives a few minutes later than it otherwise would. That is the entire user-vis
     codes. A device that needs it asks for the rendition of what it is about to play; a node in
     its cell that can decode makes it, checked against the id the source signed, and the cell's
     carousel carries it once to whoever asked (FEASIBILITY.md §10).
+13. **Collections: albums, series, episodes.** A channel is a key, so an artist can publish an
+    album as a channel and its authenticity follows from the signature. But a manifest lists
+    loose objects with a title, and an album is more: a title, an order, a cover. Those are
+    claims only the source may make, so they belong in the signed manifest: a `collections` list
+    of {title, objects in order, cover object}. A cover is an image object, for which no content
+    type exists yet. Open: the fields, the image content type and its size limit, and whether a
+    series (a podcast) is a collection whose new episodes the player recognises as objects in the
+    new manifest that were not in the previous one. Retention stays the channel owner's choice:
+    what leaves the window leaves the mesh in time, so an album that should stay available stays
+    in the window. How a player uses collections (follow the schedule like radio, newest first,
+    in order, shuffled, move on to a new episode automatically) is the app's business.
