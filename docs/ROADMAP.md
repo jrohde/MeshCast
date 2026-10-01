@@ -76,6 +76,10 @@ Scope:
   ahead with the pinned SNAC models (PROTOCOL.md §1.1) and play them. Measure on a Pixel 4a
   what decoding costs natively: speed, and battery per hour of music.
 - Signed manifests end to end: publish from a phone, hear it on another dongle.
+- Player behaviour on a followed channel: play what is held, follow the schedule like radio or
+  play on demand like a podcast, newest first, in order or shuffled, and move on to a new episode
+  when the channel publishes one. Albums and series as collections once PROTOCOL.md question 13
+  is settled.
 - Ten to twenty nodes across a district, some offline, one station.
 
 Definition of done:
