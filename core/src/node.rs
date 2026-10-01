@@ -134,6 +134,10 @@ pub struct Stats {
     pub repairs_queued: u64,
     pub manifests_adopted: u64,
     pub conflict_reports_sent: u64,
+    /// Manifest announcements sent to bring our announcer up to date.
+    pub manifest_corrections: u64,
+    /// One-symbol NACKs sent to an announcer that had been silent, asking it to show it serves.
+    pub probes: u64,
     pub conflicts_noted: u64,
     /// New symbols that arrived for an object we had asked for and had an uploader assigned to,
     /// against ones that simply came past. The split says whether a node is being served or is
@@ -164,12 +168,30 @@ struct Neighbor {
     haves: BTreeSet<ShortId>,
 }
 
-#[derive(Clone, Copy, Debug)]
-struct ManifestInfo {
+/// One manifest of a channel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ManifestRef {
     seq: u32,
     short: ShortId,
     len: u32,
-    adopted: bool,
+}
+
+/// What a node knows of a channel's manifests (PROTOCOL.md §2).
+#[derive(Clone, Copy, Debug, Default)]
+struct ManifestInfo {
+    /// The newest manifest adopted, its signature checked. Its bytes may be gone (evicted while
+    /// we did not follow the channel) while we still know its seq.
+    adopted: Option<ManifestRef>,
+    /// A newer one announced and not yet held. Announcements are not signed, so this never
+    /// displaces the adopted one or blocks a real manifest (`rx_announce`).
+    announced: Option<ManifestRef>,
+}
+
+impl ManifestInfo {
+    /// The manifest to hold: the announced one while there is one, else the adopted one.
+    fn current(&self) -> Option<ManifestRef> {
+        self.announced.or(self.adopted)
+    }
 }
 
 /// A source transmitting an object to the announcer: either a full pass or a NACKed list.
@@ -339,6 +361,19 @@ pub struct Node {
     granted_to_us: BTreeMap<(ShortId, NodeId), Millis>,
     /// Holder side: offers we owe (object, announcer that asked, when to send).
     offers: Vec<(ShortId, NodeId, Millis)>,
+    /// Channels whose manifest we hold and our announcer does not (an older seq, or none):
+    /// we announce them at `correction_at` unless someone else does first (PROTOCOL.md §2).
+    corrections: BTreeSet<ChannelId>,
+    correction_at: Option<Millis>,
+    /// When we last announced each channel's manifest to correct our announcer.
+    corrected: BTreeMap<ChannelId, Millis>,
+    /// Nothing is evicted before this: a node that restarts or stops announcing keeps what it
+    /// carried for `want_ttl`, in case it announces again (PROTOCOL.md §4).
+    keep_until: Millis,
+    /// When we began to follow our current announcer: evidence against it counts from then.
+    following_since: Millis,
+    /// When we last asked our announcer for one symbol as proof that it serves (§5.2).
+    last_probe: Millis,
     pub stats: Stats,
 }
 
@@ -349,7 +384,7 @@ impl Node {
     pub fn new(cfg: NodeConfig, now: Millis) -> Self {
         let discipline = Accounting::new(cfg.profile, &cfg.rule_choice);
         let ctrl = cfg.carriers.iter().position(|c| c.kind == CarrierKind::LoraControl).unwrap_or(0);
-        let cp = CarouselParams { max_passes: cfg.params.max_passes, t_always_ms: cfg.params.t_always_ms, want_ttl_ms: cfg.params.want_ttl_ms, t_repass_ms: cfg.params.t_want_min_ms };
+        let cp = CarouselParams { max_passes: cfg.params.max_passes, want_ttl_ms: cfg.params.want_ttl_ms, t_repass_ms: cfg.params.t_want_min_ms };
         let mut carriers = Vec::with_capacity(cfg.carriers.len());
         for c in &cfg.carriers {
             let bulk = c.kind.is_bulk();
@@ -413,6 +448,12 @@ impl Node {
             last_bulk_rx: 0,
             granted_to_us: BTreeMap::new(),
             offers: Vec::new(),
+            corrections: BTreeSet::new(),
+            correction_at: None,
+            corrected: BTreeMap::new(),
+            keep_until: 0,
+            following_since: now,
+            last_probe: 0,
             stats,
             cfg,
             now,
@@ -420,7 +461,7 @@ impl Node {
     }
 
     fn carousel_params(&self) -> CarouselParams {
-        CarouselParams { max_passes: self.cfg.params.max_passes, t_always_ms: self.cfg.params.t_always_ms, want_ttl_ms: self.cfg.params.want_ttl_ms, t_repass_ms: self.cfg.params.t_want_min_ms }
+        CarouselParams { max_passes: self.cfg.params.max_passes, want_ttl_ms: self.cfg.params.want_ttl_ms, t_repass_ms: self.cfg.params.t_want_min_ms }
     }
 
     // ---------------------------------------------------------------- public API
@@ -666,7 +707,7 @@ impl Node {
 
     /// Diagnostic: what we know of channel `chan`'s manifest: (seq, id, adopted, held, wanted).
     pub fn manifest_state(&self, chan: &crate::ids::ChannelId) -> Option<(u32, ShortId, bool, bool, bool)> {
-        self.manifests.get(chan).map(|i| (i.seq, i.short, i.adopted, self.store.has_complete(&i.short), self.wants.contains(&i.short)))
+        self.manifests.get(chan).and_then(|i| i.current().map(|r| (r.seq, r.short, i.announced.is_none(), self.store.has_complete(&r.short), self.wants.contains(&r.short))))
     }
 
     /// Diagnostic: whether `now` is in the rendezvous on `carrier`.
@@ -780,15 +821,22 @@ impl Node {
 
     pub fn follow(&mut self, chan: ChannelId) {
         self.follows.insert(chan);
-        if let Some(info) = self.manifests.get(&chan).copied() {
-            if info.adopted {
-                if let Some(bytes) = self.store.bytes(&info.short).map(|b| b.to_vec()) {
-                    if let Ok(m) = Manifest::decode(&bytes) {
-                        self.adopt_manifest(&m, info.short);
-                    }
+        if let Some(a) = self.manifests.get(&chan).and_then(|i| i.adopted) {
+            if let Some(bytes) = self.store.bytes(&a.short).map(|b| b.to_vec()) {
+                if let Ok(m) = Manifest::decode(&bytes) {
+                    self.adopt_manifest(&m, a.short);
                 }
-            } else if !self.store.has_complete(&info.short) {
-                self.add_want(info.short);
+            }
+        }
+        // Not held: never fetched, or evicted with the channel's objects while we did not follow
+        // it. Announcers do not announce a seq we already know, so we ask for it ourselves.
+        if let Some(r) = self.manifests.get(&chan).and_then(|i| i.current()) {
+            if !self.store.has_complete(&r.short) {
+                if self.store.ensure_hint(r.short, r.len, ContentType::Manifest) {
+                    self.quiet_complete.push(r.short);
+                } else {
+                    self.add_want(r.short);
+                }
             }
         }
         self.want_refresh = true;
@@ -809,14 +857,18 @@ impl Node {
             if !(announcing || self.follows.contains(chan)) {
                 continue;
             }
-            set.insert(info.short);
-            if let Some(bytes) = self.store.bytes(&info.short) {
-                if let Ok(m) = Manifest::decode(bytes) {
-                    for o in &m.objects {
-                        set.insert(o.id.short());
-                    }
-                    if let Some(t) = m.renditions {
-                        set.insert(t.id.short());
+            // The adopted manifest's objects stay until its successor is held: an announcement
+            // alone must not cost a follower its window.
+            for r in [info.adopted, info.announced].into_iter().flatten() {
+                set.insert(r.short);
+                if let Some(bytes) = self.store.bytes(&r.short) {
+                    if let Ok(m) = Manifest::decode(bytes) {
+                        for o in &m.objects {
+                            set.insert(o.id.short());
+                        }
+                        if let Some(t) = m.renditions {
+                            set.insert(t.id.short());
+                        }
                     }
                 }
             }
@@ -860,7 +912,7 @@ impl Node {
         let now = self.now;
         let ahead = 2 * self.cfg.params.t_render_ahead_ms;
         let mut scheduled = false;
-        for i in self.manifests.values() {
+        for i in self.manifests.values().filter_map(|i| i.adopted) {
             let Some(m) = self.store.bytes(&i.short).and_then(|b| Manifest::decode(b).ok()) else { continue };
             let Some(o) = m.objects.iter().find(|o| o.id.short() == parent) else { continue };
             let plays_ms = o.kind.codec().map(|c| o.len as u64 * 8 * 1000 / c.bits_per_second().max(1) as u64).unwrap_or(0) as Millis;
@@ -918,7 +970,8 @@ impl Node {
             if !self.follows.contains(chan) {
                 continue;
             }
-            let Some(m) = self.store.bytes(&info.short).and_then(|b| Manifest::decode(b).ok()) else { continue };
+            let Some(a) = info.adopted else { continue };
+            let Some(m) = self.store.bytes(&a.short).and_then(|b| Manifest::decode(b).ok()) else { continue };
             for o in m.objects.iter().filter(|o| o.kind.codec().is_some()) {
                 let parent = o.id.short();
                 let Some((&r, &(_, meta))) = self.renditions.iter().find(|(_, (p, _))| *p == parent) else { continue };
@@ -987,6 +1040,9 @@ impl Node {
     /// Forget objects no manifest of interest references any more (a channel we unfollowed, or
     /// an object that left its channel's window). Own objects are kept.
     fn evict_orphans(&mut self) {
+        if self.now < self.keep_until {
+            return;
+        }
         let keep = self.interesting_objects();
         let gone: Vec<ShortId> = self.store.ids().filter(|id| !keep.contains(id) && !self.own_objects.contains(id) && !self.own_manifests.iter().any(|(_, s, _, _)| s == *id)).copied().collect();
         for id in gone {
@@ -999,7 +1055,7 @@ impl Node {
     /// Objects we hold complete that are not referenced by any manifest we know.
     pub fn orphaned_objects(&self) -> Vec<ShortId> {
         let mut keep = BTreeSet::new();
-        for info in self.manifests.values() {
+        for info in self.manifests.values().flat_map(|i| [i.adopted, i.announced]).flatten() {
             keep.insert(info.short);
             if let Some(bytes) = self.store.bytes(&info.short) {
                 if let Ok(m) = Manifest::decode(bytes) {
@@ -1018,7 +1074,8 @@ impl Node {
         self.store.insert_complete(meta, Some(&bytes));
         let short = meta.id.short();
         let chan = manifest.channel_id();
-        let old = self.manifests.insert(chan, ManifestInfo { seq: manifest.seq, short, len: meta.len, adopted: true });
+        let old = self.manifests.get(&chan).and_then(|i| i.adopted);
+        self.manifests.insert(chan, ManifestInfo { adopted: Some(ManifestRef { seq: manifest.seq, short, len: meta.len }), announced: None });
         self.own_manifests.retain(|(c, _, _, _)| *c != chan);
         self.own_manifests.push((chan, short, manifest.seq, meta.len));
         if let Some(o) = old {
@@ -1037,10 +1094,10 @@ impl Node {
             if let Some(car) = c.carousel.as_mut() {
                 if let Some(o) = old {
                     if o.short != short {
-                        car.unset_always(&o.short);
+                        car.remove_manifest(&o.short);
                     }
                 }
-                car.set_always(short);
+                car.add_manifest(short);
             }
         }
         self.prune_wants();
@@ -1064,6 +1121,7 @@ impl Node {
         self.repair_phases.clear();
         self.granted_to_us.clear();
         self.offers.clear();
+        self.corrected.clear();
         self.stats = Stats { tx_airtime_ms: alloc::vec![0; self.carriers.len()], ..Default::default() };
     }
 
@@ -1085,6 +1143,9 @@ impl Node {
             if self.is_announcing() && self.hops(self.cell_carrier()) {
                 d = d.min(self.next_meeting_start(self.now) + 1);
             }
+        }
+        if let Some(t) = self.correction_at {
+            d = d.min(t.max(self.now + 1));
         }
         if !self.offers.is_empty() {
             // An offer to another cell's announcer waits for the rendezvous on a hopping carrier.
@@ -1121,9 +1182,6 @@ impl Node {
                 d = d.min(t);
             }
             if announcing {
-                if let Some(due) = c.carousel.as_ref().and_then(|k| k.next_due()) {
-                    d = d.min(due);
-                }
                 if let Some(t) = c.carousel.as_ref().and_then(|k| k.next_repass(&self.store)) {
                     d = d.min(t.max(self.now + 1));
                 }
@@ -1260,6 +1318,7 @@ impl Node {
         self.renditions_due_check();
         self.follower_want_check();
         self.conflict_report_check();
+        self.correction_check();
         self.offer_check();
         self.nack_check();
         for i in 0..self.carriers.len() {
@@ -1308,14 +1367,14 @@ impl Node {
             }
             Transition::BecameAnnouncer => {
                 let mut car = Carousel::new(self.carousel_params());
-                for info in self.manifests.values() {
-                    car.set_always(info.short);
+                for a in self.manifests.values().filter_map(|i| i.adopted) {
+                    car.add_manifest(a.short);
                 }
                 self.carriers[carrier].carousel = Some(car);
                 self.carriers[carrier].upload = None;
                 // Serve everything any known manifest references; want what we lack, by name and
                 // length.
-                let to_want: Vec<(ShortId, u32)> = self.manifests.values().filter(|i| !self.store.has_complete(&i.short)).map(|i| (i.short, i.len)).collect();
+                let to_want: Vec<(ShortId, u32)> = self.manifests.values().filter_map(|i| i.current()).filter(|r| !self.store.has_complete(&r.short)).map(|r| (r.short, r.len)).collect();
                 for (id, len) in to_want {
                     if self.store.ensure_hint(id, len, ContentType::Manifest) {
                         self.quiet_complete.push(id);
@@ -1326,7 +1385,7 @@ impl Node {
                 // The manifests we hold were adopted by a follower, for the channels it follows
                 // and in the form it plays. An announcer serves every channel, so it adopts them
                 // again as one: their objects are registered and what it lacks is wanted.
-                let held: Vec<ShortId> = self.manifests.values().filter(|i| self.store.has_complete(&i.short)).map(|i| i.short).collect();
+                let held: Vec<ShortId> = self.manifests.values().filter_map(|i| i.adopted).filter(|a| self.store.has_complete(&a.short)).map(|a| a.short).collect();
                 for short in held {
                     if let Some(m) = self.store.bytes(&short).and_then(|b| Manifest::decode(b).ok()) {
                         self.adopt_manifest(&m, short);
@@ -1337,6 +1396,8 @@ impl Node {
                 out.push(Action::Role { carrier, role: Role::Announcer, announcer: self.cfg.id, now: self.now });
             }
             Transition::BecameFollower(to) | Transition::AnnouncerChanged(to) => {
+                self.keep_until = self.keep_until.max(self.now + self.cfg.params.want_ttl_ms);
+                self.following_since = self.now;
                 self.carriers[carrier].carousel = Some(Carousel::new(self.carousel_params()));
                 self.carriers[carrier].upload = None;
                 self.drop_grants_unless_announcing();
@@ -1390,19 +1451,36 @@ impl Node {
             }
             return;
         }
-        // Our own announcer is held to evidence too (ABUSE.md, "election capture"): it lists an
-        // object we want and we have never had one symbol of it, or it lists one of our own
-        // objects and nobody has been heard sending it, for longer than an honest announcer can
-        // take to pass an object it was asked for (its repetition ceiling, plus one interval for
-        // the ask). An honest announcer that lacks an object asks for it instead of listing it.
+        // Our own announcer is held to evidence too (ABUSE.md, "election capture"). An honest
+        // announcer does one of three things with what its follower asks for: it serves it, or,
+        // lacking it, asks for it itself or grants it to an uploader. One that has done none of
+        // them for an object we want, and lists it or not, so that we have never had one symbol
+        // of it, for longer than an honest announcer can take to pass an object it was asked for
+        // (its repetition ceiling, plus one interval for the ask), does not serve. That counts
+        // from when we began to follow it: what we waited for under another announcer, or as
+        // one, is no evidence against this one. Or it lists one of our own objects and nobody has
+        // been heard sending it for that long since we published it.
         let w = crate::carousel::longest_spacing(self.cfg.params.t_want_min_ms) + self.cfg.params.t_want_min_ms;
+        let from = self.following_since;
         let own_haves = self.neighbors.get(&own).map(|n| n.haves.clone()).unwrap_or_default();
-        let never_served = self.wants.iter().any(|x| own_haves.contains(x) && self.progress.get(x).map(|p| p.last_progress == 0 && now >= p.wanted_at + w).unwrap_or(false))
+        let claims_or_ignores = |x: &ShortId| own_haves.contains(x) || !self.ann_seeking(x);
+        let never_served = self.wants.iter().any(|x| claims_or_ignores(x) && self.progress.get(x).map(|p| p.last_progress == 0 && now >= p.wanted_at.max(from) + w).unwrap_or(false))
             || self.pending_ack.iter().any(|(p, since)| own_haves.contains(p) && now >= *since + w);
-        // Sooner where the channel is silent: an announcer that lists what we wait for and has
-        // not put one symbol of anything on the air for `T_excursion`. One that is busy repeating
-        // other objects, as under a WANT flood, is not silent.
-        let silent = self.wants.iter().any(|x| own_haves.contains(x) && self.progress.get(x).map(|p| now >= since(p) + t).unwrap_or(false)) && now >= self.last_bulk_rx + t;
+        // Sooner where the channel is silent: an announcer that lists what we wait for and has not
+        // put one symbol of anything on the air for `T_excursion`. Silence alone proves nothing:
+        // an honest announcer whose repetitions a WANT flood holds back is silent too, for up to
+        // its ceiling. So we ask it for one symbol of what we wait for, every `T_nack_stall`; it
+        // answers from the front of its next round whatever the backoff. One that has still sent
+        // nothing at all `T_want_min` later serves nothing.
+        let quiet_since = self.last_bulk_rx.max(from);
+        let waiting = self.wants.iter().find(|x| claims_or_ignores(x) && self.progress.get(x).map(|p| now >= since(p).max(from) + t).unwrap_or(false)).copied();
+        let mut silent = false;
+        if let (Some(x), true) = (waiting, now >= quiet_since + t) {
+            silent = now >= quiet_since + t + self.cfg.params.t_want_min_ms;
+            if !silent && now >= self.last_probe + self.cfg.params.t_nack_stall_ms {
+                self.probe(x, own);
+            }
+        }
         if never_served || silent {
             let (score, caps) = (self.score, self.caps());
             let tr = self.carriers[i].election.as_mut().and_then(|e| e.shun(now, own, now + ttl, score, caps, &mut self.rng));
@@ -1531,6 +1609,14 @@ impl Node {
         (0..MAX_UPLOAD_PHASES).find(|p| !self.phases_in_use().any(|q| q == *p))
     }
 
+    /// The phase for `holder`: listening time is divided among those who speak, not among the
+    /// objects they bring. A holder uploads one object at a time, so every grant to it shares the
+    /// phase of its first; a phase per object left most of a cycle idle and made an hour of
+    /// music in 3-minute pieces arrive three times later than in one piece (FEASIBILITY.md §13).
+    fn phase_for(&self, holder: NodeId) -> Option<u8> {
+        self.grants.values().find(|(h, _, _)| *h == holder && !holder.is_none()).map(|(_, _, p)| *p).or_else(|| self.free_upload_phase())
+    }
+
     fn enqueue(&mut self, carrier: usize, f: Frame) {
         let class = f.class();
         let frame_type = f.frame_type();
@@ -1583,6 +1669,9 @@ impl Node {
         self.phase_heard = [0; MAX_UPLOAD_PHASES as usize];
         self.granted_to_us.clear();
         self.offers.clear();
+        self.corrections.clear();
+        self.correction_at = None;
+        self.keep_until = now + p.want_ttl_ms;
         for id in self.own_objects.iter().chain(self.own_manifests.iter().map(|(_, s, _, _)| s)) {
             self.pending_ack.insert(*id, now);
         }
@@ -1662,18 +1751,25 @@ impl Node {
             let g = Gossip { node: self.cfg.id, announcer: self.gossip_announcer_field(), announcer_colour: self.announcer_colouring_field().0, announcer_colours: self.announcer_colouring_field().1, heard: self.heard_field(), have, want };
             self.enqueue(self.cell_carrier(), Frame::Gossip(g));
         }
+        let mut whole = false;
         let entries: Vec<AnnounceEntry> = if announcing {
             let all: Vec<AnnounceEntry> = self
                 .manifests
                 .iter()
-                .map(|(c, i)| AnnounceEntry { channel: *c, manifest: i.short, seq: i.seq, len: i.len })
+                // Only what it serves: a manifest it adopted and holds. Passing on an announcement
+                // it has not verified would spread a false seq through every cell.
+                .filter_map(|(c, i)| i.adopted.filter(|a| self.store.has_complete(&a.short)).map(|a| AnnounceEntry { channel: *c, manifest: a.short, seq: a.seq, len: a.len }))
                 .collect();
-            if all.is_empty() {
-                Vec::new()
+            if all.len() <= MAX_ANNOUNCE_ENTRIES {
+                whole = true;
+                all
             } else {
-                let n = all.len().min(MAX_ANNOUNCE_ENTRIES);
+                // In channel order from a cursor that steps one entry less than a frame holds:
+                // every two neighbours of the list share some frame, so a follower can tell
+                // from a frame alone that a channel between them is not on it.
+                let n = MAX_ANNOUNCE_ENTRIES;
                 let v: Vec<AnnounceEntry> = (0..n).map(|j| all[(self.announce_cursor + j) % all.len()].clone()).collect();
-                self.announce_cursor = (self.announce_cursor + n) % all.len();
+                self.announce_cursor = (self.announce_cursor + n - 1) % all.len();
                 v
             }
         } else {
@@ -1684,11 +1780,12 @@ impl Node {
                 .map(|(c, s, seq, len)| AnnounceEntry { channel: *c, manifest: *s, seq: *seq, len: *len })
                 .collect()
         };
-        if !entries.is_empty() {
+        // An announcer that knows no manifest says so too: its followers then tell it theirs.
+        if !entries.is_empty() || whole {
             let cell = self.cell_carrier();
-            self.enqueue(cell, Frame::ManifestAnnounce(ManifestAnnounce { node: self.cfg.id, entries: entries.clone() }));
+            self.enqueue(cell, Frame::ManifestAnnounce(ManifestAnnounce { node: self.cfg.id, entries: entries.clone(), whole }));
             if self.ctrl != cell {
-                self.enqueue(self.ctrl, Frame::ManifestAnnounce(ManifestAnnounce { node: self.cfg.id, entries }));
+                self.enqueue(self.ctrl, Frame::ManifestAnnounce(ManifestAnnounce { node: self.cfg.id, entries, whole }));
             }
         }
     }
@@ -1871,7 +1968,7 @@ impl Node {
                 *p
             } else if let Some((p, _)) = self.repair_phases.get(&id) {
                 *p
-            } else if let Some(p) = self.free_upload_phase() {
+            } else if let Some(p) = self.phase_for(self.best_holder(&id)) {
                 self.repair_phases.insert(id, (p, now));
                 p
             } else {
@@ -2211,7 +2308,13 @@ impl Node {
             Cand::Queue(j) => {
                 self.carriers[i].queue.remove(j);
             }
-            Cand::Carousel(_) => {
+            Cand::Carousel(item) => {
+                // A source that announces passes its own objects itself: its cell has them, as
+                // when it hears someone else send them. Otherwise they stayed pending forever, and
+                // it took the next announcer that listed one for a liar (PROTOCOL.md §5.2).
+                if let Item::Symbol { object, .. } = item {
+                    self.pending_ack.remove(&object);
+                }
                 if let Some(car) = self.carriers[i].carousel.as_mut() {
                     car.advance(&self.store, now);
                 }
@@ -2424,14 +2527,18 @@ impl Node {
 
     fn adopt_manifest(&mut self, m: &Manifest, short: ShortId) {
         let chan = m.channel_id();
-        if let Some(cur) = self.manifests.get(&chan) {
-            if cur.seq > m.seq || (cur.seq == m.seq && cur.adopted && cur.short != short) {
+        let info = self.manifests.get(&chan).copied().unwrap_or_default();
+        if let Some(a) = info.adopted {
+            if a.seq > m.seq || (a.seq == m.seq && a.short != short) {
                 return;
             }
         }
         let len = self.store.entry(&short).and_then(|e| e.len()).unwrap_or(0);
-        let old = self.manifests.insert(chan, ManifestInfo { seq: m.seq, short, len, adopted: true });
-        if old.map(|o| o.adopted && o.short == short).unwrap_or(false) {
+        let old = info.adopted;
+        // A newer announcement still pending stays wanted; one this manifest answers is done.
+        let announced = info.announced.filter(|n| n.seq > m.seq);
+        self.manifests.insert(chan, ManifestInfo { adopted: Some(ManifestRef { seq: m.seq, short, len }), announced });
+        if old.map(|o| o.short == short).unwrap_or(false) {
             // Re-adoption (e.g. follow() after the fact): only the wants below matter.
         } else {
             self.stats.manifests_adopted += 1;
@@ -2440,10 +2547,10 @@ impl Node {
             if let Some(car) = c.carousel.as_mut() {
                 if let Some(o) = old {
                     if o.short != short {
-                        car.unset_always(&o.short);
+                        car.remove_manifest(&o.short);
                     }
                 }
-                car.set_always(short);
+                car.add_manifest(short);
             }
         }
         // You carry what you listen to: objects are registered (and thus collected from the air)
@@ -2481,7 +2588,7 @@ impl Node {
         for id in to_want {
             self.add_want(id);
         }
-        if old.map(|o| o.short != short).unwrap_or(false) {
+        if old.map(|o| o.short != short).unwrap_or(false) || info.announced != announced {
             self.prune_wants();
         }
         if self.follows.contains(&chan) {
@@ -2580,7 +2687,7 @@ impl Node {
                     car.on_have(*h, g.node);
                 }
                 // An offer for something we want: grant the first holder that offers.
-                let phase = self.free_upload_phase();
+                let phase = self.phase_for(g.node);
                 if let (true, true, false, Some(phase)) = (offering, self.wants.contains(h), self.grants.contains_key(h), phase) {
                     self.grants.insert(*h, (g.node, now, phase));
                     self.stats.grants_given += 1;
@@ -2599,14 +2706,18 @@ impl Node {
                 continue;
             }
             let own = self.announcer_of(i) == g.node;
-            if own {
-                // Our announcer says it has an object of ours. We believe it once we uploaded
-                // the object to it; a claim alone is no reason to stop offering (ABUSE.md).
+            if own || from_announcer {
+                // An announcer says it has an object of ours. We believe it once we uploaded the
+                // object to it; a claim alone is no reason to stop offering (ABUSE.md). That holds
+                // for a neighbouring cell's announcer too: a source that uploaded there and later
+                // followed it otherwise took it for a liar (FEASIBILITY.md §13).
                 for h in &g.have {
                     if self.granted_to_us.contains_key(&(*h, g.node)) {
                         self.pending_ack.remove(h);
                     }
                 }
+            }
+            if own {
                 for (w, grant, _) in g.want.iter() {
                     self.ann_asks.insert(*w, now);
                     if !grant.is_none() {
@@ -2646,7 +2757,12 @@ impl Node {
                     // Open ask: offer, unless we are already uploading it to this announcer.
                     let uploading = self.carriers[i].upload.as_ref().map(|u| u.object == *w && u.to == g.node).unwrap_or(false);
                     if !uploading && !self.offers.iter().any(|(o, a, _)| o == w && *a == g.node) {
-                        let at = now + self.rng.below(self.cfg.params.t_offer_ms.max(1));
+                        // A holder that is uploading offers last: a free holder's offer comes first
+                        // and silences it; if nobody else holds the object, it is granted to us and
+                        // waits behind our current upload instead of a new round of asking.
+                        let busy = self.carriers.iter().any(|c| c.upload.is_some() || !c.upload_queue.is_empty());
+                        let t_offer = self.cfg.params.t_offer_ms.max(1);
+                        let at = now + self.rng.below(t_offer) + if busy { t_offer } else { 0 };
                         self.offers.push((*w, g.node, at));
                     }
                 } else {
@@ -2668,11 +2784,7 @@ impl Node {
         let cell = self.cell_carrier();
         let own = self.announcer_of(cell);
         let everyone_listens = !self.hops(cell) || self.in_rendezvous(cell, now);
-        // A holder that is uploading offers nothing more until it is done: its offer would
-        // silence holders that are free, and everything granted to it would queue behind one
-        // radio while theirs stayed idle.
-        let busy = self.carriers.iter().any(|c| c.upload.is_some() || !c.upload_queue.is_empty());
-        let sendable = |a: &NodeId, at: &Millis| !busy && *at <= now && (*a == own || everyone_listens);
+        let sendable = |a: &NodeId, at: &Millis| *at <= now && (*a == own || everyone_listens);
         let due: Vec<(ShortId, NodeId)> = self.offers.iter().filter(|(_, a, at)| sendable(a, at)).map(|(o, a, _)| (*o, *a)).collect();
         if due.is_empty() {
             return;
@@ -2695,12 +2807,21 @@ impl Node {
             if !interested {
                 continue;
             }
-            if let Some(cur) = self.manifests.get(&e.channel) {
-                if cur.seq >= e.seq {
+            let info = self.manifests.get(&e.channel).copied().unwrap_or_default();
+            if info.adopted.map(|a| a.seq >= e.seq).unwrap_or(false) {
+                continue;
+            }
+            // Announcements are not signed. The latest heard replaces one still pending, unless
+            // that one is arriving: a false announcement delays a real one until the next is
+            // heard, and never interrupts a fetch or outlives the real manifest's arrival.
+            if let Some(n) = info.announced {
+                if n.short == e.manifest || self.arriving(&n.short) {
                     continue;
                 }
+                self.wants.remove(&n.short);
+                self.progress.remove(&n.short);
             }
-            self.manifests.insert(e.channel, ManifestInfo { seq: e.seq, short: e.manifest, len: e.len, adopted: false });
+            self.manifests.insert(e.channel, ManifestInfo { adopted: info.adopted, announced: Some(ManifestRef { seq: e.seq, short: e.manifest, len: e.len }) });
             if self.store.ensure_hint(e.manifest, e.len, ContentType::Manifest) {
                 self.quiet_complete.push(e.manifest);
             }
@@ -2715,6 +2836,94 @@ impl Node {
                 self.want_refresh = true;
             }
         }
+        // Whoever announces a seq we hold, or a newer one, has made our correction unneeded.
+        for e in &m.entries {
+            if self.manifests.get(&e.channel).and_then(|i| i.adopted).map(|a| e.seq >= a.seq).unwrap_or(false) {
+                self.corrections.remove(&e.channel);
+            }
+        }
+        if !announcing && m.node == self.announcer_of(self.cell_carrier()) {
+            self.check_announcer_current(m);
+        }
+    }
+
+    /// A follower compares what its announcer announces with the manifests it holds itself, of
+    /// channels it follows or publishes. One the announcer announces with an older seq, or
+    /// leaves out where the frame shows the gap, is announced back to it, after a random wait
+    /// that lets another follower do it first. Otherwise a new announcer whose library is older
+    /// than its cell's, a station back from a power cut for example, never learns the newer
+    /// manifests: sources announce theirs only until their own announcer has them.
+    fn check_announcer_current(&mut self, m: &ManifestAnnounce) {
+        let now = self.now;
+        let retry = self.cfg.params.t_want_min_ms;
+        let held: Vec<(ChannelId, u32, ShortId)> = self
+            .manifests
+            .iter()
+            .filter(|(c, _)| self.follows.contains(c) || self.own_manifests.iter().any(|(o, _, _, _)| o == *c))
+            .filter_map(|(c, i)| i.adopted.filter(|a| self.store.has_complete(&a.short)).map(|a| (*c, a.seq, a.short)))
+            .collect();
+        for (c, seq, short) in held {
+            let behind = match m.entries.iter().find(|e| e.channel == c) {
+                Some(e) => e.seq < seq,
+                None => m.whole || m.entries.windows(2).any(|w| channel_between(&w[0].channel, &c, &w[1].channel)),
+            };
+            // An announcer that is asking for our manifest knows of it: it announces only what it
+            // holds, and is fetching it.
+            let asking = self.ann_asks.get(&short).map(|t| now < *t + self.cfg.params.want_ttl_ms).unwrap_or(false);
+            if behind && !asking && self.corrected.get(&c).map(|t| now >= t + retry).unwrap_or(true) {
+                self.corrections.insert(c);
+                if self.correction_at.is_none() {
+                    self.correction_at = Some(now + self.rng.below(self.cfg.params.t_offer_ms.max(1)));
+                }
+            }
+        }
+    }
+
+    /// Whether our announcer was heard, within `want_ttl`, asking for `id` itself or granting it
+    /// to an uploader: what an honest announcer does with an object it lacks.
+    fn ann_seeking(&self, id: &ShortId) -> bool {
+        let ttl = self.cfg.params.want_ttl_ms;
+        let within = |t: Option<&Millis>| t.map(|t| self.now < *t + ttl).unwrap_or(false);
+        within(self.ann_asks.get(id)) || within(self.ann_grants.get(id))
+    }
+
+    /// Ask our announcer for one symbol of `x`, naming it as the one to answer: proof that it
+    /// serves what it lists (PROTOCOL.md §5.2).
+    fn probe(&mut self, x: ShortId, own: NodeId) {
+        let Some(k) = self.store.block_k(&x, 0) else { return };
+        let esi = self.rng.below(k.max(1) as u64) as u16;
+        self.last_probe = self.now;
+        self.stats.probes += 1;
+        let cell = self.cell_carrier();
+        self.enqueue(cell, Frame::Nack(Nack { node: self.cfg.id, object: x, block: 0, answerer: own, phase: 0, missing: alloc::vec![(esi, 1)] }));
+    }
+
+    /// Whether symbols of `id` arrived within the last `T_nack_stall`: it is being fetched.
+    fn arriving(&self, id: &ShortId) -> bool {
+        self.progress.get(id).map(|p| p.last_progress > 0 && self.now < p.last_progress + self.cfg.params.t_nack_stall_ms).unwrap_or(false)
+    }
+
+    fn correction_check(&mut self) {
+        let Some(at) = self.correction_at else { return };
+        if self.now < at {
+            return;
+        }
+        self.correction_at = None;
+        let now = self.now;
+        let entries: Vec<AnnounceEntry> = core::mem::take(&mut self.corrections)
+            .into_iter()
+            .filter_map(|c| self.manifests.get(&c).and_then(|i| i.adopted).filter(|a| self.store.has_complete(&a.short)).map(|a| AnnounceEntry { channel: c, manifest: a.short, seq: a.seq, len: a.len }))
+            .take(MAX_ANNOUNCE_ENTRIES)
+            .collect();
+        if entries.is_empty() || self.is_announcing() {
+            return;
+        }
+        for e in &entries {
+            self.corrected.insert(e.channel, now);
+        }
+        self.stats.manifest_corrections += 1;
+        let cell = self.cell_carrier();
+        self.enqueue(cell, Frame::ManifestAnnounce(ManifestAnnounce { node: self.cfg.id, entries, whole: false }));
     }
 
     fn rx_nack(&mut self, n: &Nack, rssi: i16) {
@@ -2730,6 +2939,12 @@ impl Node {
                 continue;
             }
             if self.role(i) == Role::Announcer {
+                // A NACK that names another announcer is a follower asking its own for proof
+                // (§5.2): that announcer must answer it, not a neighbour on its behalf.
+                let other = !n.answerer.is_none() && n.answerer != self.cfg.id && self.neighbors.get(&n.answerer).map(|nb| nb.announcer == n.answerer).unwrap_or(false);
+                if other {
+                    continue;
+                }
                 if let Some(car) = self.carriers[i].carousel.as_mut() {
                     car.on_nack(n.object, n.block, &n.missing, &self.store);
                 }
@@ -2827,6 +3042,16 @@ fn compress_ranges(missing: &[u16]) -> Vec<(u16, u16)> {
         }
     }
     out
+}
+
+/// Whether channel `c` lies strictly between `a` and `b` in ascending order, wrapping past the
+/// largest id when `b` is smaller than `a`: neighbours in an announcer's list with `c` not on it.
+fn channel_between(a: &ChannelId, c: &ChannelId, b: &ChannelId) -> bool {
+    if a < b {
+        a < c && c < b
+    } else {
+        c > a || c < b
+    }
 }
 
 #[cfg(test)]

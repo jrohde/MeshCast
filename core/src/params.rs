@@ -98,8 +98,6 @@ pub struct Params {
     pub control_reserve: u16,
     /// An object leaves the carousel after this many full passes unless re-wanted.
     pub max_passes: u16,
-    /// Manifests ("always" objects) are carouseled at most this often when nothing else is wanted.
-    pub t_always_ms: Millis,
     /// A node NACKs an object that is ≥ threshold complete after this long without progress.
     pub t_nack_stall_ms: Millis,
     /// Minimum interval between two gossip rounds of the same node.
@@ -149,7 +147,6 @@ impl Default for Params {
             neighbor_ttl_ms: 3_600_000,
             control_reserve: 100,
             max_passes: 1,
-            t_always_ms: 300_000,
             t_nack_stall_ms: 60_000,
             t_gossip_min_ms: 30_000,
             tx_jitter_ms: 500,

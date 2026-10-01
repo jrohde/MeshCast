@@ -236,6 +236,48 @@ struct Report {
     /// Carousel symbol frames on first passes and on repeated ones.
     carousel_first: u64,
     carousel_repeat: u64,
+    /// Per follower and source, the hours until it held the first of that source's objects and
+    /// until it held all of them: the median of each, the 90th percentile of the second, and the
+    /// share of pairs that never held all of them.
+    whole: WholeContent,
+}
+
+#[derive(Serialize, Clone, Default)]
+struct WholeContent {
+    first_p50_h: Option<f64>,
+    all_p50_h: Option<f64>,
+    all_p90_h: Option<f64>,
+    incomplete: f64,
+}
+
+/// Content is what a listener wants whole: a source's objects together, however it split them.
+fn whole_content(tracks: &BTreeMap<meshcast_core::ids::ShortId, scenario::TrackInfo>, completions: &BTreeMap<(usize, meshcast_core::ids::ShortId), Millis>) -> WholeContent {
+    let mut per: BTreeMap<(usize, usize), (Millis, Millis, bool)> = BTreeMap::new();
+    for (id, t) in tracks {
+        for &f in &t.followers {
+            let e = per.entry((f, t.source)).or_insert((Millis::MAX, 0, true));
+            match completions.get(&(f, *id)) {
+                Some(&c) => {
+                    e.0 = e.0.min(c);
+                    e.1 = e.1.max(c);
+                }
+                None => e.2 = false,
+            }
+        }
+    }
+    let h = |ms: Millis| ms as f64 / 3.6e6;
+    let mut first: Vec<f64> = per.values().filter(|e| e.0 != Millis::MAX).map(|e| h(e.0)).collect();
+    // A pair that never completed counts as never: it sorts after every finite time.
+    let mut all: Vec<f64> = per.values().map(|e| if e.2 { h(e.1) } else { f64::INFINITY }).collect();
+    first.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    all.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let fin = |x: Option<f64>| x.filter(|v| v.is_finite());
+    WholeContent {
+        first_p50_h: percentile(&first, 0.5),
+        all_p50_h: fin(percentile(&all, 0.5)),
+        all_p90_h: fin(percentile(&all, 0.9)),
+        incomplete: if per.is_empty() { 0.0 } else { per.values().filter(|e| !e.2).count() as f64 / per.len() as f64 },
+    }
 }
 
 /// How followers that cannot decode were served (PROTOCOL.md §1.2).
@@ -528,7 +570,7 @@ fn simulate(spec: ScenarioSpec, verbose: bool, failover: Option<(f64, f64)>) -> 
                     let n = &eng.nodes[f].node;
                     let ann = n.announcer_of(bulk_c);
                     let aj = (ann.0 as usize).wrapping_sub(1);
-                    eprintln!("MISSING node {} obj {:?} alive {} progress {:?} wants {} follows {:?} ann_has {:?} view {:?}", f, id, eng.nodes[f].alive, n.object_progress(id), n.wants_object(id), ann, eng.nodes.get(aj).map(|a| a.node.holds(id)), n.excursion_view(id));
+                    eprintln!("MISSING node {} attacker {} obj {:?} alive {} progress {:?} wants {} follows {:?} ann_has {:?} view {:?}", f, eng.attackers.iter().any(|a| a.node == f), id, eng.nodes[f].alive, n.object_progress(id), n.wants_object(id), ann, eng.nodes.get(aj).map(|a| a.node.holds(id)), n.excursion_view(id));
                 }
             }
         }
@@ -693,6 +735,7 @@ fn simulate(spec: ScenarioSpec, verbose: bool, failover: Option<(f64, f64)>) -> 
         upload_other: m.upload_collision_other_object,
         renditions,
         attack_frames: m.attack_frames,
+        whole: whole_content(&built.tracks, &m.completions),
         carousel_first: eng.nodes.iter().map(|n| n.node.stats.carousel_frames[0]).sum(),
         carousel_repeat: eng.nodes.iter().map(|n| n.node.stats.carousel_frames[1]).sum(),
         per_node,
@@ -745,6 +788,8 @@ struct SeedLine {
     role_events: usize,
     challenges: u32,
     excursions: u64,
+    frames_sent: u64,
+    whole: WholeContent,
 }
 
 /// Several seeds of one scenario: the spread is the result, not any single run.
@@ -776,7 +821,7 @@ impl Ensemble {
             spec: reports[0].spec.clone(),
             seeds: reports
                 .iter()
-                .map(|r| SeedLine { seed: r.spec.seed, delivered: delivered(r), bulk_sent: r.bulk_sent, by_kind: by_kind(&r.objects), renditions: r.renditions.clone(), attack_frames: r.attack_frames, carousel_first: r.carousel_first, carousel_repeat: r.carousel_repeat, role_events: r.role_events, challenges: r.challenges, excursions: r.excursions })
+                .map(|r| SeedLine { seed: r.spec.seed, delivered: delivered(r), bulk_sent: r.bulk_sent, by_kind: by_kind(&r.objects), renditions: r.renditions.clone(), attack_frames: r.attack_frames, carousel_first: r.carousel_first, carousel_repeat: r.carousel_repeat, role_events: r.role_events, challenges: r.challenges, excursions: r.excursions, frames_sent: r.frames_sent, whole: r.whole.clone() })
                 .collect(),
         }
     }
@@ -801,6 +846,14 @@ impl Ensemble {
         let first: Vec<f64> = self.seeds.iter().map(|s| s.carousel_first as f64).collect();
         let rep: Vec<f64> = self.seeds.iter().map(|s| s.carousel_repeat as f64).collect();
         println!("  carousel       first passes mean {:.0}, repeated passes mean {:.0} (max {:.0})", mean(&first), mean(&rep), max(&rep));
+        let fs: Vec<f64> = self.seeds.iter().map(|s| s.frames_sent as f64).collect();
+        let w = |f: fn(&WholeContent) -> Option<f64>| -> String {
+            let v: Vec<f64> = self.seeds.iter().filter_map(|s| f(&s.whole)).map(|h| h * 60.0).collect();
+            if v.len() == n { format!("{:.1} min (max {:.1})", mean(&v), max(&v)) } else { format!("{} of {n} seeds complete", v.len()) }
+        };
+        let inc: Vec<f64> = self.seeds.iter().map(|s| s.whole.incomplete * 100.0).collect();
+        println!("  whole content  first object {}, all of it median {}, p90 {}; never all {:.1} %; all frames mean {:.0}",
+            w(|x| x.first_p50_h), w(|x| x.all_p50_h), w(|x| x.all_p90_h), mean(&inc), mean(&fs));
         let roles: Vec<f64> = self.seeds.iter().map(|s| s.role_events as f64).collect();
         let ch: Vec<f64> = self.seeds.iter().map(|s| s.challenges as f64).collect();
         let ex: Vec<f64> = self.seeds.iter().map(|s| s.excursions as f64).collect();
@@ -1135,7 +1188,7 @@ fn run_dynamics(nodes: usize, area_km2: f64, stations: usize, channels: usize, f
                         let aj = (ann.0 as usize).wrapping_sub(1);
                         let ann_has = eng.nodes.get(aj).map(|n| n.node.holds(&id));
                         let ch = &built.sources[c].channel;
-                        eprintln!("  manifest: node {:?} ann {:?} source {:?} (seq {})", eng.nodes[i].node.manifest_state(ch), eng.nodes.get(aj).and_then(|n| n.node.manifest_state(ch)), eng.nodes[built.sources[c].node].node.manifest_state(ch), built.sources[c].seq);
+                        eprintln!("  manifest: node {:?} (in store {:?}) ann {:?} role {:?} source {:?} (seq {})", eng.nodes[i].node.manifest_state(ch), eng.nodes[i].node.manifest_state(ch).map(|m| eng.nodes[i].node.store.entry(&m.1).is_some()), eng.nodes.get(aj).and_then(|n| n.node.manifest_state(ch)), eng.nodes.get(aj).map(|n| n.node.role(bulk_c_early)), eng.nodes[built.sources[c].node].node.manifest_state(ch), built.sources[c].seq);
                         eprintln!("MISSING node {} attacker {} obj {:?} kind {:?} len {} progress {:?} wants {} follows {:?} ann_has {:?} ann_wants {:?} source {} src_has {}", i, eng.attackers.iter().any(|a| a.node == i), id, o.kind, o.len, eng.nodes[i].node.object_progress(&id), eng.nodes[i].node.wants_object(&id), ann, ann_has, eng.nodes.get(aj).map(|n| n.node.wants_object(&id)), built.sources[c].node, eng.nodes[built.sources[c].node].node.holds(&id));
                     }
                 }
@@ -1211,6 +1264,7 @@ fn run_dynamics(nodes: usize, area_km2: f64, stations: usize, channels: usize, f
     println!("uploads {}, announcers {}, role events {}, challenges {}, excursions {}", uploads, announcers_final, m.role_events.len(), eng.nodes.iter().map(|n| n.node.challenges()).sum::<u32>(), eng.nodes.iter().map(|n| n.node.stats.excursions).sum::<u64>());
     let sum = |f: fn(&meshcast_core::node::Stats) -> u64| eng.nodes.iter().map(|n| f(&n.node.stats)).sum::<u64>();
     println!("  of the uploads, repair answers {}; grants given {}, lapsed {}", sum(|s| s.repairs_started), sum(|s| s.grants_given), sum(|s| s.grants_lapsed));
+    println!("  manifest corrections sent by followers to their announcer: {}; probes of a silent announcer: {}", sum(|s| s.manifest_corrections), sum(|s| s.probes));
     {
         let mut n = 0;
         let mut kinds = std::collections::BTreeMap::new();

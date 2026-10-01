@@ -39,8 +39,9 @@ Also called tokens.
 **Content type.** One byte in a manifest entry that says what an object is: manifest, text,
 firmware, speech (SNAC 24 kHz) or music (SNAC 32 kHz). PROTOCOL.md §1.1.
 
-**Control carrier.** The LoRa channel used for beacons, gossip and manifest announcements:
-long range, tiny throughput.
+**Control carrier.** The LoRa channel that carries manifest announcements between cells: long
+range, tiny throughput. Beacons, gossip and everything else cell-local travel on the bulk
+carrier (PROTOCOL.md §3).
 
 **Duty cycle.** The fraction of time a transmitter may be on, per hour, in regimes that use it
 (e.g. 10 % in EU band O).
@@ -62,7 +63,9 @@ never transmit unless they have something the announcer lacks.
 **Gossip.** Small HAVE/WANT frames by which sources and the announcer learn what exists and what
 is needed. Followers stay silent by default.
 
-**Manifest.** A signed catalogue and schedule for a channel; itself an object.
+**Manifest.** A signed catalogue and schedule for a channel; itself an object. A node believes
+a manifest it has checked (*adopted*); one it has only heard announced is something to fetch
+(PROTOCOL.md §2).
 
 **Object.** An immutable, hash-identified blob: track, bulletin, manifest, firmware image, page.
 

@@ -70,8 +70,9 @@ impl Entry {
         Entry { short, meta: None, len_hint: None, kind_hint: kind, blocks: Vec::new(), bytes: None, complete: false, verified: false }
     }
     /// Take `len` as the object's length: size the block table and, if we keep this object's
-    /// bytes, the buffer. Whatever was held under another length is dropped.
-    fn set_len(&mut self, len: u32, keep_below: usize) {
+    /// bytes, the buffer. Whatever was held under another length is dropped. A store may keep
+    /// only small objects' bytes, but never fails to keep what a node must read (`kind`).
+    fn set_len(&mut self, len: u32, keep_below: usize, kind: ContentType) {
         let nb = blocks(len) as usize;
         if self.len().map(|l| l != len).unwrap_or(false) {
             self.blocks.clear();
@@ -79,7 +80,7 @@ impl Entry {
             self.complete = false;
         }
         self.blocks.resize(nb, None);
-        if (len as usize) <= keep_below && self.bytes.is_none() {
+        if ((len as usize) <= keep_below || kind.is_read_by_nodes()) && self.bytes.is_none() {
             self.bytes = Some(vec![0u8; nb * K_MAX as usize * SYMBOL_SIZE]);
         }
     }
@@ -157,7 +158,7 @@ impl MemStore {
         if e.meta.is_none() {
             // The signed metadata is the authority: a different length from a symbol or an
             // announce loses what was held under it.
-            e.set_len(meta.len, keep);
+            e.set_len(meta.len, keep, meta.kind);
             e.meta = Some(meta);
             e.len_hint = None;
             if e.complete {
@@ -177,7 +178,7 @@ impl MemStore {
         let e = self.entries.entry(short).or_insert_with(|| Entry::empty(short, kind));
         let was = e.complete;
         if e.meta.is_none() && e.len_hint.is_none() {
-            e.set_len(len, keep);
+            e.set_len(len, keep, kind);
             e.len_hint = Some(len);
             e.kind_hint = kind;
             Self::recheck(e);
@@ -198,7 +199,7 @@ impl MemStore {
             }
             blk.push(Some(block));
         }
-        let keep = (meta.len as usize) <= self.keep_bytes_below;
+        let keep = (meta.len as usize) <= self.keep_bytes_below || meta.kind.is_read_by_nodes();
         let stored = match (keep, bytes) {
             (true, Some(b)) => {
                 let mut v = vec![0u8; nb * K_MAX as usize * SYMBOL_SIZE];
@@ -230,7 +231,8 @@ impl MemStore {
             Some(l) if l != len => return Put::Rejected,
             Some(_) => {}
             None => {
-                e.set_len(len, keep);
+                let kind = e.kind();
+                e.set_len(len, keep, kind);
                 e.len_hint = Some(len);
             }
         }
@@ -401,6 +403,30 @@ mod tests {
         assert!(!st.ensure(meta), "completion is reported once, by the symbol that completed it");
         assert!(st.has_complete(&short));
         assert!(st.entry(&short).unwrap().verified);
+    }
+
+    #[test]
+    fn a_manifest_is_kept_whatever_its_size() {
+        // A store that keeps only small objects' bytes must still keep a large manifest: a node
+        // reads it to know what to want. A channel listing 63 objects outgrew a 4 kB threshold,
+        // and nobody ever wanted its objects (FEASIBILITY.md §13).
+        let data: Vec<u8> = (0..9000u32).map(|i| (i * 7 % 251) as u8).collect();
+        let meta = ObjectMeta { id: ObjectId::of(&data), len: data.len() as u32, kind: ContentType::Manifest };
+        let short = meta.id.short();
+        let mut st = MemStore::new(4096);
+        st.ensure(meta);
+        for (esi, sym) in symbols_of(&data).iter().enumerate() {
+            st.put_symbol(short, 0, esi as u16, meta.len, sym);
+        }
+        assert_eq!(st.bytes(&short).unwrap(), &data[..]);
+        // Music of the same size is only counted.
+        let music = ObjectMeta { id: ObjectId::of(&data[1..]), len: data.len() as u32 - 1, kind: ContentType::Music };
+        st.ensure(music);
+        for esi in 0..block_k(music.len, 0) {
+            st.put_symbol(music.id.short(), 0, esi, music.len, &[0u8; SYMBOL_SIZE]);
+        }
+        assert!(st.has_complete(&music.id.short()));
+        assert!(st.bytes(&music.id.short()).is_none());
     }
 
     #[test]

@@ -399,3 +399,89 @@ fn a_false_announcer_is_left() {
     }
     assert_eq!(missing, 0, "{missing} follower-object pairs never completed");
 }
+
+#[test]
+fn a_channel_followed_again_is_fetched_again() {
+    // A follower that stops following a channel forgets its objects and its manifest's bytes but
+    // remembers the manifest's seq, so announcers that list that seq tell it nothing new. When it
+    // follows the channel again it must ask for the manifest itself: nobody repeats manifests
+    // unasked (PROTOCOL.md §4). Before, it waited for a seq that would not come.
+    let s = spec(BulkPreset::GfskO, vec![(0.0, 0.0), (1000.0, 0.0), (500.0, 0.0)], vec![0], vec![2], 4.0);
+    let mut b = build(&s, Params::default());
+    let chan = b.sources[0].channel;
+    b.engine.run(3_600_000, 600_000);
+    let holds_all = |b: &meshcast_sim::scenario::Built| b.tracks.keys().all(|id| b.engine.nodes[1].node.holds(id));
+    assert!(holds_all(&b), "the follower should hold everything after an hour");
+    b.engine.nodes[1].node.unfollow(chan);
+    b.engine.run(3_600_000 + 600_000, 600_000);
+    let m = b.engine.nodes[1].node.manifest_state(&chan).expect("the seq is remembered");
+    assert!(!m.3 && b.tracks.keys().all(|id| !b.engine.nodes[1].node.holds(id)), "unfollowing should evict the channel");
+    b.engine.nodes[1].node.follow(chan);
+    b.engine.poke(1);
+    b.engine.run(2 * 3_600_000, 600_000);
+    assert!(b.engine.nodes[1].node.manifest_state(&chan).map(|m| m.3).unwrap_or(false), "the manifest should be fetched again");
+    assert!(holds_all(&b), "the channel's objects should be fetched again");
+}
+
+#[test]
+fn a_false_announcement_blocks_nothing() {
+    // MANIFEST_ANNOUNCE is not signed. A node that believed an announced seq kept it as the
+    // channel's newest, so one frame claiming the highest seq made it ignore every real
+    // announcement and refuse the real, signed manifest; and while it waited for the announced
+    // one it evicted the window it held. Now an announced manifest is only something to fetch
+    // (PROTOCOL.md §2, ABUSE.md).
+    use meshcast_core::frame::{AnnounceEntry, Frame, ManifestAnnounce};
+    use meshcast_core::ids::{NodeId, ShortId};
+    use meshcast_core::manifest::Manifest;
+    use meshcast_core::object::ContentType;
+    let s = spec(BulkPreset::GfskO, vec![(0.0, 0.0), (1000.0, 0.0), (500.0, 0.0)], vec![0], vec![2], 4.0);
+    let mut b = build(&s, Params::default());
+    b.engine.run(3_600_000, 600_000);
+    let window: Vec<ShortId> = b.tracks.keys().copied().collect();
+    assert!(window.iter().all(|id| b.engine.nodes[1].node.holds(id)), "the follower should hold the window after an hour");
+    let chan = b.sources[0].channel;
+    let lie = Frame::ManifestAnnounce(ManifestAnnounce {
+        node: NodeId(99),
+        entries: vec![AnnounceEntry { channel: chan, manifest: ShortId([0xEE; 8]), seq: u32::MAX, len: 5_000 }],
+        whole: false,
+    });
+    for i in [1, 2] {
+        let now = b.engine.now;
+        b.engine.nodes[i].node.handle_frame(now, 1, &lie, -60);
+    }
+    b.engine.run(3_600_000 + 600_000, 600_000);
+    assert!(window.iter().all(|id| b.engine.nodes[1].node.holds(id)), "an announcement alone should not evict the window");
+    // The source publishes for real: the window plus one object.
+    let src = &mut b.sources[0];
+    let o = meshcast_sim::scenario::track_object(s.seed, src.node, src.objects.len(), 20_000, ContentType::Speech);
+    src.objects.push(o.clone());
+    src.seq += 1;
+    let m = Manifest::sign(&src.key, src.seq, "Channel", src.objects.clone(), Vec::new(), None);
+    let node = src.node;
+    b.engine.nodes[node].node.publish(&m, &[(o.meta(), None)]);
+    b.engine.poke(node);
+    b.engine.run(3 * 3_600_000, 600_000);
+    let seq = b.sources[0].seq;
+    let held = b.engine.nodes[1].node.manifest_state(&chan);
+    assert!(held.map(|m| m.0 == seq || m.3).unwrap_or(false) && b.engine.nodes[1].node.holds(&o.id.short()), "the real manifest should arrive: {held:?}");
+}
+
+#[test]
+fn a_station_back_from_a_power_cut_keeps_its_library() {
+    // A station serves every channel but follows none of them itself. Switched back on, it is
+    // not yet announcing, so it evicted at once every object it does not follow, and fetched it
+    // all again when it took over a minute later. A node that restarts keeps what it carried for
+    // `want_ttl` (PROTOCOL.md §4).
+    let s = spec(BulkPreset::GfskO, vec![(0.0, 0.0), (1000.0, 0.0), (500.0, 0.0)], vec![0], vec![2], 3.0);
+    let mut b = build(&s, Params::default());
+    let chan = b.sources[0].channel;
+    b.engine.nodes[2].node.unfollow(chan);
+    b.engine.run(3_600_000, 600_000);
+    let objects: Vec<_> = b.tracks.keys().copied().collect();
+    assert!(objects.iter().all(|id| b.engine.nodes[2].node.holds(id)), "the station should serve everything after an hour");
+    b.engine.set_alive(2, false);
+    b.engine.run(3_600_000 + 600_000, 600_000);
+    b.engine.set_alive(2, true);
+    b.engine.run(3_600_000 + 600_000 + 120_000, 600_000);
+    assert!(objects.iter().all(|id| b.engine.nodes[2].node.holds(id)), "a restart should not cost the station its library");
+}

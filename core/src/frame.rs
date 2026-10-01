@@ -145,7 +145,11 @@ pub struct AnnounceEntry {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ManifestAnnounce {
     pub node: NodeId,
+    /// Entries in ascending channel order, wrapping around once at most (PROTOCOL.md §3.4).
     pub entries: Vec<AnnounceEntry>,
+    /// The entries are every manifest the sender serves (flag bit 0): an announcer whose list
+    /// fits in one frame. A follower then knows that a channel not in it is unknown to it.
+    pub whole: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -256,7 +260,7 @@ impl Frame {
             }
             Frame::ManifestAnnounce(m) => {
                 out.push((VERSION << 4) | FrameType::ManifestAnnounce as u8);
-                out.push(0);
+                out.push(m.whole as u8);
                 out.extend_from_slice(&m.node.0.to_le_bytes());
                 let n = m.entries.len().min(MAX_ANNOUNCE_ENTRIES);
                 out.push(n as u8);
@@ -377,7 +381,7 @@ impl Frame {
                     let len = c.u32()?;
                     entries.push(AnnounceEntry { channel: ChannelId(channel), manifest, seq, len });
                 }
-                Frame::ManifestAnnounce(ManifestAnnounce { node, entries })
+                Frame::ManifestAnnounce(ManifestAnnounce { node, entries, whole: flags & 1 != 0 })
             }
             5 => {
                 let node = NodeId(c.u32()?);
@@ -475,6 +479,7 @@ mod tests {
             Frame::ManifestAnnounce(ManifestAnnounce {
                 node: NodeId(5),
                 entries: vec![AnnounceEntry { channel: ChannelId([6; 8]), manifest: ShortId([7; 8]), seq: 9, len: 1234 }; 8],
+                whole: true,
             }),
             Frame::Nack(Nack { node: NodeId(8), object: ShortId([2; 8]), block: 0, answerer: NodeId(3), phase: 5, missing: vec![(0, 3), (10, 1)] }),
         ];

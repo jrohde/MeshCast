@@ -1,7 +1,8 @@
 //! The announcer's carousel (PROTOCOL.md §4): a loop over the objects the cell wants, the most
 //! listeners served per byte first, NACKed symbols at the front. Each object gets `max_passes` full passes, then leaves the
-//! loop unless someone wants it again; manifests are repeated at most every `t_always`. When
-//! nothing is wanted the carousel is silent.
+//! loop unless someone wants it again. A manifest is passed once unasked when it is new, and
+//! otherwise only when wanted, before anything else. When nothing is wanted the carousel is
+//! silent.
 
 use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::vec::Vec;
@@ -32,7 +33,6 @@ pub enum Item {
 #[derive(Clone, Copy, Debug)]
 pub struct CarouselParams {
     pub max_passes: u16,
-    pub t_always_ms: Millis,
     pub want_ttl_ms: Millis,
     /// Unit of the repetition backoff: the second repetition of an object waits this long after
     /// the pass before, later ones up to eight times as long, however many ask (docs/ABUSE.md).
@@ -51,13 +51,15 @@ pub struct Carousel {
     front: VecDeque<(ShortId, u16, u16)>,
     front_set: BTreeSet<(ShortId, u16, u16)>,
     wants: BTreeMap<ShortId, BTreeMap<NodeId, Millis>>,
-    always: BTreeSet<ShortId>,
+    /// Manifests this carousel serves: whenever one is passed, it goes before anything else.
+    manifests: BTreeSet<ShortId>,
+    /// Manifests not passed since they became new: each gets one pass without being asked.
+    fresh: BTreeSet<ShortId>,
     /// Completed passes, the time the last pass ended, and how often in a row it was passed
     /// again without resting (the backoff level).
     passes: BTreeMap<ShortId, (u16, Millis, u8)>,
     /// When an object was first asked for again after its last pass.
     asked_since: BTreeMap<ShortId, Millis>,
-    last_always: Option<Millis>,
     pub rebuilds: u64,
 }
 
@@ -74,10 +76,10 @@ impl Carousel {
             front: VecDeque::new(),
             front_set: BTreeSet::new(),
             wants: BTreeMap::new(),
-            always: BTreeSet::new(),
+            manifests: BTreeSet::new(),
+            fresh: BTreeSet::new(),
             passes: BTreeMap::new(),
             asked_since: BTreeMap::new(),
-            last_always: None,
             rebuilds: 0,
         }
     }
@@ -116,13 +118,15 @@ impl Carousel {
         }
     }
 
-    pub fn set_always(&mut self, id: ShortId) {
-        self.always.insert(id);
-        self.last_always = None; // send soon
+    /// A manifest this carousel serves, new to it: passed once soon, then when asked for.
+    pub fn add_manifest(&mut self, id: ShortId) {
+        self.manifests.insert(id);
+        self.fresh.insert(id);
     }
 
-    pub fn unset_always(&mut self, id: &ShortId) {
-        self.always.remove(id);
+    pub fn remove_manifest(&mut self, id: &ShortId) {
+        self.manifests.remove(id);
+        self.fresh.remove(id);
     }
 
     pub fn wanted_by(&self, id: &ShortId) -> usize {
@@ -186,22 +190,9 @@ impl Carousel {
             .min()
     }
 
-    fn always_due(&self, now: Millis) -> bool {
-        !self.always.is_empty() && self.last_always.map(|t| now >= t + self.p.t_always_ms).unwrap_or(true)
-    }
-
-    /// Whether `peek` would return something now or at `next_due`.
+    /// Whether `peek` would return something now.
     pub fn has_work(&self, store: &MemStore, now: Millis) -> bool {
-        !self.front.is_empty() || self.idx < self.set.len() || !self.always.is_empty() || self.wants.keys().any(|id| self.eligible(id, store, now))
-    }
-
-    /// When the idle carousel next has something to do (the manifest repetition), if anything.
-    pub fn next_due(&self) -> Option<Millis> {
-        if self.always.is_empty() {
-            None
-        } else {
-            Some(self.last_always.map(|t| t + self.p.t_always_ms).unwrap_or(0))
-        }
+        !self.front.is_empty() || self.idx < self.set.len() || !self.fresh.is_empty() || self.wants.keys().any(|id| self.eligible(id, store, now))
     }
 
     fn rebuild(&mut self, store: &MemStore, now: Millis) {
@@ -226,20 +217,23 @@ impl Carousel {
                 }
             }
         }
-        let include_always = self.always_due(now) || !wanted.is_empty();
-        if include_always {
-            for id in &self.always {
-                if store.has_complete(id) {
-                    scored.push((u64::MAX, 1, *id));
-                }
+        // A new manifest once, unasked; after that a manifest is passed when it is wanted, like
+        // any object. Repeating every manifest on a timer and in every round cost up to 29 % of all
+        // frames, more where channels list many objects, and delivered nothing sooner: a node that
+        // lacks a manifest learns its id from MANIFEST_ANNOUNCE and asks (FEASIBILITY.md §13).
+        let fresh = core::mem::take(&mut self.fresh);
+        for id in &fresh {
+            if store.has_complete(id) {
+                scored.push((u64::MAX, 1, *id));
             }
-            self.last_always = Some(now);
         }
         for id in wanted {
-            if !self.always.contains(&id) {
+            if !self.manifests.contains(&id) {
                 let listeners = self.wants.get(&id).map(|w| w.len()).unwrap_or(0) as u64;
                 let bytes = store.entry(&id).and_then(|e| e.len()).unwrap_or(1).max(1) as u64;
                 scored.push((listeners, bytes, id));
+            } else if !fresh.contains(&id) {
+                scored.push((u64::MAX, 1, id));
             }
         }
         // a before b when a.listeners / a.bytes > b.listeners / b.bytes, compared without division.
