@@ -28,6 +28,12 @@ pub enum ContentType {
 }
 
 impl ContentType {
+    /// Objects a node reads itself to know what to want and how to play: a channel's manifest
+    /// and its rendition table. Their bytes are always kept, whatever their size.
+    pub fn is_read_by_nodes(self) -> bool {
+        matches!(self, ContentType::Manifest | ContentType::Renditions)
+    }
+
     pub fn from_u8(v: u8) -> Self {
         match v {
             1 => ContentType::Manifest,
