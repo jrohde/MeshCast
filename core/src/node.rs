@@ -7,9 +7,9 @@ use alloc::vec::Vec;
 
 use crate::carousel::{Carousel, CarouselParams, Item};
 use crate::discipline::{Accounting, Verdict};
-use crate::election::{Election, Transition};
+use crate::election::{step_up_order, Election, Transition};
 use crate::fatsoen::Fatsoen;
-use crate::frame::{AnnounceEntry, Beacon, Bulk, CarrierKind, Class, Frame, FrameType, Gossip, ManifestAnnounce, Nack, MAX_ANNOUNCE_ENTRIES, MAX_GOSSIP_IDS, MAX_NACK_RANGES, MAX_WANT, SYMBOL_SIZE};
+use crate::frame::{AnnounceEntry, Beacon, Bulk, CarrierKind, CAP_IP, CAP_MAINS, Class, Frame, FrameType, Gossip, ManifestAnnounce, Nack, MAX_ANNOUNCE_ENTRIES, MAX_GOSSIP_IDS, MAX_NACK_RANGES, MAX_WANT, SYMBOL_SIZE};
 use crate::ids::{ChannelId, NodeId, ShortId};
 use crate::manifest::Manifest;
 use crate::rendition::RenditionTable;
@@ -68,6 +68,9 @@ pub struct CarrierState {
     pub occupancy_permille: u16,
 }
 
+/// Diagnostic view of where an object could be fetched from: see `Node::excursion_view`.
+pub type ExcursionView = (Vec<(NodeId, bool, i16)>, Vec<(NodeId, NodeId)>);
+
 pub enum Event<'a> {
     Tick { now: Millis, carriers: &'a [CarrierState] },
     Rx { now: Millis, carrier: usize, bytes: &'a [u8], rssi_dbm: i16 },
@@ -90,6 +93,8 @@ pub enum Action {
 
 #[derive(Clone, Debug, Default)]
 pub struct Stats {
+    /// Excursions started: following another announcer for an object ours could not get.
+    pub excursions: u64,
     pub tx_frames: [u64; 3],
     pub tx_by_type: [u64; 6],
     pub tx_airtime_ms: Vec<u64>,
@@ -195,6 +200,8 @@ struct Pending {
 
 #[derive(Clone, Copy, Debug, Default)]
 struct Progress {
+    /// When we started wanting the object.
+    wanted_at: Millis,
     last_progress: Millis,
     last_nack: Millis,
     last_want: Millis,
@@ -276,7 +283,9 @@ pub struct Node {
     manifests: BTreeMap<ChannelId, ManifestInfo>,
     own_manifests: Vec<(ChannelId, ShortId, u32, u32)>,
     own_objects: BTreeSet<ShortId>,
-    pending_ack: BTreeSet<ShortId>,
+    /// Our own objects and manifests that nobody else has been seen to carry yet, and since when:
+    /// we keep offering and announcing them.
+    pending_ack: BTreeMap<ShortId, Millis>,
     wants: BTreeSet<ShortId>,
     /// Objects completed by registration rather than by a symbol, awaiting `on_complete`.
     quiet_complete: Vec<ShortId>,
@@ -315,6 +324,14 @@ pub struct Node {
     renditions: BTreeMap<ShortId, (ShortId, ObjectMeta)>,
     /// Renditions we will want when their slot comes near: (slot start, rendition).
     renditions_due: Vec<(Millis, ShortId)>,
+    /// A running excursion: (carrier, the announcer we visit, since when).
+    excursion: Option<(usize, NodeId, Millis)>,
+    /// Objects our announcer was last heard asking for itself, and when: it cannot repair them.
+    ann_asks: BTreeMap<ShortId, Millis>,
+    /// Objects our announcer was last heard granting to an uploader, and when: they are coming.
+    ann_grants: BTreeMap<ShortId, Millis>,
+    /// When we last received a BULK frame of any object: a channel that carries nothing.
+    last_bulk_rx: Millis,
     /// When the announcer last heard an upload in each phase.
     phase_heard: [Millis; MAX_UPLOAD_PHASES as usize],
     /// Holder side: grants we received, with the time, so that we still answer the announcer's
@@ -363,7 +380,7 @@ impl Node {
             manifests: BTreeMap::new(),
             own_manifests: Vec::new(),
             own_objects: BTreeSet::new(),
-            pending_ack: BTreeSet::new(),
+            pending_ack: BTreeMap::new(),
             wants: BTreeSet::new(),
             quiet_complete: Vec::new(),
             neighbors: BTreeMap::new(),
@@ -390,6 +407,10 @@ impl Node {
             phase_heard: [0; MAX_UPLOAD_PHASES as usize],
             renditions: BTreeMap::new(),
             renditions_due: Vec::new(),
+            excursion: None,
+            ann_asks: BTreeMap::new(),
+            ann_grants: BTreeMap::new(),
+            last_bulk_rx: 0,
             granted_to_us: BTreeMap::new(),
             offers: Vec::new(),
             stats,
@@ -468,6 +489,15 @@ impl Node {
         }
         let colour = if ann == self.cfg.id { self.my_colour() } else { c.election.as_ref().and_then(|e| e.colour_of(ann)).unwrap_or(0) };
         ((hop_channel(BASE_ID, di, n) as u64 + colour as u64) % n) as u8
+    }
+
+    /// The announcer whose channel `node` listens on: itself if it announces, else the one it
+    /// said it follows. A repair for a follower goes where that follower is tuned.
+    fn listens_with(&self, node: NodeId) -> NodeId {
+        match self.neighbors.get(&node) {
+            Some(nb) if !nb.announcer.is_none() => nb.announcer,
+            _ => node,
+        }
     }
 
     /// A colour maps to a channel (`colour mod n`) and, when there are more colours than
@@ -564,6 +594,16 @@ impl Node {
         self.hops(carrier) && self.is_meeting_dwell(now / self.cfg.params.dwell_ms.max(1))
     }
 
+    /// On a hopping carrier a candidate steps up in a meeting dwell, where every candidate is on
+    /// one channel and hears the first of them: after the announcers' meeting beacons, in the
+    /// order of `step_up_order` over most of the rest of the dwell.
+    fn step_up_time(&mut self, now: Millis, score: u16, caps: u8) -> Millis {
+        let dwell = self.cfg.params.dwell_ms.max(1);
+        let off = dwell / 5 + step_up_order(caps, score, dwell * 7 / 10, &mut self.rng);
+        let this = if self.is_meeting_dwell(now / dwell) { (now / dwell) * dwell + off } else { 0 };
+        if this > now { this } else { self.next_meeting_start(now) + off }
+    }
+
     /// Start of the next meeting dwell strictly after `now`.
     fn next_meeting_start(&self, now: Millis) -> Millis {
         let dwell = self.cfg.params.dwell_ms.max(1);
@@ -632,6 +672,23 @@ impl Node {
     /// Diagnostic: whether `now` is in the rendezvous on `carrier`.
     pub fn in_meeting(&self, carrier: usize, now: Millis) -> bool {
         self.in_rendezvous(carrier, now)
+    }
+
+    /// Diagnostic: how often we challenged an announcer, over all carriers.
+    pub fn challenges(&self) -> u32 {
+        self.carriers.iter().filter_map(|c| c.election.as_ref()).map(|e| e.challenges).sum()
+    }
+
+    /// Diagnostic: announcers we heard a beacon from recently on the cell carrier, and for each
+    /// whether its HAVE listed `id` and how well we hear it; plus every neighbour that listed it,
+    /// with the announcer it follows.
+    pub fn excursion_view(&self, id: &ShortId) -> ExcursionView {
+        let i = self.cell_carrier();
+        let own = self.announcer_of(i);
+        let heard: Vec<NodeId> = self.carriers.get(i).and_then(|c| c.election.as_ref()).map(|e| e.heard_ids(self.now, own).collect()).unwrap_or_default();
+        let a = heard.iter().map(|a| (*a, self.neighbors.get(a).map(|n| n.haves.contains(id)).unwrap_or(false), self.neighbors.get(a).map(|n| n.rssi).unwrap_or(0))).collect();
+        let h = self.neighbors.iter().filter(|(_, n)| n.haves.contains(id)).map(|(k, n)| (*k, n.announcer)).collect();
+        (a, h)
     }
 
     /// Diagnostic: how many objects we want.
@@ -899,6 +956,18 @@ impl Node {
             .unwrap_or(NodeId::NONE)
     }
 
+    /// The holder of `id` we hear best that follows another announcer than ours: a holder in our
+    /// own cell answers our announcer's ask, so naming it ourselves would only duplicate that.
+    fn best_holder_elsewhere(&self, id: &ShortId) -> NodeId {
+        let own = self.announcer_of(self.cell_carrier());
+        self.neighbors
+            .iter()
+            .filter(|(n, nb)| nb.haves.contains(id) && nb.announcer != **n && nb.announcer != own)
+            .max_by_key(|(_, nb)| nb.rssi)
+            .map(|(n, _)| *n)
+            .unwrap_or(NodeId::NONE)
+    }
+
     /// Drop wants for objects that no manifest of interest references any more (unfollowed
     /// channels, or objects that left a channel's manifest).
     fn prune_wants(&mut self) {
@@ -955,13 +1024,14 @@ impl Node {
         if let Some(o) = old {
             self.pending_ack.remove(&o.short);
         }
-        self.pending_ack.insert(short);
+        let now = self.now;
+        self.pending_ack.insert(short, now);
         for (m, b) in objects {
             if !self.store.has_complete(&m.id.short()) {
                 self.store.insert_complete(*m, *b);
             }
             self.own_objects.insert(m.id.short());
-            self.pending_ack.insert(m.id.short());
+            self.pending_ack.insert(m.id.short(), now);
         }
         for c in self.carriers.iter_mut() {
             if let Some(car) = c.carousel.as_mut() {
@@ -1085,7 +1155,9 @@ impl Node {
 
     fn add_want(&mut self, id: ShortId) {
         if self.wants.insert(id) {
+            let now = self.now;
             let p = self.progress.entry(id).or_default();
+            p.wanted_at = now;
             p.last_progress = 0;
             p.last_want = 0;
             if self.is_announcing() {
@@ -1126,14 +1198,22 @@ impl Node {
             }
             self.score = self.compute_score();
             self.next_score = now + self.cfg.params.t_score_ms;
+            self.excursions(out);
         }
         for i in 0..self.carriers.len() {
             let score = self.score;
+            let caps = self.caps();
             let t = match self.carriers[i].election.as_mut() {
-                Some(e) => e.tick(now, score, &mut self.rng),
+                Some(e) => e.tick(now, score, caps, &mut self.rng),
                 None => None,
             };
             if let Some(t) = t {
+                if t == Transition::BecameCandidate && self.hops(i) {
+                    let at = self.step_up_time(now, score, caps);
+                    if let Some(e) = self.carriers[i].election.as_mut() {
+                        e.step_up_at(at);
+                    }
+                }
                 self.on_transition(i, t, out);
             }
         }
@@ -1266,6 +1346,120 @@ impl Node {
         }
     }
 
+    /// Content crosses a cell boundary wherever a follower of one cell can hear the other cell:
+    /// a holder that hears a neighbouring announcer uploads to it when asked (§4), and a
+    /// follower that hears a neighbouring announcer with something it wants, which its own
+    /// announcer cannot get, goes and fetches it. That is an excursion: follow that announcer,
+    /// for what it has rather than how well we hear it, until we have what we came for or it
+    /// brings nothing for `T_excursion`; then follow by signal again, and the object is in our
+    /// own cell, where our announcer's ask finds it like any holder's.
+    fn excursions(&mut self, out: &mut Vec<Action>) {
+        let now = self.now;
+        let t = self.cfg.params.t_excursion_ms;
+        let i = self.cell_carrier();
+        if !self.carriers.get(i).map(|c| c.p.kind.is_bulk()).unwrap_or(false) || self.role(i) != Role::Follower {
+            self.excursion = None;
+            return;
+        }
+        let own = self.announcer_of(i);
+        let since = |p: &Progress| p.wanted_at.max(p.last_progress);
+        let ttl = self.cfg.params.want_ttl_ms;
+        if let Some((c, to, began)) = self.excursion {
+            let pinned = self.carriers[c].election.as_ref().map(|e| e.is_pinned()).unwrap_or(false);
+            if own != to || !pinned {
+                self.excursion = None;
+                return;
+            }
+            // What we came for and it has: done when none is left, or when none of it moves.
+            let haves = self.neighbors.get(&to).map(|n| n.haves.clone()).unwrap_or_default();
+            let left: Vec<Millis> = self.wants.iter().filter(|w| haves.contains(w)).map(|w| self.progress.get(w).map(since).unwrap_or(0)).collect();
+            if left.is_empty() || left.iter().all(|s| now >= *s + t) {
+                self.excursion = None;
+                // A visit that brought nothing at all: whatever that announcer lists, it does not
+                // serve it to us. Do not go back for a while.
+                if !self.progress.values().any(|p| p.last_progress >= began) {
+                    let (score, caps) = (self.score, self.caps());
+                    if let Some(e) = self.carriers[c].election.as_mut() {
+                        e.shun(now, to, now + ttl, score, caps, &mut self.rng);
+                    }
+                }
+                let tr = self.carriers[c].election.as_mut().and_then(|e| e.end_visit(now));
+                if let Some(tr) = tr {
+                    self.on_transition(c, tr, out);
+                }
+            }
+            return;
+        }
+        // Our own announcer is held to evidence too (ABUSE.md, "election capture"): it lists an
+        // object we want and we have never had one symbol of it, or it lists one of our own
+        // objects and nobody has been heard sending it, for longer than an honest announcer can
+        // take to pass an object it was asked for (its repetition ceiling, plus one interval for
+        // the ask). An honest announcer that lacks an object asks for it instead of listing it.
+        let w = crate::carousel::longest_spacing(self.cfg.params.t_want_min_ms) + self.cfg.params.t_want_min_ms;
+        let own_haves = self.neighbors.get(&own).map(|n| n.haves.clone()).unwrap_or_default();
+        let never_served = self.wants.iter().any(|x| own_haves.contains(x) && self.progress.get(x).map(|p| p.last_progress == 0 && now >= p.wanted_at + w).unwrap_or(false))
+            || self.pending_ack.iter().any(|(p, since)| own_haves.contains(p) && now >= *since + w);
+        // Sooner where the channel is silent: an announcer that lists what we wait for and has
+        // not put one symbol of anything on the air for `T_excursion`. One that is busy repeating
+        // other objects, as under a WANT flood, is not silent.
+        let silent = self.wants.iter().any(|x| own_haves.contains(x) && self.progress.get(x).map(|p| now >= since(p) + t).unwrap_or(false)) && now >= self.last_bulk_rx + t;
+        if never_served || silent {
+            let (score, caps) = (self.score, self.caps());
+            let tr = self.carriers[i].election.as_mut().and_then(|e| e.shun(now, own, now + ttl, score, caps, &mut self.rng));
+            if let Some(tr) = tr {
+                if tr == Transition::BecameCandidate && self.hops(i) {
+                    let at = self.step_up_time(now, score, caps);
+                    if let Some(e) = self.carriers[i].election.as_mut() {
+                        e.step_up_at(at);
+                    }
+                }
+                self.on_transition(i, tr, out);
+            }
+            return;
+        }
+        // Stalled, and not merely waiting its turn: a busy cell delivers late; only a cell that
+        // cannot get an object sends its followers out for it. An object our announcer lists, it
+        // has: we wait for it, or find above that it lies.
+        let stalled: Vec<ShortId> = self.wants.iter().filter(|w| !own_haves.contains(w) && !self.ann_granted_within(w, t) && self.progress.get(w).map(|p| now >= since(p) + t).unwrap_or(false)).copied().collect();
+        if stalled.is_empty() {
+            return;
+        }
+        let heard: Vec<NodeId> = self.carriers[i].election.as_ref().map(|e| e.heard_ids(now, own).collect()).unwrap_or_default();
+        let best = heard
+            .iter()
+            .filter(|a| !self.carriers[i].election.as_ref().map(|e| e.is_shunned(**a, now)).unwrap_or(false))
+            .filter_map(|a| self.neighbors.get(a).map(|n| (*a, n)))
+            .filter(|(_, n)| stalled.iter().any(|w| n.haves.contains(w)))
+            .max_by_key(|(_, n)| n.rssi)
+            .map(|(a, _)| a);
+        if let Some(to) = best {
+            let tr = self.carriers[i].election.as_mut().and_then(|e| e.visit(now, to));
+            if let Some(tr) = tr {
+                self.excursion = Some((i, to, now));
+                self.stats.excursions += 1;
+                // A fresh start for what we came for: the stall clock runs from the visit.
+                for w in &stalled {
+                    if let Some(p) = self.progress.get_mut(w) {
+                        p.wanted_at = now;
+                    }
+                }
+                self.on_transition(i, tr, out);
+            }
+        }
+    }
+
+    /// Whether our announcer has named an uploader for `id` within the last `window`. If it has
+    /// not, our cell cannot get the object: a named repair waits `T_grant` for that (a grant
+    /// lapses after as long without a symbol), an excursion, which costs more, `T_excursion`.
+    fn ann_granted_within(&self, id: &ShortId, window: Millis) -> bool {
+        self.ann_grants.get(id).map(|t| self.now < *t + window).unwrap_or(false)
+    }
+
+    /// What this node is: the part of the score that does not depend on its role.
+    fn caps(&self) -> u8 {
+        (if self.cfg.mains { CAP_MAINS } else { 0 }) | (if self.cfg.has_ip { CAP_IP } else { 0 })
+    }
+
     fn make_beacon(&self, carrier: usize) -> Beacon {
         let c = &self.carriers[carrier];
         let round = c.carousel.as_ref().map(|k| k.round).unwrap_or(0);
@@ -1277,6 +1471,7 @@ impl Node {
             carrier: c.p.kind,
             announcer: self.cfg.id,
             score: self.score,
+            caps: self.caps(),
             next_ms: self.cfg.params.election.t_beacon_ms.min(65535) as u16,
             round,
             utc: 0,
@@ -1380,13 +1575,16 @@ impl Node {
         self.next_want_at = now + self.rng.below(p.t_want_min_ms.max(1));
         self.progress.clear();
         self.conflicts.clear();
+        self.excursion = None;
+        self.ann_asks.clear();
+        self.ann_grants.clear();
         self.grants.clear();
         self.repair_phases.clear();
         self.phase_heard = [0; MAX_UPLOAD_PHASES as usize];
         self.granted_to_us.clear();
         self.offers.clear();
         for id in self.own_objects.iter().chain(self.own_manifests.iter().map(|(_, s, _, _)| s)) {
-            self.pending_ack.insert(*id);
+            self.pending_ack.insert(*id, now);
         }
     }
 
@@ -1457,7 +1655,7 @@ impl Node {
                 self.have_cursor = (self.have_cursor + MAX_GOSSIP_IDS) % ids.len();
             }
         } else {
-            have = self.pending_ack.iter().filter(|id| self.store.has_complete(id)).take(MAX_GOSSIP_IDS).copied().collect();
+            have = self.pending_ack.keys().filter(|id| self.store.has_complete(id)).take(MAX_GOSSIP_IDS).copied().collect();
         }
         let want = self.take_wants();
         if !have.is_empty() || !want.is_empty() {
@@ -1481,7 +1679,7 @@ impl Node {
         } else {
             self.own_manifests
                 .iter()
-                .filter(|(_, s, _, _)| self.pending_ack.contains(s))
+                .filter(|(_, s, _, _)| self.pending_ack.contains_key(s))
                 .take(MAX_ANNOUNCE_ENTRIES)
                 .map(|(c, s, seq, len)| AnnounceEntry { channel: *c, manifest: *s, seq: *seq, len: *len })
                 .collect()
@@ -1681,8 +1879,14 @@ impl Node {
             };
             self.progress.entry(id).or_default().last_nack = now;
             let cell = self.cell_carrier();
+            // A follower asks its announcer; but where the announcer is itself asking for the
+            // object and has granted it to nobody for `T_grant`, nobody in the cell can repair
+            // it, and the follower names the holder it hears best in another cell, whose uploads
+            // it overheard.
+            let asked = self.ann_asks.get(&id).map(|t| now < *t + self.cfg.params.want_ttl_ms).unwrap_or(false);
+            let ann_lacks = asked && !self.ann_granted_within(&id, self.cfg.params.t_grant_ms);
             let answerer = if !announcing {
-                NodeId::NONE
+                if ann_lacks { self.best_holder_elsewhere(&id) } else { NodeId::NONE }
             } else if let Some((h, _, _)) = self.grants.get(&id) {
                 *h
             } else {
@@ -1915,7 +2119,7 @@ impl Node {
             }
         }
         let channel = match (&cand, self.carriers[i].upload.as_ref()) {
-            (Cand::Upload(..), Some(u)) => self.channel_for(i, u.to, now),
+            (Cand::Upload(..), Some(u)) => self.channel_for(i, self.listens_with(u.to), now),
             _ => self.channel(i, now),
         };
         let center = self.carriers[i].p.channels.get(channel as usize).copied().unwrap_or(0);
@@ -2129,6 +2333,7 @@ impl Node {
         }
         let me = self.cfg.id;
         let score = self.score;
+        let caps = self.caps();
         let now = self.now;
         // Same cell: we hear this announcer at least as well as our typical neighbour.
         let near = rssi >= self.typical_neighbor_rssi(b.announcer);
@@ -2139,7 +2344,7 @@ impl Node {
         if changed && !self.announcer_of(ti).is_none() {
             self.report_due = true;
         }
-        let t = self.carriers[ti].election.as_mut().and_then(|e| e.on_beacon(now, b.announcer, b.score, b.next_ms, rssi, b.colour, b.colours, near, me, score));
+        let t = self.carriers[ti].election.as_mut().and_then(|e| e.on_beacon(now, b, rssi, near, me, score, caps));
         if let Some(t) = t {
             self.on_transition(ti, t, out);
         }
@@ -2147,8 +2352,11 @@ impl Node {
 
     fn rx_bulk(&mut self, _carrier: usize, b: &Bulk, out: &mut Vec<Action>) {
         // Someone is sending this object: any offer of ours for it, and any answer we have not
-        // begun, is moot. This is what keeps an ungranted repair to one sender.
+        // begun, is moot. This is what keeps an ungranted repair to one sender. And if it is one
+        // of ours, someone else carries it now.
         self.offers.retain(|(o, _, _)| *o != b.object);
+        self.pending_ack.remove(&b.object);
+        self.last_bulk_rx = self.now;
         let now = self.now;
         for c in self.carriers.iter_mut() {
             c.cancel_pending(b.object, now);
@@ -2392,8 +2600,18 @@ impl Node {
             }
             let own = self.announcer_of(i) == g.node;
             if own {
+                // Our announcer says it has an object of ours. We believe it once we uploaded
+                // the object to it; a claim alone is no reason to stop offering (ABUSE.md).
                 for h in &g.have {
-                    self.pending_ack.remove(h);
+                    if self.granted_to_us.contains_key(&(*h, g.node)) {
+                        self.pending_ack.remove(h);
+                    }
+                }
+                for (w, grant, _) in g.want.iter() {
+                    self.ann_asks.insert(*w, now);
+                    if !grant.is_none() {
+                        self.ann_grants.insert(*w, now);
+                    }
                 }
             } else if !from_announcer {
                 continue;
@@ -2450,7 +2668,11 @@ impl Node {
         let cell = self.cell_carrier();
         let own = self.announcer_of(cell);
         let everyone_listens = !self.hops(cell) || self.in_rendezvous(cell, now);
-        let sendable = |a: &NodeId, at: &Millis| *at <= now && (*a == own || everyone_listens);
+        // A holder that is uploading offers nothing more until it is done: its offer would
+        // silence holders that are free, and everything granted to it would queue behind one
+        // radio while theirs stayed idle.
+        let busy = self.carriers.iter().any(|c| c.upload.is_some() || !c.upload_queue.is_empty());
+        let sendable = |a: &NodeId, at: &Millis| !busy && *at <= now && (*a == own || everyone_listens);
         let due: Vec<(ShortId, NodeId)> = self.offers.iter().filter(|(_, a, at)| sendable(a, at)).map(|(o, a, _)| (*o, *a)).collect();
         if due.is_empty() {
             return;
@@ -2524,11 +2746,13 @@ impl Node {
                 if recently {
                     self.granted_to_us.insert((n.object, n.node), self.now);
                 }
-                if !recently && !asker_is_announcer {
+                // The asker named who answers: if not us, and not "anyone", stay silent. A follower
+                // names someone only when its own announcer cannot repair (above), so naming is
+                // what lets one holder answer a follower without a storm.
+                let named = n.answerer == self.cfg.id;
+                if !recently && !asker_is_announcer && !named {
                     continue;
                 }
-                // The announcer named who answers: if not us, and not "anyone", stay silent.
-                let named = n.answerer == self.cfg.id;
                 if !named && !n.answerer.is_none() {
                     continue;
                 }

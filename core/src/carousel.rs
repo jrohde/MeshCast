@@ -17,6 +17,12 @@ const MAX_FRONT: usize = 4096;
 /// waiting for hours (FEASIBILITY.md §11).
 const MAX_DOUBLINGS: u8 = 3;
 
+/// The longest an honest announcer waits before it passes an object again that it was asked for:
+/// the repetition ceiling.
+pub fn longest_spacing(t_repass_ms: Millis) -> Millis {
+    t_repass_ms << MAX_DOUBLINGS
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Item {
     Beacon { round: u16 },

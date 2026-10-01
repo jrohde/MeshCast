@@ -8,6 +8,7 @@
 
 use alloc::collections::BTreeMap;
 
+use crate::frame::Beacon;
 use crate::ids::NodeId;
 use crate::params::{ElectionParams, SCORE_MAX};
 use crate::rng::Rng;
@@ -15,6 +16,17 @@ use crate::Millis;
 
 /// Grace added to the announcer's promised next-beacon time before counting a miss.
 const GRACE_MS: Millis = 5_000;
+
+/// When, within a span of time, a candidate steps up: in the order an announcer yields in
+/// (§5.2), capability first, then score, then chance. The span has a band per capability
+/// (mains and uplink, mains, uplink, neither); within its band a candidate waits less the higher
+/// its score, plus a jitter of a third of the band. A more capable node can never step up after
+/// a less capable one and then displace it, orphaning the followers it had just gathered.
+pub fn step_up_order(caps: u8, score: u16, span: Millis, rng: &mut Rng) -> Millis {
+    let band = span / 4;
+    let s = score.min(SCORE_MAX) as u64;
+    (3 - caps.min(3) as u64) * band + (band * 2 / 3) * (SCORE_MAX as u64 - s) / SCORE_MAX as u64 + rng.below((band / 3).max(1))
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum State {
@@ -36,6 +48,7 @@ pub enum Transition {
 #[derive(Clone, Copy, Debug)]
 struct Heard {
     last: Millis,
+    caps: u8,
     rssi: i16,
     score: u16,
     next_ms: u16,
@@ -53,6 +66,12 @@ pub struct Election {
     missed: u8,
     low_count: u8,
     heard: BTreeMap<NodeId, Heard>,
+    /// Diagnostic: how often this node challenged its announcer.
+    pub challenges: u32,
+    /// On an excursion: following an announcer for what it has, not for how well we hear it.
+    pinned: bool,
+    /// Announcers that listed what they did not serve us, and until when we ignore them.
+    shunned: BTreeMap<NodeId, Millis>,
 }
 
 impl Election {
@@ -66,6 +85,9 @@ impl Election {
             missed: 0,
             low_count: 0,
             heard: BTreeMap::new(),
+            challenges: 0,
+            pinned: false,
+            shunned: BTreeMap::new(),
         }
     }
 
@@ -77,13 +99,12 @@ impl Election {
         matches!(self.state, State::Announcer)
     }
 
-    fn wait_for(&self, score: u16, rng: &mut Rng) -> Millis {
-        let s = score.min(SCORE_MAX) as u64;
-        let base = self.p.t_base_ms * (SCORE_MAX as u64 - s) / SCORE_MAX as u64;
-        base + rng.below(self.p.t_jitter_ms.max(1))
+    fn wait_for(&self, score: u16, caps: u8, rng: &mut Rng) -> Millis {
+        step_up_order(caps, score, self.p.t_base_ms + self.p.t_jitter_ms, rng)
     }
 
     fn follow(&mut self, now: Millis, from: NodeId) {
+        self.pinned = false;
         let h = self.heard.get(&from).copied();
         self.state = State::Follower;
         self.announcer = from;
@@ -102,17 +123,51 @@ impl Election {
     /// Best alternative announcer heard recently, by RSSI.
     fn best_heard(&self, now: Millis, except: NodeId) -> Option<NodeId> {
         let fresh = self.p.t_beacon_ms * 2 + GRACE_MS;
-        self.heard.iter().filter(|(id, h)| **id != except && h.last + fresh >= now).max_by_key(|(_, h)| h.rssi).map(|(id, _)| *id)
+        self.heard.iter().filter(|(id, h)| **id != except && h.last + fresh >= now && !self.is_shunned(**id, now)).max_by_key(|(_, h)| h.rssi).map(|(id, _)| *id)
     }
 
-    /// `near`: the caller judges this announcer to be in our own cell (heard at least as well
-    /// as our typical neighbour); only then does a near-tie yield to the lower id.
-    pub fn on_beacon(&mut self, now: Millis, from: NodeId, score: u16, next_ms: u16, rssi: i16, colour: u8, colours: u8, near: bool, me: NodeId, my_score: u16) -> Option<Transition> {
-        if from == me || from.is_none() {
+    /// Whether `id` listed something it did not serve us, recently enough to ignore it.
+    pub fn is_shunned(&self, id: NodeId, now: Millis) -> bool {
+        self.shunned.get(&id).map(|t| now < *t).unwrap_or(false)
+    }
+
+    /// Ignore announcer `id` until `until`: it listed what it did not serve. If it is ours, follow
+    /// the best other announcer we hear, or, hearing none, become a candidate: an area whose only
+    /// announcer serves nothing has none.
+    pub fn shun(&mut self, now: Millis, id: NodeId, until: Millis, my_score: u16, my_caps: u8, rng: &mut Rng) -> Option<Transition> {
+        self.shunned.retain(|_, t| now < *t);
+        self.shunned.insert(id, until);
+        if !matches!(self.state, State::Follower) || self.announcer != id {
             return None;
         }
-        let h = self.heard.entry(from).or_insert(Heard { last: now, rssi, score, next_ms, colour, colours });
+        if let Some(alt) = self.best_heard(now, id) {
+            self.follow(now, alt);
+            return Some(Transition::AnnouncerChanged(alt));
+        }
+        let until = now + self.wait_for(my_score, my_caps, rng);
+        self.state = State::Candidate { until };
+        self.announcer = NodeId::NONE;
+        Some(Transition::BecameCandidate)
+    }
+
+    /// A beacon heard at `rssi`. `near`: the caller judges this announcer to be in our own cell
+    /// (heard at least as well as our typical neighbour); only then does a near-tie yield to the
+    /// lower id.
+    ///
+    /// `caps` is what a node is (mains, uplink); `score` adds what it happens to experience in its
+    /// role: who it hears, how much budget it has left. Two announcers compare capability, then
+    /// score: like with like. A follower compares only capability with its announcer, because a
+    /// follower's score is not comparable: it hears what its announcer is too busy transmitting
+    /// to hear, and spends nothing.
+    #[allow(clippy::too_many_arguments)]
+    pub fn on_beacon(&mut self, now: Millis, b: &Beacon, rssi: i16, near: bool, me: NodeId, my_score: u16, my_caps: u8) -> Option<Transition> {
+        let (from, score, caps, next_ms, colour, colours) = (b.announcer, b.score, b.caps, b.next_ms, b.colour, b.colours);
+        if from == me || from.is_none() || self.is_shunned(from, now) {
+            return None;
+        }
+        let h = self.heard.entry(from).or_insert(Heard { last: now, caps, rssi, score, next_ms, colour, colours });
         h.last = now;
+        h.caps = caps;
         h.rssi = ((h.rssi as i32 + rssi as i32) / 2) as i16;
         h.score = score;
         h.next_ms = next_ms;
@@ -123,7 +178,12 @@ impl Election {
         match self.state {
             State::Announcer => {
                 let d = score as i32 - my_score as i32;
-                let yields = d > hy || (d >= -hy && from.0 < me.0 && near);
+                // More capability counts like a clearly higher score: yield, near or far.
+                let yields = match caps.cmp(&my_caps) {
+                    core::cmp::Ordering::Greater => true,
+                    core::cmp::Ordering::Less => false,
+                    core::cmp::Ordering::Equal => d > hy || (d >= -hy && from.0 < me.0 && near),
+                };
                 if yields {
                     self.follow(now, from);
                     Some(Transition::BecameFollower(from))
@@ -131,6 +191,9 @@ impl Election {
                     None
                 }
             }
+            // A candidate stands down for an announcer, unless it is more capable: then that
+            // announcer yields to it (a challenger hears its incumbent all the time).
+            State::Candidate { .. } if my_caps > caps => None,
             State::Candidate { .. } => {
                 self.follow(now, from);
                 Some(Transition::BecameFollower(from))
@@ -143,13 +206,17 @@ impl Election {
                     self.announcer_score = score;
                     self.expected_next = now + (next_ms as Millis).max(1000) + GRACE_MS;
                     self.missed = 0;
-                    if my_score as i32 > score as i32 + hy {
+                    // Challenge only an announcer that is less capable than us, and only where no
+                    // announcer we hear is at least as capable: we would yield to that one, and
+                    // follow the weaker one again, and challenge it again.
+                    let equal_heard = self.heard.iter().any(|(id, h)| *id != from && h.caps >= my_caps && h.last + self.p.t_beacon_ms * 2 + GRACE_MS >= now);
+                    if my_caps > caps && !equal_heard {
                         self.low_count = self.low_count.saturating_add(1);
                     } else {
                         self.low_count = 0;
                     }
                     None
-                } else {
+                } else if !self.pinned {
                     let cur = self.heard.get(&self.announcer).map(|h| h.rssi).unwrap_or(i16::MIN);
                     if h_rssi as i32 > cur as i32 + self.p.rssi_hysteresis_db as i32 {
                         self.follow(now, from);
@@ -157,19 +224,50 @@ impl Election {
                     } else {
                         None
                     }
+                } else {
+                    None
                 }
             }
         }
     }
 
-    /// Someone's gossip names a different announcer than us while we are announcer. Only a
-    /// clearly better score (from a beacon we heard) makes us yield; otherwise both persist.
-    pub fn tick(&mut self, now: Millis, my_score: u16, rng: &mut Rng) -> Option<Transition> {
+    /// Follow `to` for what it has rather than for how well we hear it: an excursion.
+    pub fn visit(&mut self, now: Millis, to: NodeId) -> Option<Transition> {
+        if !matches!(self.state, State::Follower) || to == self.announcer {
+            return None;
+        }
+        self.follow(now, to);
+        self.pinned = true;
+        Some(Transition::AnnouncerChanged(to))
+    }
+
+    /// End an excursion: follow the announcer we hear best again.
+    pub fn end_visit(&mut self, now: Millis) -> Option<Transition> {
+        self.pinned = false;
+        if !matches!(self.state, State::Follower) {
+            return None;
+        }
+        match self.best_heard(now, NodeId::NONE) {
+            Some(b) if b != self.announcer => {
+                self.follow(now, b);
+                Some(Transition::AnnouncerChanged(b))
+            }
+            _ => None,
+        }
+    }
+
+    pub fn is_pinned(&self) -> bool {
+        self.pinned
+    }
+
+    /// Advance the timers: count missed beacons, end candidacies, start challenges.
+    pub fn tick(&mut self, now: Millis, my_score: u16, my_caps: u8, rng: &mut Rng) -> Option<Transition> {
         match self.state {
             State::Follower => {
                 if self.low_count >= self.p.challenge_beacons {
-                    // We are clearly better than the incumbent: step up; it will yield.
+                    // We are more capable than the incumbent: step up; it will yield.
                     self.low_count = 0;
+                    self.challenges += 1;
                     let until = now + rng.below(self.p.t_jitter_ms.max(1));
                     self.state = State::Candidate { until };
                     return Some(Transition::BecameCandidate);
@@ -183,7 +281,7 @@ impl Election {
                             self.follow(now, alt);
                             return Some(Transition::AnnouncerChanged(alt));
                         }
-                        let until = now + self.wait_for(my_score, rng);
+                        let until = now + self.wait_for(my_score, my_caps, rng);
                         self.state = State::Candidate { until };
                         return Some(Transition::BecameCandidate);
                     }
@@ -202,6 +300,13 @@ impl Election {
                 }
             }
             State::Announcer => None,
+        }
+    }
+
+    /// Move a running candidacy to `until` (the caller knows when every candidate listens).
+    pub fn step_up_at(&mut self, until: Millis) {
+        if let State::Candidate { .. } = self.state {
+            self.state = State::Candidate { until };
         }
     }
 
@@ -251,7 +356,7 @@ impl Election {
     /// treat the gossip as a sighting if we never heard its beacon (a holder must be able to
     /// reach an announcer that asked it).
     pub fn note_colouring(&mut self, now: Millis, id: NodeId, colour: u8, colours: u8, rssi: i16) {
-        let h = self.heard.entry(id).or_insert(Heard { last: now, rssi, score: 0, next_ms: self.p.t_beacon_ms as u16, colour, colours });
+        let h = self.heard.entry(id).or_insert(Heard { last: now, caps: 0, rssi, score: 0, next_ms: self.p.t_beacon_ms as u16, colour, colours });
         h.last = now;
         h.colour = colour;
         h.colours = colours.max(1);
@@ -261,6 +366,11 @@ impl Election {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::frame::{CarrierKind, CAP_MAINS};
+
+    fn beacon(from: NodeId, score: u16, caps: u8) -> Beacon {
+        Beacon { carrier: CarrierKind::GfskBulk, announcer: from, score, caps, next_ms: 60000, round: 0, utc: 0, time_quality: 0, colour: 0, colours: 1, upload_phases: 1, occupancy: [0; 4] }
+    }
 
     #[test]
     fn silence_then_election_then_yield() {
@@ -271,7 +381,7 @@ mod tests {
         let mut became_candidate = None;
         while became_candidate.is_none() && now < 10 * p.t_beacon_ms {
             now += 1000;
-            if let Some(Transition::BecameCandidate) = e.tick(now, 100, &mut rng) {
+            if let Some(Transition::BecameCandidate) = e.tick(now, 100, 0, &mut rng) {
                 became_candidate = Some(now);
             }
         }
@@ -280,19 +390,19 @@ mod tests {
         let mut ann = None;
         while ann.is_none() {
             now += 1000;
-            if let Some(Transition::BecameAnnouncer) = e.tick(now, 100, &mut rng) {
+            if let Some(Transition::BecameAnnouncer) = e.tick(now, 100, 0, &mut rng) {
                 ann = Some(now);
             }
         }
         assert!(ann.unwrap() - t <= p.t_base_ms + p.t_jitter_ms);
         // A much better node appears: yield.
-        let tr = e.on_beacon(now, NodeId(9), 400, 60000, -80, 0, 1, false, NodeId(5), 100);
+        let tr = e.on_beacon(now, &beacon(NodeId(9), 400, 0), -80, false, NodeId(5), 100, 0);
         assert_eq!(tr, Some(Transition::BecameFollower(NodeId(9))));
         // Another announcer, weaker signal: keep following 9.
-        let tr = e.on_beacon(now + 1, NodeId(20), 400, 60000, -100, 0, 1, false, NodeId(5), 100);
+        let tr = e.on_beacon(now + 1, &beacon(NodeId(20), 400, 0), -100, false, NodeId(5), 100, 0);
         assert_eq!(tr, None);
         // A much stronger signal: switch.
-        let tr = e.on_beacon(now + 2, NodeId(21), 100, 60000, -60, 0, 1, false, NodeId(5), 100);
+        let tr = e.on_beacon(now + 2, &beacon(NodeId(21), 100, 0), -60, false, NodeId(5), 100, 0);
         assert_eq!(tr, Some(Transition::AnnouncerChanged(NodeId(21))));
     }
 
@@ -302,21 +412,69 @@ mod tests {
         let mut e = Election::new(p, 0);
         e.state = State::Announcer;
         // Equal score, lower id, but judged to be in another cell: do not yield.
-        assert_eq!(e.on_beacon(1000, NodeId(1), 300, 60000, -100, 0, 1, false, NodeId(5), 300), None);
+        assert_eq!(e.on_beacon(1000, &beacon(NodeId(1), 300, 0), -100, false, NodeId(5), 300, 0), None);
         // Same, judged to be in our cell: yield.
-        assert_eq!(e.on_beacon(2000, NodeId(1), 300, 60000, -70, 0, 1, true, NodeId(5), 300), Some(Transition::BecameFollower(NodeId(1))));
+        assert_eq!(e.on_beacon(2000, &beacon(NodeId(1), 300, 0), -70, true, NodeId(5), 300, 0), Some(Transition::BecameFollower(NodeId(1))));
     }
 
     #[test]
     fn challenger_steps_up() {
+        // A mains-powered follower of a battery announcer.
         let p = ElectionParams::default();
         let mut rng = Rng::new(2);
         let mut e = Election::new(p, 0);
-        e.on_beacon(1000, NodeId(7), 100, 60000, -80, 0, 1, false, NodeId(5), 400);
+        e.on_beacon(1000, &beacon(NodeId(7), 100, 0), -80, false, NodeId(5), 100, CAP_MAINS);
         for i in 0..p.challenge_beacons as u64 {
-            assert_eq!(e.tick(2000 + i, 400, &mut rng), None);
-            e.on_beacon(3000 + i, NodeId(7), 100, 60000, -80, 0, 1, false, NodeId(5), 400);
+            assert_eq!(e.tick(2000 + i, 100, 0, &mut rng), None);
+            e.on_beacon(3000 + i, &beacon(NodeId(7), 100, 0), -80, false, NodeId(5), 100, CAP_MAINS);
         }
-        assert_eq!(e.tick(4000, 400, &mut rng), Some(Transition::BecameCandidate));
+        assert_eq!(e.tick(4000, 100, 0, &mut rng), Some(Transition::BecameCandidate));
+        // The incumbent keeps beaconing; the challenger stays a candidate and steps up.
+        assert_eq!(e.on_beacon(5000, &beacon(NodeId(7), 100, 0), -80, false, NodeId(5), 100, CAP_MAINS), None);
+        assert_eq!(e.tick(4000 + p.t_jitter_ms, 100, 0, &mut rng), Some(Transition::BecameAnnouncer));
+    }
+
+    #[test]
+    fn no_challenge_where_an_equal_announcer_is_heard() {
+        // A mains follower of a battery announcer that also hears a mains announcer would yield
+        // to that one after stepping up, and come back, and challenge again.
+        let p = ElectionParams::default();
+        let mut rng = Rng::new(4);
+        let mut e = Election::new(p, 0);
+        for i in 0..2 * p.challenge_beacons as u64 {
+            e.on_beacon(1000 + 10 * i, &beacon(NodeId(7), 100, 0), -80, false, NodeId(5), 100, CAP_MAINS);
+            e.on_beacon(1001 + 10 * i, &beacon(NodeId(8), 100, CAP_MAINS), -95, false, NodeId(5), 100, CAP_MAINS);
+            assert_eq!(e.tick(1002 + 10 * i, 100, 0, &mut rng), None);
+        }
+    }
+
+    #[test]
+    fn a_better_score_alone_does_not_challenge() {
+        // Same hardware, but the follower hears more and has spent nothing: that is its role
+        // talking, not the node.
+        let p = ElectionParams::default();
+        let mut rng = Rng::new(3);
+        let mut e = Election::new(p, 0);
+        for i in 0..2 * p.challenge_beacons as u64 {
+            e.on_beacon(1000 + i, &beacon(NodeId(7), 100, 0), -80, false, NodeId(5), 400, 0);
+            assert_eq!(e.tick(2000 + i, 400, 0, &mut rng), None);
+        }
+    }
+
+    #[test]
+    fn capability_decides_between_announcers_before_score() {
+        let p = ElectionParams::default();
+        let mut e = Election::new(p, 0);
+        e.state = State::Announcer;
+        // A battery announcer with a far better score does not displace a mains one.
+        assert_eq!(e.on_beacon(1000, &beacon(NodeId(1), 400, 0), -70, true, NodeId(5), 100, CAP_MAINS), None);
+        // A mains announcer in our cell displaces a battery one whatever the scores ...
+        let mut e = Election::new(p, 0);
+        e.state = State::Announcer;
+        assert_eq!(e.on_beacon(1000, &beacon(NodeId(9), 100, CAP_MAINS), -70, true, NodeId(5), 400, 0), Some(Transition::BecameFollower(NodeId(9))));
+        // ... near or far, like a clearly higher score.
+        let mut e = Election::new(p, 0);
+        e.state = State::Announcer;
+        assert_eq!(e.on_beacon(1000, &beacon(NodeId(9), 100, CAP_MAINS), -100, false, NodeId(5), 400, 0), Some(Transition::BecameFollower(NodeId(9))));
     }
 }

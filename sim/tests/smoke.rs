@@ -219,7 +219,7 @@ fn a_want_flood_is_bounded() {
         s.tracks = 6;
         s.mix = meshcast_sim::scenario::parse_mix("snac-music:42,snac-speech:22").unwrap();
         if attack {
-            s.attack = Some(meshcast_sim::scenario::AttackSpec { attackers: 1, period_s: 60.0, spoof: true, renditions: false });
+            s.attack = Some(meshcast_sim::scenario::AttackSpec { attackers: 1, period_s: 60.0, spoof: true, renditions: false, lure: false, claim_max: false });
         }
         let mut b = build(&s, Params::default());
         b.engine.run((s.hours * 3.6e6) as u64, 600_000);
@@ -231,4 +231,171 @@ fn a_want_flood_is_bounded() {
         frames.push(b.engine.metrics.bulk_sent);
     }
     assert!(frames[1] <= 8 * frames[0], "a WANT flood made the cell carry {} frames against {} without it", frames[1], frames[0]);
+}
+
+fn cell(bulk: BulkPreset, nodes: usize, hours: f64, seed: u64) -> ScenarioSpec {
+    let mut s = spec(bulk, Vec::new(), Vec::new(), Vec::new(), hours);
+    s.nodes = nodes;
+    s.stations = 1;
+    s.sources = 1;
+    s.seed = seed;
+    s.shadow_db = 6.0;
+    s.positions = None;
+    s.stations_at = None;
+    s.sources_at = None;
+    s
+}
+
+#[test]
+fn band_l_cold_start_elects_without_a_storm() {
+    // Fifty nodes switched on at once in band L. A new announcer's first beacon goes out on its own
+    // hop sequence while the other candidates scan, so before candidates stepped up in the meeting
+    // dwell nobody heard it in time and every node became announcer once: 243 role changes in this
+    // world before it settled on the same two announcers it has now, and 109 after (PROTOCOL.md
+    // §5.2).
+    let s = cell(BulkPreset::GfskL, 50, 1.0, 1);
+    let mut b = build(&s, Params::default());
+    b.engine.run(3_600_000, 600_000);
+    let roles = b.engine.metrics.role_events.len();
+    assert!(roles <= 130, "{roles} role changes in the first hour");
+}
+
+#[test]
+fn a_station_back_from_a_power_cut_takes_over_once() {
+    // The station goes off for an hour; a battery node takes over. When the station returns it is
+    // more capable than that node, so it challenges, once, and the battery node yields. Before
+    // challenges were on capability, a candidate also stood down on hearing its own announcer's
+    // beacon, so on a hopping carrier the station took 107 to 1797 s, and on ESP-NOW up to an hour.
+    let s = cell(BulkPreset::GfskL, 20, 3.0, 1);
+    let mut b = build(&s, Params::default());
+    let station = (0..s.nodes).find(|&i| b.engine.nodes[i].mains).unwrap();
+    b.engine.schedule_kill(station, 3_600_000);
+    b.engine.schedule_revive(station, 7_200_000);
+    b.engine.run(3 * 3_600_000, 600_000);
+    let id = b.engine.nodes[station].node.id().0;
+    let back = b.engine.metrics.role_events.iter().find(|e| e.t_ms >= 7_200_000 && e.node == id && e.role == "Announcer").map(|e| e.t_ms - 7_200_000);
+    assert!(back.map(|t| t <= 300_000).unwrap_or(false), "station took over after {back:?} ms");
+    let challenges: u32 = b.engine.nodes.iter().map(|n| n.node.challenges()).sum();
+    assert_eq!(challenges, 1);
+    assert_eq!(b.engine.nodes[station].node.role(1), meshcast_core::node::Role::Announcer);
+}
+
+fn island(params: Params, lure: bool) -> (usize, u64) {
+    // A source and one neighbour around station A, and station B with three followers 1.35 km
+    // away in band L (range about 985 m). Only one follower of B, at 900 m from A, hears A at
+    // all; nobody in A's cell hears B's cell. The stations do not hear each other. With `lure`, a
+    // node 800 m from that follower poses as an announcer that has everything: 6 dB weaker for it than
+    // B, so it does not follow it by signal, but stronger than A.
+    let mut positions = vec![(-400.0, 0.0), (-300.0, 50.0), (0.0, 0.0), (900.0, 0.0), (1350.0, 0.0), (1500.0, 100.0), (1550.0, -100.0)];
+    if lure {
+        positions.push((900.0, 800.0));
+    }
+    let mut s = spec(BulkPreset::GfskL, positions, vec![0], vec![2, 4], 6.0);
+    s.mix = meshcast_sim::scenario::parse_mix("snac-music:42,snac-speech:22").unwrap();
+    let mut b = build(&s, params);
+    if lure {
+        b.engine.attackers.push(meshcast_sim::engine::Attacker::new(7, 5_000, false, true, false));
+        b.engine.nodes[7].mute = true;
+        b.engine.attack_ids = b.tracks.keys().copied().collect();
+        b.engine.start_attacks();
+    }
+    b.engine.run((s.hours * 3.6e6) as u64, 600_000);
+    let mut missing = 0;
+    for (id, t) in &b.tracks {
+        for &f in t.followers.iter().filter(|&&f| f != 7) {
+            if !b.engine.metrics.completions.contains_key(&(f, *id)) {
+                missing += 1;
+            }
+        }
+    }
+    (missing, b.engine.nodes.iter().map(|n| n.node.stats.excursions).sum())
+}
+
+#[test]
+fn a_follower_fetches_what_its_cell_cannot_get() {
+    // B asks and nobody it hears holds anything; its follower at the edge hears A list it all.
+    // That follower goes on an excursion, fetches, comes back and uploads to B (PROTOCOL.md §4).
+    let (missing, excursions) = island(Params::default(), false);
+    assert!(excursions > 0, "no excursion");
+    assert_eq!(missing, 0, "{missing} follower-object pairs never completed");
+    // Without excursions B's cell gets nothing at all.
+    let (missing, _) = island(Params { t_excursion_ms: u64::MAX / 4, ..Params::default() }, false);
+    assert!(missing > 0, "B's cell was served without an excursion");
+}
+
+#[test]
+fn a_lure_is_visited_once() {
+    // The same island, and a node that lists every object and serves none, heard better than A by
+    // the only follower that could fetch. It goes there first, gets nothing, does not go back,
+    // and fetches from A (ABUSE.md). Without that memory it chose the lure every time.
+    let (missing, excursions) = island(Params::default(), true);
+    assert!(excursions >= 2, "{excursions} excursions");
+    assert_eq!(missing, 0, "{missing} follower-object pairs never completed");
+}
+
+#[test]
+fn followers_that_overheard_a_neighbouring_cell_repair_from_it() {
+    // Two clusters 1.8 km apart in band L; positions of seed 1, radio draws of seed 2. Only two
+    // followers of the far cluster hear the near one, and only its source, whose uploads they
+    // overhear; neither announcer hears the other cluster. The two collected 112 of 113 symbols
+    // of three objects and had nobody to ask for the last one: their own announcer was asking
+    // for the object itself. Now they name the holder they heard (PROTOCOL.md §3.5, §4).
+    let (size, radius, distance) = (10, 300.0, 1800.0);
+    let mut rng = meshcast_core::rng::Rng::new(1 ^ 0xC1);
+    let mut positions = Vec::new();
+    for cluster in 0..2 {
+        let cx = cluster as f64 * distance;
+        for _ in 0..size {
+            let r = radius * rng.unit().sqrt();
+            let a = rng.unit() * 2.0 * std::f64::consts::PI;
+            positions.push((cx + r * a.cos(), r * a.sin()));
+        }
+    }
+    let n = positions.len();
+    let mut s = spec(BulkPreset::GfskL, positions, vec![0], vec![n - 1], 12.0);
+    s.seed = 2;
+    s.tracks = 8;
+    s.area_km2 = (distance + 2.0 * radius) * 2.0 * radius / 1e6;
+    s.shadow_db = 6.0;
+    s.mix = meshcast_sim::scenario::parse_mix("snac-music:42,snac-speech:22").unwrap();
+    let mut b = build(&s, Params::default());
+    b.engine.run((s.hours * 3.6e6) as u64, 600_000);
+    let mut missing = 0;
+    for (id, t) in &b.tracks {
+        for &f in &t.followers {
+            if !b.engine.metrics.completions.contains_key(&(f, *id)) {
+                missing += 1;
+            }
+        }
+    }
+    assert_eq!(missing, 0, "{missing} follower-object pairs never completed");
+}
+
+#[test]
+fn a_false_announcer_is_left() {
+    // A band L cell switched on at once, and a node beside it that beacons as an announcer with
+    // the maximum score and full capability, lists every object and serves nothing. The station
+    // yields to it and every follower that hears it best follows it. Each of them stops once it
+    // has had nothing of what the false announcer lists for T_excursion, and the cell recovers
+    // (PROTOCOL.md §5.2). Before, nobody could outscore such a beacon, so nobody left it.
+    let positions: Vec<(f64, f64)> = (0..12).map(|i| ((i % 4) as f64 * 200.0, (i / 4) as f64 * 200.0)).collect();
+    let mut s = spec(BulkPreset::GfskL, positions, vec![0], vec![11], 8.0);
+    s.positions.as_mut().unwrap().push((300.0, 500.0));
+    s.nodes = 13;
+    s.mix = meshcast_sim::scenario::parse_mix("snac-music:42,snac-speech:22").unwrap();
+    let mut b = build(&s, Params::default());
+    b.engine.attackers.push(meshcast_sim::engine::Attacker::new(12, 5_000, false, true, true));
+    b.engine.nodes[12].mute = true;
+    b.engine.attack_ids = b.tracks.keys().copied().collect();
+    b.engine.start_attacks();
+    b.engine.run((s.hours * 3.6e6) as u64, 600_000);
+    let mut missing = 0;
+    for (id, t) in &b.tracks {
+        for &f in t.followers.iter().filter(|&&f| f != 12) {
+            if !b.engine.metrics.completions.contains_key(&(f, *id)) {
+                missing += 1;
+            }
+        }
+    }
+    assert_eq!(missing, 0, "{missing} follower-object pairs never completed");
 }

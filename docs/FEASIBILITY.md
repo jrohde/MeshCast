@@ -920,15 +920,9 @@ Every world delivers everything. In the dynamics scenario a bulletin arrives in 
 
 ### 9.9 Open
 
-- All 50 nodes of the dynamics scenario start at the same instant. In band L nobody can hear an
-  announcer that does not exist yet, so almost every node becomes announcer within the first
-  quarter hour before they find each other; the network is then stable for the remaining 71
-  hours. Letting a node that follows nobody sit on the base hop sequence (where the first
-  announcer of any area transmits) instead of scanning cut role events by a third over eight
-  seeds (257 to 165) and uploads by a sixth, but a bulletin took 7.8 minutes instead of 6.2.
-  Judged on one seed it looked worse on every count; judged on eight it is a trade, not yet
-  adopted.
-
+- All 50 nodes of the dynamics scenario start at the same instant, and in band L almost every
+  node became announcer within the first quarter hour before they found each other. Resolved in
+  §12: candidates on a hopping carrier step up in the meeting dwell.
 
 ## 10. Renditions: sound for devices that cannot decode
 
@@ -1082,3 +1076,272 @@ One measurement was an artefact and is recorded so that it is not repeated: an a
 a fixed period from time zero sent every WANT on a dwell boundary, where it jammed the first frame
 of each upload, and band L bulletins took 45 % longer. With random timing they took 6.0 minutes
 against 5.8 without an attacker. Jamming is a radio problem, not a protocol one (ABUSE.md).
+
+
+## 12. Elections that settle, and content that crosses stable cells
+
+Two items were open after §11: when every node of a band L network switched on at once, almost
+every node became announcer before they found each other (§9.9); and an attacker with its own id
+still raised the role changes in some band L worlds. Both turned out to be about the election.
+Settling the election then exposed paths between cells that the churn had been carrying without
+anyone designing them, and each got a rule. All numbers are eight seeds unless one world is named.
+
+### 12.1 The cold start, and a failover, on a hopping carrier
+
+In the living network of §7.6 (band L, 50 nodes on 1 km², all switched on at time zero) between 5
+and 22 nodes were announcer five minutes after the start, every node had been announcer once, and
+the first hour had 239 to 294 role changes. A failover (20 nodes; the station switched off after
+two hours) produced up to 13 new announcers in one world and settled after 165 to 4,000 s; on
+ESP-NOW, which hops over Wi-Fi channels 1, 6 and 11, one world needed an hour to elect anyone.
+
+A role trace showed why. On a hopping carrier a node that follows nobody scans slowly, while a
+new announcer's first beacon goes out on its own hop sequence. The candidates could hear it only
+in the next meeting dwell, every 100 s; their timers were spread over 40 s. So nobody heard
+anybody in time.
+
+Four remedies were inventoried: a wider spread of the timers (slower failover everywhere); letting
+a node that follows nobody listen on the base sequence, where a new announcer of colour 0 speaks
+(tried in §9.9 and judged a trade); a new announcer heralding itself on the scan channel; and
+stepping up where every candidate already listens, in the meeting dwell. The second and the last
+were measured. In the living network both ended the storm (one to three announcers at five
+minutes), with the first hour's role changes at 166 on average for base-sequence listening and
+130 for the meeting dwell, against 259; both delivered as fast as before. In the failover the
+meeting dwell was better, a single clean election in seven of eight worlds after 212 s, while
+base-sequence listening still produced ten announcers in one world: a new announcer is colour 0
+only if it has no conflicts, the meeting dwell works whatever the colours. The meeting dwell it is
+(PROTOCOL.md §5.2).
+
+### 12.2 Challenges that compared unlike things
+
+The eighth world was a cascade. Three new announcers had stepped up after the failover with
+scores of 72 to 76; a follower in the middle of them reached 120 within three minutes, took
+over, made two of them yield, and then yielded itself to the third on the tie-break. Each
+announcer that yielded left its followers waiting out three missed beacons.
+
+The score adds up what a node *is* (mains power, an uplink) and what it *experiences*: how many
+neighbours it hears, how much of its airtime budget is left, how many objects it holds. The
+second part depends on the role. An announcer transmits, so it hears less than its followers, and
+it spends its budget while they keep theirs; the follower in the middle heard the uploaders of all
+three cells. Comparing a follower's score with its announcer's compares unlike things, and every
+challenge in that world was such a comparison. Capability is now carried in two spare bits of
+the beacon's flags byte, and a follower challenges only an announcer less capable than itself
+(PROTOCOL.md §5.1, §5.2). Four more faults were found by measuring that rule:
+
+- *A challenge could never complete on a hopping carrier.* A candidate went back to following
+  when it heard any beacon, and a challenger hears its own announcer at every dwell start. A
+  station returning from a power cut took 107 to 1,797 s to take over in band L and up to 3,840 s
+  on ESP-NOW; with the score-based challenge it had only completed when its random wait happened
+  to fall between two beacons. A candidate now stands down only for an announcer at least as
+  capable as itself.
+- *A challenge cycle.* In a town with three stations one station, following a battery announcer
+  it could challenge, also heard another station. It stepped up, yielded to the other station on
+  score, followed the battery node again and challenged it again: 127 challenges and 3,100 role
+  changes in a day. A follower does not challenge while it hears an announcer at least as capable
+  as itself.
+- *Battery announcers that persisted next to a station.* At first more capability made an
+  announcer yield only when the other was in its own cell; a far battery announcer then kept
+  serving beside a station that its followers could also hear. More capability now counts like a
+  clearly higher score, near or far.
+- *A station that stepped up second.* The meeting dwell orders candidates by score plus a jitter,
+  and the jitter let two battery nodes step up three seconds before the station; the station,
+  more capable, stepped up anyway, they yielded, and their new followers waited out three missed
+  beacons. Candidates now step up in the order announcers yield in: capability first, in four
+  bands, then score, then chance (PROTOCOL.md §5.2). With that rule the span on a carrier that
+  does not hop was halved to 70 s, because a network without stations otherwise waited out the
+  stations' bands for nothing: a band O failover took 272 s with the full span and 199 s with the
+  half one.
+
+The election after all of it, against the design of §11:
+
+| | §11 | Now |
+|---|---|---|
+| Living network, band L: announcers 5 min after a cold start | 5 to 22 | 1 to 3 |
+| Living network, band L: role changes in the first hour | 239 to 294 | 100 to 119 |
+| Band L cell of 50 nodes, four worlds: role changes in the first hour (the same announcers at the end in three) | 243 to 318 | 107 to 109 |
+| Failover band L: first new announcer; settled after | 261 s; 165 to 4,000 s | 216 s; 165 to 217 s |
+| Failover ESP-NOW: first new announcer; settled after | 741 s mean, 3,588 s worst; up to 3,789 s | 217 s; 216 to 217 s |
+| Failover band O: first new announcer; settled after | 257 s; 248 to 262 s | 199 s; 195 to 218 s |
+| Station back from a power cut takes over, band L / ESP-NOW / band O | 107–1,797 / 114–3,840 / 201–222 s | 106–207 / 106–206 / 202–231 s |
+| Challenges per failover world | | exactly one (the returning station) |
+
+### 12.3 What the churn had been carrying
+
+With stable cells, three scenarios that had always delivered everything did not, each in one
+world, and in each the trace named a path between two cells that only churn had been using.
+Content crosses between two cells over any pair of nodes, one in each, that hear each other, and
+which pair it is decides how (PROTOCOL.md §4):
+
+- *A follower of one cell hears the other cell's announcer and holds what it asks for.* It offers
+  in the rendezvous and uploads when granted. This path existed.
+- *A follower hears another cell's announcer that has what it wants.* In one 15 km² band L world a
+  source's cell was the source, one neighbour and their announcer, and nobody else in it heard any
+  other announcer. Announcers do not upload, so the content stayed in that cell for twelve hours
+  and 97 nodes lacked a third of everything; with churn, followers had wandered in and out.
+  Followers of the neighbouring cells did hear that announcer. Now a follower whose want has
+  brought nothing, and whose own announcer has granted it to nobody, follows an announcer that
+  lists the object for as long as the visit brings something: an *excursion*. The smoke test
+  `a_follower_fetches_what_its_cell_cannot_get` builds such an island and checks both that it is
+  served and that it is not served without excursions.
+- *Two followers hear each other and neither announcer hears the other cell.* In the two-cluster
+  world of seed 2, two followers of the far cluster overheard the near cluster's source uploading,
+  because the two cells were not in conflict and shared a channel, and collected 112 of 113
+  symbols of three objects. Their own announcer was asking for the objects itself, so their NACK
+  went nowhere; main had delivered this world only because one of them had overheard every symbol.
+  A follower whose announcer is itself asking for an object, and has granted it to nobody, now
+  names in its NACK the holder it hears best in another cell, and a named holder answers.
+
+Calibrating the two new rules:
+
+- *When to go on an excursion.* At first a follower went after 20 minutes without a symbol. In a
+  band L neighbourhood 18 followers left at once after 26 minutes: their cell was busy, not
+  unable, and the objects were granted. The rule now also asks that the follower's announcer has
+  granted the object to nobody in that time. Then the time itself, in the 15 km² band L scenario:
+
+  | `T_excursion` | Median | Bulk frames | Excursions per world |
+  |---|---|---|---|
+  | (main, no excursions) | 29.5 min | 133,198 | |
+  | 20 min | 25.8 min | 147,251 | 41 to 68 |
+  | 40 min | 26.9 min | 133,662 | 0, and 31 in one world |
+  | 60 min | 27.7 min | 133,879 | 0, and 40 in one world, whose slowest object took 86 min |
+
+  At 20 minutes excursions were a shortcut that cost the visited carousels a repeated pass each;
+  at 40 they happen only where a cell cannot get an object otherwise. 40 minutes it is.
+- *Whom to name.* At first a follower named the holder it heard best, wherever it was. In a band O
+  world of 15 km² that doubled work: a holder in the follower's own cell answers its announcer's
+  ask anyway, and the same object went up twice. Naming only holders in other cells took that
+  world from 60,628 bulk frames to 50,187 at the same delivery.
+
+A third rule came from a band L neighbourhood where a source sat in a small cell beside a large
+one. It uploaded each object to its own announcer and then to the neighbouring one, one after the
+other, and its offers silenced those of nine neighbours that already held the objects. A holder
+that is uploading now offers nothing until it is done (PROTOCOL.md §4); that world's music median
+went from 22.8 to 18.3 minutes.
+
+### 12.4 False announcers
+
+An excursion follows an announcer that lists an object, so an attacker can list objects it does
+not have. The simulator's `--attack-lure` does that: in the rendezvous it beacons as an announcer
+and lists every object in HAVE, and it serves nothing. In the island of §12.3, with such a lure
+800 m from the one follower that can fetch (more than 6 dB weaker for it than its own announcer,
+so it is not followed by signal, but stronger than the island's announcer), that follower went to
+the lure every 41 minutes for six hours and its cell got nothing. A visit that brings not one
+symbol now makes the follower ignore that announcer for an hour: it went to the lure once, after
+46 minutes, came back at 86, fetched from the island's announcer and had everything in its own
+cell at 91 (smoke test `a_lure_is_visited_once`, which fails without the rule).
+
+A lure is also a false announcer, and a follower that hears it better than any other follows it
+by signal: the election capture of ABUSE.md. In the simulator a lure is muted apart from its lies,
+so that its own node never serves anything by accident. In the 15 km² band L scenario, five lures
+that claimed nothing (score 0, no capability) cost the design of §11 little: a follower captured
+by one outscored it and challenged it within three beacons. The new election, which challenges
+only on capability, lost a fifth of all deliveries to them and half in the worst world. But the
+protection of §11 was an accident of the attacker's modesty: against five lures claiming the
+maximum score it delivered 66 % on average and 60 % in the worst world, because nobody outscored
+them.
+
+The rule that holds against both is evidence before belief (PROTOCOL.md §5.2): an announcer that
+lists what it does not serve is not followed, and a source stops offering an object only when it
+uploaded it or hears someone send it, not because its announcer claims to have it. Getting the
+evidence right took four rounds:
+
+- *Nothing for 40 minutes* was the first version: a follower that got not one symbol of anything
+  it wanted for `T_excursion` while its announcer listed it left that announcer. Against lures it
+  worked; in the living band L network with one WANT-flooding attacker it made followers leave
+  honest announcers 56 to 320 times in the 71 hours after the first, against none without the
+  rule.
+  The flood slows an honest announcer's repetitions to its ceiling of 80 minutes (§11), and a
+  follower that missed a pass waits that long.
+- *Never one symbol, for longer than the ceiling*: an object the announcer lists and the follower
+  wants of which it has never had one symbol, or a source's own object the announcer lists and
+  nobody has been heard sending, for the ceiling plus one ask, 90 minutes. No false alarms under
+  the flood, but slower against lures: five lures claiming nothing left 93.8 % delivered, 84.1 %
+  in the worst world. "Never one symbol" is needed because a follower on a channel shared with a
+  neighbouring cell overhears that cell's symbols; "nobody sending" because a source between two
+  lures wanted nothing itself, and only its own objects could show the lie.
+- *A silent channel, sooner*: a listed want that has stalled for `T_excursion` while not one
+  `BULK` frame of any object arrived. An announcer busy repeating other objects under a flood is
+  not silent; one that serves nothing is.
+- *No excursion for what our announcer lists*: under the flood the remaining role changes were
+  excursions, followers fetching elsewhere what their own announcer had but was repeating
+  slowly. An object our announcer lists, it either serves or is found out; it is not a reason to
+  leave. With that, no role changes at all after the first hour in any of the eight worlds.
+
+A smoke test, `a_false_announcer_is_left`, puts a lure claiming the maximum beside a band L cell
+switched on at once; it fails without the rule.
+
+| 15 km² band L, eight seeds: delivered on average, in the worst world | §11 | New election without the rule | Now |
+|---|---|---|---|
+| No attacker | 100 %, 100 % | 100 %, 100 % | 100 %, 100 % |
+| One lure claiming nothing | 99.4 %, 97.7 % | 98.3 %, 96.5 % | 99.4 %, 98.7 % |
+| Five lures claiming nothing | 96.6 %, 94.1 % | 80.6 %, 53.2 % | 97.8 %, 94.7 % |
+| Five lures claiming the maximum | 65.8 %, 59.5 % | 76.3 %, 49.2 % | 95.2 %, 86.9 % |
+
+| Living network, band L, one WANT-flooding attacker | §11 | Now |
+|---|---|---|
+| Role changes after the first hour, per world | 0 in six, 72 and 159 in two | 0 in all eight |
+| Uploads, bulletin median, worst p90 | 314, 6.0 min, 15.6 min | 289, 5.9 min, 12.6 min |
+
+The two worlds with role changes under §11 are the item §11 left open: an attacker with its own id
+raised the churn there, which §11 suspected came through the score's term for unused airtime, an
+announcer losing it while it repeats. Followers now challenge on capability only (§12.2), and the
+churn is gone.
+
+What a false announcer still costs: each follower it captures stays with it until it has seen
+that announcer's channel silent for 40 minutes, or 90 minutes on a shared channel; every
+announcer that hears its claims yields to it first; with five of them, 2 to 5 % of deliveries
+were still outstanding after twelve hours; and a follower that hears it better than its own
+announcer follows it again by signal once the hour is over (the living network below). Making
+the time ignored double with each offence, remembered for 32 hours, cut those role changes in
+band O but cost band L dearly: an honest announcer ignored by mistake was then ignored for hours,
+and one world held only half of its windows at the end. It was left out.
+
+### 12.5 The nine scenarios, and the living network
+
+The nine scenarios of §9.3 (SNAC music and speech alternating, eight seeds each), against main
+before this round; "delivered" is the mean over the seeds, with the worst in brackets:
+
+| Scenario | Main: delivered, median, bulk frames | Now | Frames |
+|---|---|---|---|
+| Band O neighbourhood, 50 nodes, 1 km² | 100 % (100), 9.1 min, 6,936 | 100 % (100), **7.8 min**, 6,930 | 0 % |
+| Band L neighbourhood, 50 nodes, 1 km² | 100 % (100), 16.8 min, 16,774 | 100 % (100), 17.0 min, 16,101 | −4 % |
+| Band O, 100 nodes, 15 km² | 100 % (100), 8.9 min, 39,480 | 100 % (100), **8.6 min**, 45,726 | +16 % |
+| Band L, 100 nodes, 15 km² | 100 % (100), 29.5 min, 133,198 | 100 % (100), **26.9 min**, 134,672 | +1 % |
+| ESP-NOW, 30 nodes, 1 km² | 100 % (100), 14.9 min, 45,585 | 100 % (100), **14.4 min**, 42,956 | −6 % |
+| Two clusters 1.8 km apart, band L | 100 % (100), 20.3 min, 9,167 | 100 % (100), 20.1 min, 7,263 | −21 % |
+| LoRa only, two nodes 5 km apart | 100 % (100), 47.5 min, 2,483 | 100 % (100), 47.4 min, 2,441 | −2 % |
+| Town, band O, 200 nodes, 30 km² | 100 % (100), 14.7 min, 171,656 | 100 % (100), 14.6 min, 176,430 | +3 % |
+| Town, band L, 200 nodes, 30 km² | 100 % (100), 41.5 min, 481,424 | 100 % (100), **36.0 min**, 507,517 | +5 % |
+
+The living network of §7.6 (72 hours, 50 nodes on 1 km², a daily bulletin per channel, eight
+seeds), without an attacker and against one attacker of each kind: a WANT flood under its own id,
+the same under a made-up id per WANT, and a lure claiming nothing. Bulletin median and worst p90
+in minutes, the worst world's share of followers holding every current window at the end, and
+role changes after the first hour per world:
+
+| Band L | §11 | Now |
+|---|---|---|
+| No attacker | 5.8, 15.6, 100 %, 0 | 5.8, 15.6, 100 %, 0 |
+| WANT flood | 6.0, 15.6, 100 %, 0 to 159 | 5.9, 12.6, 100 %, 0 |
+| WANT flood, made-up ids | 6.0, 16.8, 100 %, 0 | 5.9, 12.6, 100 %, 0 |
+| One lure | 17.8, 2,078, 61.9 %, 7,165 to 67,134 | 23.8, 52.2, 92.9 %, 12 to 289 |
+
+| Band O | §11 | Now |
+|---|---|---|
+| No attacker | 1.8, 1.8, 100 %, 0 | 1.8, 1.8, 100 %, 0 |
+| WANT flood | 1.8, 2.4, 100 %, 0 | 1.8, 3.0, 100 %, 0 |
+| WANT flood, made-up ids | 1.8, 2.4, 100 %, 0 | 1.8, 3.0, 100 %, 0 |
+| One lure | 2.2, 7.8, 95.2 %, 65,059 to 154,564 | 1.8, 3.0, 100 %, 24 to 487 |
+
+Under §11 a single lure turned the election into a perpetual challenge: followers outscored it,
+stepped up, yielded to its next beacon and outscored it again, tens of thousands of times. Now a
+follower near it leaves it when it is found out and comes back when it is no longer ignored. In
+band L that is still the largest cost in this section: the median bulletin took 24 minutes
+instead of 6, because each new bulletin found the followers near the lure back with it.
+
+What it cost: in the band O scenario of 15 km² the network used 16 % more airtime than main at
+the same delivery. There the election now forms its final cells, three to five of them, within
+five minutes of a cold start, and every cell carries every object once; main reached about the
+same number of announcers only after up to two hours of churn, during which fewer, half-formed
+cells had carried the first objects to more nodes at once. The band L town used 5 % more for a
+median 13 % faster. Everywhere else frames were within 4 % or fewer, and no scenario was slower by
+more than a fifth of a minute.

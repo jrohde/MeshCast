@@ -3,9 +3,10 @@
 ## 1. One protocol, no roles
 
 Every MeshCast node runs the same `core` protocol. There is no "repeater", "client" or "gateway"
-setting. What differs is capacity, which the node measures itself and turns into its election
-score ([PROTOCOL.md](PROTOCOL.md) §5): a mains-powered box on a roof with a big antenna, lots of
-storage and an internet uplink scores high and ends up as the announcer of its cell; a battery
+setting. What differs is capacity, which the node measures itself and turns into its capability
+and election score ([PROTOCOL.md](PROTOCOL.md) §5): a mains-powered box on a roof with a big
+antenna, lots of storage and an internet uplink outranks every battery node and ends up as the
+announcer of its cell; a battery
 dongle in a pocket scores low and listens. Swap the hardware and the roles swap with it, with no
 configuration.
 

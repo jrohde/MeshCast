@@ -63,14 +63,32 @@ uploads). Results and their interpretation are in `docs/FEASIBILITY.md` §7.
   grant heard by its holder, `OF` offer, `UP` upload frame sent, `UO` upload frame received by
   its announcer, `UC` upload frame collided there, `BO` other symbol of an object an announcer
   wants, `MA` manifest announcement, `OC` object completed, and at the end `MISSING` for every
-  object a follower lacks and `NOLEN` for every want whose length the wanter does not know.
+  object a follower lacks (with the announcers it hears and who listed the object, to tell
+  whether an excursion or a named repair was possible) and `NOLEN` for every want whose length
+  the wanter does not know.
 - `MESHCAST_DEBUG_WANTS=1` traces each announcer's want list.
+- `MESHCAST_TRACE_ROLES=1` prints every role change as `ROLE t node carrier role announcer`.
+- `MESHCAST_TRACE_BEACONS=1` prints every beacon with its score, channel and colour, and every
+  node that receives it above sensitivity with its own score; an `x` after a node means it was
+  tuned to another channel and missed it.
+- `MESHCAST_TRACE_ANNOUNCE=1` prints every manifest announcement and who heard it.
+- `MESHCAST_T_EXCURSION_MIN=40` overrides `T_excursion` for an experiment.
+
+The reports count role changes, challenges (a follower stepping up against a less capable
+announcer) and excursions (`docs/PROTOCOL.md` §4, §5.2); `dynamics` also prints how many
+announcers there were 5, 10, 20, 30 and 60 minutes after everyone switched on at once, and how
+many role changes happened in the first hour and after it.
 
 ## Attackers
 
 `--attackers N` makes N followers flood the announcer they follow with WANTs for every object of
 the scenario, at random times averaging `--attack-period-s` (default 60); `--attack-spoof` gives
-every WANT a fresh made-up node id, and `--attack-renditions` asks for renditions too. The report
+every WANT a fresh made-up node id, and `--attack-renditions` asks for renditions too.
+`--attack-lure` makes them pose instead as announcers that have everything: where every follower
+listens (the rendezvous on a hopping carrier, any time on one that does not hop) they beacon and
+list objects in HAVE, alternately, and never serve anything (their own protocol
+is muted); with `--attack-claim-max` their beacons claim the maximum score and full capability
+instead of nothing. The report
 adds the attackers' frames; compare bulk frames and the followers' latency with a run without
 them. What the protocol does about it is in `docs/ABUSE.md` and `docs/FEASIBILITY.md` §11. (A
 fixed period from time zero turned out to put every WANT on a dwell boundary, where it jammed the
