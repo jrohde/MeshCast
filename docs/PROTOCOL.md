@@ -215,7 +215,7 @@ and fetch them through bridge nodes.
 
 | Offset | Size | Field |
 |---|---|---|
-| 1 | 1 | flags: bulk carrier kind (3 bits) |
+| 1 | 1 | flags: bulk carrier kind (bits 0–2), capability (bits 3–4: mains power ×2 + IP uplink; §5.1) |
 | 2 | 4 | `announcer_id` (first 4 bytes of the node's public key hash) |
 | 6 | 2 | `score` (see §5) |
 | 8 | 2 | `next_ms` — milliseconds until the next beacon from this announcer |
@@ -289,14 +289,20 @@ silence.
 | 2 | 4 | `node_id` of the asker |
 | 6 | 8 | `object_short_id` |
 | 14 | 2 | `block` |
-| 16 | 4 | `answerer` — the holder an announcer names to answer (0: any holder, after a wait) |
+| 16 | 4 | `answerer` — the holder the asker names to answer (0: its announcer's carousel, or for an announcer any holder, after a wait) |
 | 20 | 1 | `n_ranges` |
 | 21 | 4 × n_ranges | missing source symbols as (first `esi` u16, count u16) runs |
 | … | 2 | CRC-16 |
 
 Draft cap 40 ranges, 183 bytes. Sent by a node that is nearly complete on an object (draft 80 %)
 and has seen no progress for `T_nack_stall`. A follower's NACK goes to its announcer, whose
-carousel puts the missing symbols at the front of the next round. An announcer's NACK names
+carousel puts the missing symbols at the front of the next round; but if that announcer is itself
+asking for the object (its WANT lists it) and has granted it to nobody for `T_grant`, nobody in
+the cell can repair it, and the follower names instead the holder it hears best among those that
+follow another announcer: a holder in its own cell would answer its announcer's ask anyway, and
+naming one as well only doubled the work (FEASIBILITY.md §12). That holder is usually in the next
+cell, and its uploads are what the follower overheard (§4, "Content crosses wherever a link
+does"). An announcer's NACK names
 who answers, and in which phase: its granted uploader if the object has one, otherwise the holder
 of the object it hears best (holders say what they have in GOSSIP HAVE). The named holder answers
 at once; only if the announcer knows no holder does any holder answer, after a wait. This is the whole repair mechanism in v0; it costs one small control frame per object
@@ -452,6 +458,45 @@ the granted uploader answers for as long as the announcer keeps asking. On frequ
 carriers an announcer's NACKs, like its gossip, go out in the meeting dwell, because its
 uploader may live in another cell on another sequence.
 
+**A holder that is uploading offers nothing more until it is done.** Its offer would silence the
+offers of holders that are free, and everything granted to it would queue behind one radio while
+theirs stayed idle. A source in a small cell next to a large one uploaded each of its objects to
+both announcers in turn, and the large cell waited for it while nine of its neighbours already
+held the objects (FEASIBILITY.md §12).
+
+**Content crosses wherever a link does.** Two cells are joined by any pair of nodes, one in each,
+that hear each other. Each kind of pair has its own way across:
+
+- *A follower of one cell hears the other cell's announcer, and holds what it asks for*: it
+  answers the open ask with an offer in the rendezvous, and uploads when granted (above).
+- *A follower hears another cell's announcer that has what it wants, which its own cannot get*: it
+  goes there. A follower whose want has brought no symbol for `T_excursion` (draft 40 min), whose
+  announcer has not granted the object to any uploader in that time and does not list it itself (a
+  busy cell delivers late; only a cell that cannot get an object sends its followers out for it, and
+  an announcer that lists an object either serves it or is not followed, §5.2), and that has heard
+  another announcer list the object in its HAVE, follows that announcer, for what it has rather than
+  for how well it is heard, until it holds everything it wanted that the announcer has, or until the
+  visit brings nothing for `T_excursion`. Then it follows by signal again, and is back in its own
+  cell as a holder, where its announcer's ask finds it. This is an **excursion**. An excursion is
+  the last way in, not a shortcut: at 20 minutes, followers in slow but working multi-cell networks
+  went out dozens of times a day and every visit cost the visited carousel a repeated pass (11 %
+  more airtime for a minute of median); at 40 minutes they go only where their cell cannot get the
+  object at all (FEASIBILITY.md §12). A visit that brought not one symbol means the announcer lists
+  what it does not serve, and the follower ignores it for `want_ttl` (§5.2). Without excursions, a
+  cell whose only link to the rest was its own announcer, which never uploads, kept a source's
+  content to itself for twelve hours (FEASIBILITY.md §12).
+- *Two followers hear each other, neither announcer hears the other cell*: the cells are not in
+  conflict, so they usually share a colour and a channel, and the follower overhears the other
+  cell's uploads. What it misses it repairs from the holder it heard, by name (§3.5); the holder
+  answers on the channel the follower listens on, even though only an announcer's NACK is otherwise
+  answered by holders: one named holder answering is no storm. Without the named repair, two
+  followers in one cluster of two had each overheard 112 of 113 symbols of three objects and had
+  nobody to ask for the last one (FEASIBILITY.md §12).
+
+Between two announcers alone there is no way across: an announcer neither uploads nor makes
+excursions. Two announcers that hear each other merge when they share a cell (§5.2); two cells
+joined by nothing but their announcers' link are the case left open (§9, question 11).
+
 **You carry what you listen to.** A node registers, collects and keeps the objects of the
 channels it follows (and, as announcer, of every channel it serves). Objects that no manifest of
 interest references any more, because the channel was unfollowed or the object left the
@@ -466,10 +511,12 @@ including the sources uploading new tracks, so that a channel's last tracks neve
 mesh.)
 
 **Upload**: a source that has an object the announcer lacks sends GOSSIP with HAVE. The announcer
-replies with GOSSIP WANT. The source then transmits the object's symbols as `BULK` frames under
-the same gating; everyone in range collects them, not just the announcer. When the announcer
-reports HAVE, the source stops. A source that hears no announcer for `T_silence` (see §5) may
-become the announcer itself.
+replies with GOSSIP WANT. The source then transmits the object's symbols as `BULK` frames under the
+same gating; everyone in range collects them, not just the announcer. The source stops when it has
+uploaded the object and the announcer reports HAVE, or when it hears anyone else send the object. A
+HAVE alone is a claim: an announcer that lists a source's object although nobody has been heard
+sending it is not believed, and not followed (§5.2). A source that hears no announcer for
+`T_silence` (see §5) may become the announcer itself.
 
 ## 5. Announcer election and healing
 
@@ -488,8 +535,23 @@ ESP-NOW and follower on sub-GHz).
 | objects in the carousel set the node can serve | 1 per object, capped at 32 | library |
 | has IP uplink | +16 | discovery |
 
+The weights add up to `score_max` = 432.
+
 A station on a roof with an SX1302, mains and internet scores near the maximum; a battery dongle
-in a drawer scores low. A node id counts only once it has been heard a second time: names are not
+in a drawer scores low.
+
+**Capability and circumstance.** Two of the terms say what a node *is*: mains power and an IP
+uplink. Its *capability* is these two as a number, mains outranking an uplink (`2 × mains +
+uplink`), and every beacon carries it (§3.1). The other terms say what a node *experiences* in its
+role, and the role changes them: an announcer transmits, so it hears less than its followers
+(a radio that sends cannot receive), and it spends its airtime budget while they keep theirs.
+Scores are therefore compared only between nodes in the same role. Two announcers compare
+capability first and score second; a follower compares only capability with its announcer
+(§5.2). When followers challenged on score, a follower in the middle of three new cells reached
+120 against its announcers' 72 to 76 within three minutes of a failover, purely by hearing the
+uploaders of all three, took over, and then lost to a neighbour on the tie-break; its followers
+and those of the announcers it displaced waited out `N_miss` beacons each time
+(FEASIBILITY.md §12). A node id counts only once it has been heard a second time: names are not
 authenticated in GOSSIP, and when every made-up name counted at once, one node sending WANTs
 under a fresh name each minute inflated the scores of everyone who heard it, and the election in
 one simulated world changed roles 27,335 times in 72 hours instead of 259 (FEASIBILITY.md §11).
@@ -497,20 +559,25 @@ one simulated world changed roles 27,335 times in 72 hours instead of 259 (FEASI
 ### 5.2 States
 
 ```
-FOLLOWER  ── no BEACON for N_miss expected intervals, another announcer audible ──▶ FOLLOWER of that one
-FOLLOWER  ── no BEACON for N_miss expected intervals, nobody audible ─────────────▶ CANDIDATE
-FOLLOWER  ── own score clearly better than the announcer's for `challenge_beacons` beacons ──▶ CANDIDATE (short wait)
-CANDIDATE ── timer expires, still no BEACON ──────────▶ ANNOUNCER
-CANDIDATE ── hears BEACON ────────────────────────────▶ FOLLOWER
-ANNOUNCER ── hears BEACON with clearly higher score ───▶ FOLLOWER
-ANNOUNCER ── hears BEACON with similar score and lower id, strong signal or nobody else heard ──▶ FOLLOWER
+FOLLOWER  ── no BEACON for N_miss expected intervals, another announcer audible ──────────▶ FOLLOWER of that one
+FOLLOWER  ── no BEACON for N_miss expected intervals, nobody audible ─────────────────────▶ CANDIDATE
+FOLLOWER  ── more capable than its announcer for `challenge_beacons` beacons, and
+             no announcer heard is as capable ────────────────────────────────────────────▶ CANDIDATE (challenge)
+FOLLOWER  ── a want stalled and ungranted for T_excursion, another announcer has it ──────▶ FOLLOWER of that one (excursion, §4)
+FOLLOWER  ── its announcer lists what it does not serve ──────────────────────────────────▶ FOLLOWER of another, or CANDIDATE
+CANDIDATE ── timer expires, still no BEACON it stands down for ───────────────────────────▶ ANNOUNCER
+CANDIDATE ── hears BEACON of an announcer at least as capable ────────────────────────────▶ FOLLOWER
+ANNOUNCER ── hears BEACON of a more capable announcer ────────────────────────────────────▶ FOLLOWER
+ANNOUNCER ── hears BEACON, same capability, clearly higher score ─────────────────────────▶ FOLLOWER
+ANNOUNCER ── hears BEACON, same capability, similar score and lower id, in its own cell ──▶ FOLLOWER
 ```
 
-**Following is by signal, stepping up is by score.** A follower needs to *receive* its
-announcer's carousel, so it follows the announcer it hears best (RSSI, averaged) and switches only
-for one at least `rssi_hysteresis` (draft 6 dB) stronger. Scores decide who steps up when nobody
-is heard, who yields when two announcers meet, and when a much better node challenges the
-incumbent.
+**Following is by signal and by evidence, stepping up is by capability and score.** A follower
+needs to *receive* its announcer's carousel, so it follows the announcer it hears best (RSSI,
+averaged) and switches only for one at least `rssi_hysteresis` (draft 6 dB) stronger, unless that
+announcer does not serve what it lists (below). Capability and score decide who steps up when
+nobody is heard and who yields when two announcers meet; capability alone decides when a follower
+challenges its announcer.
 
 **Two announcers may coexist.** Overlapping cells in one band are normal: two announcers that
 hear each other weakly usually serve different followers, and if the far one yielded, its
@@ -524,12 +591,36 @@ persist and EtherFatsoen shares the channel between them.
 - **N_miss** (draft 3): consecutive expected beacons missed (using the announcer's own `next_ms`).
   With `T_beacon = 60 s` that is about three minutes of silence before anyone acts. Nothing is
   urgent, so this is deliberately slow; the simulator will tune it.
-- **Candidate timer**: `T_wait = T_base × (1 − score / 65535) + jitter(0, T_jitter)`, draft
-  `T_base = 120 s`, `T_jitter = 20 s`. The best-scoring node waits the shortest time. While waiting
-  the node listens; any BEACON returns it to FOLLOWER.
-- **Tie-break**: if an ANNOUNCER hears another BEACON, it compares scores. It yields if the other
-  score exceeds its own by more than `H` (draft 10 % of the max) or if scores are within `H` and
-  the other `announcer_id` is numerically lower. Two announcers that cannot hear each other but
+- **Candidates step up in the order announcers yield in**: capability first, then score, then
+  chance. A span of time is divided into four bands, one per capability (mains and uplink, mains,
+  uplink, neither); within its band a candidate waits less the higher its score, over two thirds
+  of the band, plus a jitter over the last third. A more capable node therefore always speaks
+  before a less capable one; when a jitter that spanned the bands let a battery node step up a
+  few seconds before the station, the station stepped up anyway, the battery node yielded, and
+  its new followers waited out `N_miss` beacons (FEASIBILITY.md §12).
+- **A candidate steps up where every other candidate hears it.** On a carrier that does not hop,
+  that is any moment, and the span is `T_base + T_jitter` (draft 60 s + 10 s) after the candidacy
+  began. Two candidates collide only if they step up within one beacon's airtime of each other,
+  milliseconds; the span is long enough to keep them apart and short enough that a network of
+  battery nodes, which waits out the bands of the stations it does not have, fails over in about 200
+  s (FEASIBILITY.md §12). On a hopping carrier (§5.3) candidates are spread over the channels: a
+  node that follows nobody scans slowly, and a new announcer's first beacon goes out on its own hop
+  sequence, where almost nobody listens. Candidates there meet only in the meeting dwell, so that is
+  where they step up: after the announcers' own meeting beacons (`T_dwell / 5`), over the next seven
+  tenths of the dwell. The first to step up is heard by every candidate in range at once. Before
+  this rule, when all fifty nodes of a band L neighbourhood started together, between 5 and 22 of
+  them were announcer five minutes later and every node had been one; a failover produced up to 13
+  announcers and settled after 13 minutes, once after more than an hour (FEASIBILITY.md §12).
+- **A candidate stands down for an announcer at least as capable as itself.** While waiting it
+  listens; a BEACON from such an announcer makes it a FOLLOWER. A more capable candidate keeps
+  waiting and steps up, and the less capable announcer yields to it. (A challenger hears its own
+  announcer's beacons all the time; when any beacon cancelled a candidacy, a challenge on a hopping
+  carrier, where the announcer beacons every dwell, could never complete.)
+- **Tie-break**: if an ANNOUNCER hears another BEACON, it compares capability first: it yields to
+  a more capable announcer, near or far, and never to a less capable one. Between equals it
+  compares scores: it yields if the other score exceeds its own by more than `H` (draft 10 % of
+  the max), or if scores are within `H` and the other `announcer_id` is numerically lower and the
+  other is in its own cell. Two announcers that cannot hear each other but
   are both heard by a node in between are detected by that node's GOSSIP (`announcer_id` field
   differs from the announcer's own id). That report makes them colour themselves apart (§5.3);
   it is not a reason to yield. An announcer yields only to a beacon it hears itself: it cannot
@@ -537,10 +628,34 @@ persist and EtherFatsoen shares the channel between them.
   report make announcers step down and come back, over and over (ABUSE.md; FEASIBILITY.md §11).
   Removing it changed nothing in any scenario without an attacker. Convergence to one announcer
   per connected cell takes at most a few beacon intervals.
-- **Hysteresis and challenge**: a returning former announcer (or any newcomer) whose score
-  exceeds the incumbent's by more than `H` for `challenge_beacons` consecutive beacons steps up
-  after a short random wait; the incumbent hears the better beacon and yields. Near-equal nodes
-  never challenge, so there is no flapping. A rebooted node always starts as a follower.
+- **An announcer that lists what it does not serve is not followed.** Beacons and HAVE are claims;
+  serving is evidence. A follower ignores its announcer for `want_ttl`, as it ignores one whose
+  excursion brought nothing (§4), when the announcer lists an object the follower wants of which the
+  follower has never received one symbol, or lists one of the follower's own objects that nobody has
+  been heard sending, for longer than an honest announcer can take to pass an object it was asked
+  for: its repetition ceiling (§4, eight `T_want_min`) and one `T_want_min` for the ask, 90 minutes
+  at the draft. Not one symbol, because a follower on a channel shared with a neighbouring cell
+  overhears that cell's symbols, which say nothing for its own announcer. Longer than the ceiling,
+  because under a WANT flood an honest announcer passes an object only that often: with a 40-minute
+  window, followers in a living band L network under one attacker left honest announcers 56 to 320
+  times in three days (FEASIBILITY.md §12). Sooner, after `T_excursion`, where the channel is silent: the
+  announcer lists a want of the follower's that has stalled, and the follower has received no `BULK`
+  frame of any object at all in that time. An announcer busy repeating other objects is not silent;
+  one that serves nothing is. An honest announcer that lacks an object asks for it rather than
+  listing it. The follower then follows the best other announcer it hears; hearing none, it becomes
+  a candidate, since an area whose only announcer serves nothing has none. Before this rule a
+  follower only escaped an announcer that served nothing by challenging it on score, which a false
+  beacon defeats by claiming the maximum: five such beacons in a 15 km² band L network left 66 % of
+  deliveries done in twelve hours, 60 % in the worst world; with the rule, 95 % and 87 %
+  (FEASIBILITY.md §12).
+- **Challenge on capability, not on circumstance**: a follower more capable than its announcer
+  (a station back from a power cut, following the battery node that took over) for
+  `challenge_beacons` consecutive beacons becomes a candidate; the incumbent hears the more
+  capable beacon and yields. It does not challenge while it hears any announcer at least as
+  capable as itself: it would yield to that one once it stepped up, follow the weaker one again
+  and challenge it again, a cycle the simulator found in a town with three stations (127
+  challenges in one day). Followers of equal capability never challenge, whatever their scores.
+  A rebooted node always starts as a follower.
 - **Partition**: if the cell splits, the far side elects its own announcer after
   `N_miss × T_beacon + T_wait`. Two cells exist. Nodes hearing both follow the stronger beacon and
   report the other's objects in HAVE; each announcer can WANT them, so content crosses the boundary.
@@ -559,7 +674,7 @@ both pseudo-random (`channel = splitmix64(id, dwell_index) mod n`, dwell `T_dwel
 - the **control plane**: one common sequence for everyone, keyed by a fixed id, active during
   every `meet_every`-th dwell (draft 1 in 5). Announcers beacon there, cell-wide gossip (WANT,
   HAVE, manifest announcements) is timed to it, and so every cell hears every other cell's needs
-  and offers.
+  and offers. Candidates step up there too (§5.2).
 
 The announcer sends a beacon at every dwell start (2 ms, with a small random offset so that
 announcers hidden from each other do not collide at the meeting dwell) on whichever sequence is
@@ -635,9 +750,11 @@ arrives a few minutes later than it otherwise would. That is the entire user-vis
 | `K_max` | 1024 | symbols per source block |
 | `T_beacon` | 60 s | beacon interval on the bulk carrier |
 | `N_miss` | 3 | missed beacons before switching or election |
-| `T_base`, election jitter | 120 s, 20 s | candidate wait, scaled down by score |
-| `H` | 10 % of the maximum score | yield / challenge hysteresis |
-| `challenge_beacons` | 3 | beacons with a clearly lower score before a follower steps up |
+| `T_base`, election jitter | 60 s, 10 s | together the span of a candidate's wait on a carrier that does not hop |
+| `H` | 10 % of `score_max` | yield hysteresis between announcers of equal capability |
+| `challenge_beacons` | 3 | beacons from a less capable announcer before a follower challenges it |
+| step-up order | span in 4 capability bands; in a band, 2/3 by score + 1/3 jitter | span `T_base + T_jitter` from the candidacy, or 7/10 of the meeting dwell after its first fifth on a hopping carrier |
+| `T_excursion` | 40 min | a want without a symbol, and without a grant by our announcer, this long sends a follower to another announcer that has it; a visit without a symbol this long ends, and one that brought none is not repeated for `want_ttl` |
 | `rssi_hysteresis` | 6 dB | a follower switches announcer only for a clearly stronger one |
 | `near_rssi` | sensitivity + 17 dB | beacon strength that means "same cell" for the tie-break |
 | `max_passes` | 1 | carousel passes per object unless re-wanted |
@@ -701,6 +818,13 @@ arrives a few minutes later than it otherwise would. That is the entire user-vis
     once never lapsed, so an announcer kept naming a holder that had gone quiet. Offers now wait
     for the rendezvous and grants lapse without progress; the band L neighbourhood went from
     95–99 % on average (one seed at 66 %) to 100 % on every seed.
+    Once elections settled cleanly (§5.2), it turned out that some of this had been carried by
+    churn: followers that changed announcer took objects with them. With stable cells the paths
+    across were named one by one, by the kind of pair that joins two cells, and each got a rule
+    (§4, "Content crosses wherever a link does"; FEASIBILITY.md §12). Still open: two cells joined
+    only by their two announcers hearing each other. An announcer that uploaded to another
+    announcer as a last resort would close it, at the cost of leaving its own channel; no
+    simulated world has needed it yet.
 12. *(resolved: renditions, on demand and for the last hop; §1.2.)* A device that cannot run the
     neural decoder, such as a LilyGo T-Deck Pro, can play Opus but not SNAC. Carrying Opus
     alongside every programme was measured: with half the programmes also as Opus the network

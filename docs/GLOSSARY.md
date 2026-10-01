@@ -1,13 +1,19 @@
 # Glossary
 
-**Announcer.** The one node in a cell that transmits the carousel. Elected automatically by score;
+**Announcer.** The one node in a cell that transmits the carousel. Elected automatically, by
+capability first and score second;
 every node runs the same protocol and any node can become announcer. See PROTOCOL.md §5.
 
-**Beacon.** The announcer's heartbeat frame: identity, score, time, spectrum weather, and when the
-next beacon comes. Its absence triggers an election.
+**Beacon.** The announcer's heartbeat frame: identity, capability, score, time, spectrum weather,
+and when the next beacon comes. Its absence triggers an election.
 
-**Bridge node.** A node that hears the announcers of two cells and therefore lets content cross
-between them via its HAVE gossip.
+**Bridge node.** A node that hears into a neighbouring cell and so lets content cross: it offers
+what that cell's announcer asks for, goes on an excursion to it, or repairs from a holder there
+whose uploads it overheard (PROTOCOL.md §4).
+
+**Capability.** What a node is, as opposed to what it experiences in its role: mains power and an
+internet uplink, carried in every beacon. Elections compare it before the score; a follower
+challenges its announcer only on capability (PROTOCOL.md §5.1).
 
 **Bulk carrier.** A carrier used for content symbols: GFSK on sub-GHz, ESP-NOW LR, IP, SD.
 
@@ -47,6 +53,9 @@ profile and enforced in firmware. See ETHERDISCIPLINE.md.
 **EtherFatsoen.** Dutch loanword, "ether decency": the spectrum-etiquette layer, how nodes share
 the air politely without a coordinator. See ETHERFATSOEN.md.
 
+**Excursion.** A follower following another cell's announcer for a while, for an object its own
+cell cannot get, and then coming back to upload it there (PROTOCOL.md §4).
+
 **Follower.** A node that follows at least one channel and therefore wants objects. Followers
 never transmit unless they have something the announcer lacks.
 
@@ -64,7 +73,8 @@ is needed. Followers stay silent by default.
 sufficiently large subset of symbols.
 
 **Score.** A node's self-computed suitability to be announcer: neighbours heard, mains power,
-unused airtime budget, library size, internet uplink.
+unused airtime budget, library size, internet uplink. Only comparable between nodes in the same
+role; see Capability.
 
 **Short id.** The first 8 bytes of an object's BLAKE3 hash, used on the air.
 
