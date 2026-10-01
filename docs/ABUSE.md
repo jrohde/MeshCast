@@ -18,7 +18,8 @@ of yours can spend. Anything above one is a lever.
   airtime this way but you cannot change what people hear.
 - **You cannot make the audience relay for you.** Followers never transmit unless they hold
   something an announcer asked for, so there is no reflection through the crowd.
-- **You cannot replay.** Manifest sequence numbers only go up.
+- **You cannot replay.** Manifest sequence numbers only go up, and only a signed manifest moves a
+  node's sequence number; an announced one does not (below).
 
 ## What does not hold
 
@@ -29,7 +30,7 @@ of yours can spend. Anything above one is a lever.
 | **Rendition flood** | WANTs, as a device that cannot decode, for the rendition of every object a channel lists | The cell's carousel carries each as Opus (PROTOCOL.md §1.2): 367 kB for a 3-minute song at 16 kbit/s | ~7 000× |
 | **NACK amplification** | One 30-byte NACK, claiming to be an announcer, or naming a holder as a follower whose announcer cannot repair | The holder named (or, unnamed, the best-placed one) sends up to 40 symbols | ~300× |
 | **Grant hijack** | An offer, then silence | The announcer waits `T_grant` (10 min) before reassigning, once per object | Stalls delivery |
-| **Election capture** | Beacons claiming mains power and an uplink, or the maximum score, and a HAVE listing everything | Every announcer that hears you yields and its followers follow you; you serve nothing | Each follower is held until your channel has been silent for 40 minutes (90 on a shared channel), then ignores you for an hour |
+| **Election capture** | Beacons claiming mains power and an uplink, or the maximum score, and a HAVE listing everything | Every announcer that hears you yields and its followers follow you; you serve nothing | Each follower is held until it has asked you for one symbol and got nothing, 50 minutes after your channel fell silent, or for 90 minutes on a shared channel; then it ignores you for an hour |
 | **Excursion lure** | In the rendezvous, a beacon and a HAVE listing objects you do not have | Followers whose own cell cannot get those objects visit you for `T_excursion` and get nothing | Delay of what was missing anyway, once per follower and hour |
 | **Conflict poisoning** | A report naming announcers with a high colour count | Everyone's slot cycle grows to that count and each announcer idles all but one slot of it | Was measured at 8/9 idle by accident alone |
 | **Store exhaustion** | A huge catalogue on a channel someone follows | Followers fetch and keep it | Bounded by what they follow |
@@ -90,7 +91,24 @@ notices the limit exists.
   twelve hours, 60 % in the worst world, because the followers they captured escaped only by
   challenging on score; now 95 % and 87 %. Against false announcers claiming nothing, 97 %
   before and 98 % now; and an attacker flooding WANTs, which slows honest announcers, makes nobody
-  leave one (FEASIBILITY.md §12).
+  leave one (FEASIBILITY.md §12). Two parts of that defence had leant on the manifest repetition
+  that §13 of FEASIBILITY.md removed: a follower that wanted only a manifest had no evidence
+  against a false announcer listing tracks, and the quick test of a silent channel took an honest
+  announcer, silenced by a WANT flood, for a false one. Now an announcer that neither serves, nor
+  asks for, nor grants what its follower wants is not followed, listed or not, and a follower asks a
+  silent announcer for one symbol before it believes the silence. Against five false announcers
+  claiming the maximum, 96 % delivered and 94 % in the worst world; under a WANT flood, no role
+  changes.
+- **An announcement is a hint, not a fact** (PROTOCOL.md §2). `MANIFEST_ANNOUNCE` is not signed,
+  and a node took an announced sequence number for the channel's newest. One frame naming the
+  highest sequence number and a made-up manifest id made every node that heard it ignore all real
+  announcements of that channel and refuse its real, signed manifests, and announcers passed the
+  claim on to their cells: a channel frozen for the whole mesh by one 33-byte frame (the smoke
+  test `a_false_announcement_blocks_nothing` shows it on the earlier code). Now a node fetches an
+  announced manifest but believes only one it has checked; the latest announcement replaces a
+  pending one unless that one is arriving; and announcers announce only manifests they hold. A
+  false announcement now costs a follower a want that nobody answers, until the next real
+  announcement replaces it. This was found by reading, not by an attack in the simulator.
 
 ## What is not fixed yet, in the order it should be
 
@@ -102,7 +120,7 @@ notices the limit exists.
    need evidence (above). Still open: a colour count is accepted only up to the number of
    distinct announcers the node has heard itself; and capability and score in a beacon are still
    believed until the announcer is caught serving nothing, so a false announcer captures each
-   follower for 40 to 90 minutes before it is ignored, and makes every announcer that hears it
+   follower for 50 to 90 minutes before it is ignored, and makes every announcer that hears it
    yield.
    An announcer that claims mains power should have to show it, for example by staying on the air
    through the hours a battery node could not.

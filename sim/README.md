@@ -51,6 +51,14 @@ announcers at the end, occupancy percentiles on the bulk channel, airtime share 
 node, and per-node core counters (frames by class, CCA deferrals, discipline waits, NACKs, WANTs,
 uploads). Results and their interpretation are in `docs/FEASIBILITY.md` §7.
 
+An ensemble (`--seeds N`) also reports **whole content**, what a listener of a programme split into
+pieces waits for: per follower and source, how long until the follower held the first of that
+source's objects and until it held all of them (the median of each, the 90th percentile of the
+second, and the share of pairs that never held all), with the mean number of frames sent of any
+kind. `--tracks N --mix snac-music:42` splits a source's content into N pieces of 42 kB; the
+object-size sweep of `docs/FEASIBILITY.md` §13 is built from those two options. `dynamics` also
+prints how many manifest corrections followers sent to their announcer (`docs/PROTOCOL.md` §2).
+
 ## Looking inside one world
 
 `--seeds N` runs N worlds and reports their spread; compare designs on that, not on one run

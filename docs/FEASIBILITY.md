@@ -1345,3 +1345,328 @@ same number of announcers only after up to two hours of churn, during which fewe
 cells had carried the first objects to more nodes at once. The band L town used 5 % more for a
 median 13 % faster. Everywhere else frames were within 4 % or fewer, and no scenario was slower by
 more than a fifth of a minute.
+
+## 13. How long a piece should be, and manifests that reach everyone
+
+Should MeshCast limit how large an object may be, and so how long an audio file? Only if it has
+to: a limit is a rule every publisher must know, and abuse is better bounded where it happens
+(ABUSE.md). So the question was measured instead: if a source has an hour of music, how should it
+cut it? The sweep found two faults that only many small objects showed, and a repetition that grew
+with the catalogue. Removing that repetition made manifests depend on being asked for, and a living
+network with nodes coming and going then showed four ways a manifest could fail to reach a node,
+one of them an attack. All numbers are eight seeds.
+
+### 13.1 The measure and the sweep
+
+A listener wants a programme whole, however its source cut it. The ensemble report now gives
+**whole content**: per follower and source, the time until the follower held the first of that
+source's objects and until it held all of them; the median of each over the pairs, the 90th
+percentile of the second, averaged over the seeds (sim/README.md).
+
+Each source publishes one hour of SNAC music (1.88 kbit/s, PROTOCOL.md §1.1: about 846 kB) as
+120 pieces of 30 seconds, 60 of 1 minute, 20 of 3, 12 of 5, 6 of 10, 4 of 15, 2 of 30 or one of
+60 minutes (7 to 846 KiB in the simulator, which counts a kB as 1,024 bytes; 42 KiB is 3 minutes
+and 3 seconds). Four scenarios of §9.3: the neighbourhood (50 nodes on 1 km², one station, two
+sources, 6 hours) and the 15 km² network (100 nodes, two stations, three sources, 12 hours), each
+in band O and band L.
+
+### 13.2 Two faults that only many objects showed
+
+On main, 30-second pieces delivered nothing at all, in all four scenarios. The simulator's store
+keeps the bytes only of objects up to 4 kB, because it counts audio symbols instead of storing
+them, and a manifest is the one large object a node must read. A manifest listing more than 62
+objects outgrew that, was collected and never read, and nobody wanted its objects. A real node
+keeps what it carries, so the fault was the simulator's; but the core now keeps the bytes of every
+object a node reads (manifests and rendition tables) whatever the store's setting, and the store's
+unit test `a_manifest_is_kept_whatever_its_size` holds it to that.
+
+The second fault was the protocol's. In the band L neighbourhood an hour arrived whole after 21
+minutes as one piece and after 70 as twenty 3-minute pieces. An announcer divides its listening
+time into phases and gave each *grant* its own (PROTOCOL.md §4). A source holding twenty objects
+was granted several of them at once, each with a phase of its own; it uploads one object at a
+time, so it used one of its phases, and in every cycle the announcer spent the others listening
+to nobody. Phases now go to holders: a holder with running grants gets their phase again.
+
+| Band L neighbourhood, one hour per source | Main: first piece, all of it (median, p90) | Phases per holder |
+|---|---|---|
+| 1-minute pieces | 10.1, 68.1, 73.7 min | 9.1, 38.5, 53.2 min |
+| 3-minute pieces | 13.4, 69.7, 73.5 min | 9.6, 27.4, 32.6 min |
+| 5-minute pieces | 15.2, 61.2, 63.3 min | 10.6, 24.9, 33.1 min |
+| 10-minute pieces | 18.3, 46.3, 49.0 min | 12.3, 23.2, 31.1 min |
+| 15-minute pieces | 19.2, 34.5, 43.6 min | 13.0, 19.3, 31.6 min |
+| 30-minute pieces | 20.5, 25.8, 35.8 min | 16.8, 20.7, 30.0 min |
+| One piece | 21.0, 21.0, 29.6 min | 21.0, 21.0, 29.6 min |
+
+In the 15 km² band L network 3-minute pieces went from 114 to 81 minutes. In band O, where an
+announcer does not divide its listening time (PROTOCOL.md §4), no size became slower and none
+faster by more than 3.7 minutes. The fault was in every band L scenario with more than one object
+per source: the standard mix of §9.3 has twenty, and the band L neighbourhood's median went from
+17.0 to 10.9 minutes with this alone (§13.8).
+
+### 13.3 What repeating manifests cost
+
+With small pieces the carousels repeated a lot that nobody had asked for. Nearly all of it was
+manifests: a carousel passed every manifest it served every `T_always` (5 minutes) and, in
+addition, at the start of every round in which anything at all was wanted. A manifest grows with
+the catalogue, 120 entries for an hour in 30-second pieces, and so did the repetitions. Neither
+helps anyone: a node that lacks a manifest learns its id from `MANIFEST_ANNOUNCE` and asks for it.
+A carousel now passes a manifest once when it is new and otherwise only when it is wanted, still
+before anything else (PROTOCOL.md §4).
+
+| Band L neighbourhood | Passes nobody asked for again | All frames | All of it, median |
+|---|---|---|---|
+| 1-minute pieces, repeated on the timer and every round | 10,367 | 50,741 | 38.5 min |
+| without the timer | 5,069 | 45,042 | 38.0 min |
+| only when new or asked for | 1,458 | 41,868 | 37.2 min |
+| 3-minute pieces, repeated on the timer and every round | 2,551 | 44,105 | 27.4 min |
+| only when new or asked for | 101 | 41,969 | 26.3 min |
+
+(The second, third and fifth rows include the rule of §13.4.)
+
+In the nine scenarios of §9.3 this saved up to 29 % of all frames at the same delivery and speed
+(§13.8). It also made every node depend on asking for what it lacks, which §13.6 tested.
+
+### 13.4 A busy holder offers last
+
+§12.3 stopped a holder that is uploading from offering at all, because its offer silenced holders
+that were free. With many objects per source that left an object only the busy holder had unasked
+until a later round. A busy holder now offers, but a whole `T_offer` later than a free one: a free
+holder's offer comes first and silences it, and an object nobody else holds is granted to the busy
+one and queued behind its current upload. In the band L neighbourhood an hour in 3-minute pieces
+went from 27.4 to 24.6 minutes; in the nine scenarios it was neutral to slightly better (the band
+L town 32.5 to 31.5 minutes, ESP-NOW 14.4 to 14.1, everything else within 0.2 minutes, frames
+within 1 %).
+
+### 13.5 What small pieces still cost: asking
+
+After these fixes, pieces shorter than about three minutes are still slower in band L, and the
+reason is the asking. A follower lists at most 8 objects in a WANT and sends one per `T_want_min`
+(10 minutes); its announcer's asks are bounded the same way. Twenty pieces per source take more
+rounds of asking than six, and in a network of several cells each round is slow. An experiment
+let followers and announcers ask for up to 24 objects per `T_want_min`, in up to three frames: in
+the 15 km² band L network an hour in 3-minute pieces arrived after 64 minutes instead of 79 (p90 75
+instead of 91), in 10-minute pieces after 51 instead of 54, for 6 % more frames. That is a cost per
+object, not per byte, and more frames are the wrong way to pay it. The way to pay it belongs to the
+design of collections (PROTOCOL.md §9, question 13): a follower that asks for a collection by its
+manifest and a bitmap of what it lacks asks for twenty pieces in one entry. The experiment was not
+merged.
+
+### 13.6 Manifests that reach everyone
+
+The living network of §7.6 with nodes coming and going (every 3 hours a tenth of the nodes switch
+off or on, every 6 hours one is replaced by a newcomer that knows nothing; 72 hours) tests what
+depends on asking: a node that returns after hours or a newcomer must find the current manifests.
+The measure is the share of followers on at the end that hold the current window of every channel
+they follow, in the worst of the eight worlds. With manifests repeated (and §13.2's fixes) that was
+100 % in band L and 58.8 % in band O; without the repetition band L fell to 83.3 %. Traces of every
+follower that lacked something found four faults.
+
+- *A channel followed again was never fetched again.* A node that stops following a channel evicts
+  its manifest and objects but remembers the manifest's sequence number, so announcers that list
+  that number tell it nothing new. When it followed the channel again it waited for a number that
+  would not come; the repetition had been covering for it. It now asks for a manifest it follows and
+  does not hold (smoke test `a_channel_followed_again_is_fetched_again`, which fails without it).
+- *An announcer behind its cell.* The worst band O world failed with manifests repeated too: the
+  station came back from a power cut with the manifests it had held before, took over, and never
+  learned the newer ones, because a source announces its own manifest only until its announcer has
+  it, and the announcer it had told had stepped down. In another world an announcer had never
+  heard of one channel at all. Its followers held the newer manifests and had no way to say so.
+  Now a follower that hears its own announcer announce an older manifest than the one it holds,
+  or leave a channel out, announces its own (PROTOCOL.md §2): 45 to 109 such announcements per
+  world in 72 hours.
+- *An announcement cost a follower its window.* A node replaced the manifest it held by a newer one
+  as soon as it was announced, and evicted every object the old one listed while it waited for
+  the new one. In two worlds of the band L living network of §7.6, without nodes coming and
+  going, 879 and 907 objects were evicted and fetched again, and the announcers granted 264 and
+  261 uploads instead of 164 and 168; in band O it did not occur. A node now keeps the manifest it
+  adopted, and its objects, until the newer one is held.
+- *One frame could freeze a channel.* Reading that code showed a worse fault: since an announced
+  sequence number was taken as the channel's, one unsigned `MANIFEST_ANNOUNCE` with the highest
+  number and a made-up id made a node ignore every real announcement of the channel and refuse its
+  real manifests, and announcers passed the claim on. Now a node believes only manifests it has
+  checked; the latest announcement replaces one still pending unless that one is arriving; and
+  announcers announce only what they hold (ABUSE.md; smoke test
+  `a_false_announcement_blocks_nothing`, which fails on the earlier code both at the eviction and
+  at the freeze).
+
+With those four, every world held every current window, but counting what was fetched twice
+showed two more things. A node that restarts is not announcing yet, so it evicted at once the
+library of every channel it did not follow itself; a station back from a power cut took over a
+minute later and fetched it all again. A node that restarts or stops announcing now evicts
+nothing for `want_ttl`. In the eight band L worlds with nodes coming and going, objects fetched
+twice went from 881 to 63 and uploads from 375 to 273 per world; in band O from 240 to 82 and
+from 160 to 138.
+
+And with far fewer passes, the evidence rule of §12.4 lost an accidental crutch. A source holds
+its own objects pending until it hears someone send them or an announcer confirms its upload,
+and an announcer that lists a pending object, or one the follower wants and never gets a symbol
+of, for 90 minutes is taken for a liar. In one band L world of the ordinary living network a
+source left an honest announcer every hour, 218 role changes in three days where §12.5 had none.
+Three faults lined up: a source that announced passed its own objects without that counting as
+sent; the clocks for its wants and for a silent channel ran from before it followed the announcer
+it then accused, from when it first wanted an object or last heard a frame, as announcer itself;
+and an upload to a neighbouring cell's announcer was confirmed only if that announcer was the
+source's own at the time. Fixing them in that order took the role changes from 218 to 82, 10
+and 0 (PROTOCOL.md §5.2). Before, followers fetched objects twice so often (the eviction above)
+that sources heard their objects sent again, which hid all three.
+
+| Living network, nodes coming and going, eight worlds | Repeated (§13.2 fixed) | Not repeated | + followed again | + corrections | Now |
+|---|---|---|---|---|---|
+| Band L: followers holding the current window, worst world | 100 % | 83.3 % | 83.3 % | 100 % | 100 % |
+| Band L: worlds below 100 % | 0 | 2 | 1 | 0 | 0 |
+| Band L: newcomers caught up, mean per world; slowest (h) | 0.13–0.46; 3.19 | 0.14–0.19; 0.39 | 0.20–0.28; 0.42 | 0.21–0.30; 0.49 | 0.20–0.28; 0.47 |
+| Band L: uploads per world, mean | 405 | 390 | 397 | 408 | 270 |
+| Band L: corrections per world | – | – | – | 16–48 | 46–78 |
+| Band O: followers holding the current window, worst world | 58.8 % | 58.8 % | 58.8 % | 100 % | 100 % |
+| Band O: worlds below 100 % | 3 | 3 | 3 | 0 | 0 |
+| Band O: newcomers caught up, mean per world; slowest (h) | 0.14–3.88; 18.0 | 0.13–3.89; 18.0 | 0.24–3.82; 18.0 | 0.17–0.24; 0.45 | 0.16–0.33; 1.06 |
+| Band O: uploads per world, mean | 129 | 132 | 134 | 158 | 145 |
+| Band O: corrections per world | – | – | – | 10–51 | 45–95 |
+
+"Repeated" has the fixes of §13.2 and the timer and every-round repetition; "not repeated" has
+the timer switched off; the next two add a new manifest passed only once (§13.3) with the rule of
+§13.4 and the first fix above, and then the corrections; "now" is everything in this section,
+including §13.7. All 24 worlds of "now" (eight more in band O) held every current window at the
+end. The median bulletin reached its followers in 6.0 minutes in band L before and 5.4 now, and in
+1.8 minutes in band O throughout; in every column 6 to 9 of the 184 bulletins took their median
+follower more than an hour. Band O carries more uploads now because it now delivers what it did
+not before.
+
+Two costs remain. Corrections rose when announcers stopped announcing what they do not yet hold:
+a follower then corrected an announcer again while it was still fetching, so a follower does not
+correct an announcer that is asking for that very manifest (in eight further band O worlds, 124
+to 278 per world before that rule and 35 to 138 with it, at the same delivery). Most of the rest
+are a new announcer being taught, while the station is switched off, the channels it did not
+follow itself. And a newcomer, which knows nothing, used to overhear every manifest in the next
+round of its cell's carousel; now it asks for the manifests and then for their objects, one
+`T_want_min` apart, and in band L catches up a few minutes later on average (0.20 to 0.28 hours
+per world against 0.14 to 0.19 while manifests went out in every round). Letting a node ask at
+once for the first manifest of a channel would save that round but make every node of a cold
+start ask in the same seconds; it was not done.
+
+### 13.7 What the repetition had been doing for the defence
+
+The attacks of §12.4 and §12.5, run again on all of the above, found the rules of §12.4 weaker
+than they had been, and two reasons that the repetition had been hiding.
+
+- *A false announcer that lists only what a follower cannot want yet.* The rule ignored an
+  announcer that *lists* an object its follower wants and never sends one symbol of it. In one
+  world with five false announcers ten honest followers ended with nothing at all. The one traced
+  had followed a false announcer from the first minute to the last: it wanted only the three
+  manifests, which it had heard announced elsewhere, and the false announcer listed the tracks.
+  Without a manifest a follower cannot want a track, so there was no evidence; before, a manifest
+  repeated by any announcer within earshot reached such a follower within minutes, after which it
+  wanted the tracks and caught the lie. Now the rule asks what an honest announcer does with an
+  object its follower wants: it serves it, or, lacking it, asks for it or grants it. One that does
+  none of these for 90 minutes is not followed, whether it lists the object or not.
+- *Silence that is not a lie.* The quicker test, a want stalled for `T_excursion` on a channel that
+  carried not one `BULK` frame in that time, assumed an honest announcer is never silent that long.
+  Under a WANT flood it is: every repetition waits up to the 80-minute ceiling (§11), and only the
+  manifest repetition had kept the channel busy. In the living network with one flooding attacker,
+  followers left honest announcers up to 40 times per world in band L and 97 in band O, where §12.5
+  had none. Making the silent test as long as the other (90 minutes) stopped that but let false
+  announcers keep their followers longer. Instead a follower now asks for proof: after
+  `T_excursion` of silence it sends its announcer a `NACK` for one symbol of what it waits for,
+  naming that announcer, every `T_nack_stall`. An honest announcer answers from the front of its
+  next round whatever the backoff; one that has sent nothing `T_want_min` later serves nothing
+  (PROTOCOL.md §3.5, §5.2). Honest announcers under the flood were asked 0 to 8 times per world in
+  72 hours, and never without an attacker; a false announcer up to 72 times per world in band L,
+  by all the followers it held together.
+
+The clocks of §13.6 run from when a follower began to follow, except the one for a source's own
+objects: with that clock moved too, false announcers that listed a source's objects held the
+source for 90 minutes every time it was captured, and five of them left 89 % delivered, 58 % in
+the worst world (third column below). Once its own carousel passes and its uploads to any cell
+count, a source's pending objects are evidence again.
+
+| 15 km² band L, eight worlds, delivered after 12 hours: mean, worst world | §12 | Not repeated, §12's evidence | Not repeated, clocks from following | Now |
+|---|---|---|---|---|
+| One false announcer claiming nothing | 99.4 %, 98.7 % | | | 99.4 %, 98.9 % |
+| Five claiming nothing | 97.8 %, 94.7 % | 94.6 %, 86.8 % | 89.4 %, 57.9 % | 96.7 %, 92.6 % |
+| Five claiming the maximum | 95.2 %, 86.9 % | 93.4 %, 85.8 % | 84.9 %, 54.5 % | 96.3 %, 94.0 % |
+
+Runs to 24 hours, of §12 and of a step between, gave the same numbers to the decimal as at 12
+hours: what is missing then is missing for good. In the world traced above, 312 follower-object
+pairs were missing: 240 belonged to the ten followers without a manifest and 72 to three of the
+false announcers themselves, which the measure counts as followers in every column.
+
+| Living network, 72 hours, eight worlds: bulletin median, worst p90, worst world held, role changes after the first hour | §12.5 | Now |
+|---|---|---|
+| Band L, no attacker | 6.0 min, 15.6 min, 100 %, 0 | 5.4 min, 15.6 min, 100 %, 0 |
+| Band L, WANT flood | 6.0 min, 12.6 min, 100 %, 0 | 5.4 min, 21.0 min, 100 %, 0 |
+| Band L, WANT flood, made-up ids | 6.0 min, 12.6 min, 100 %, 0 | 5.4 min, 13.8 min, 100 %, 0 |
+| Band L, one false announcer | 6.0 min, 52.2 min, 92.9 %, 12 to 289 | 5.4 min, 52.8 min, 100 %, 25 to 179 |
+| Band O, no attacker | 1.8 min, 1.8 min, 100 %, 0 | 1.8 min, 1.8 min, 100 %, 0 |
+| Band O, WANT flood | 1.8 min, 3.0 min, 100 %, 0 | 1.8 min, 3.0 min, 100 %, 0 |
+| Band O, WANT flood, made-up ids | 1.8 min, 3.0 min, 100 %, 0 | 1.8 min, 3.0 min, 100 %, 0 |
+| Band O, one false announcer | 1.8 min, 3.0 min, 100 %, 24 to 487 | 1.8 min, 7.8 min, 100 %, 18 to 34 |
+
+(§12.5's table gives the bulletin median as a mean of medians; here it is the median, 6.0 minutes
+in band L for the same runs.) What it costs: the slowest bulletins took longer in two rows, under
+the WANT flood in band L (worst p90 21.0 minutes against 12.6) and with a false announcer in band O
+(7.8 against 3.0); the medians are the same or better everywhere, and no world loses a window.
+
+Open: an honest announcer that has never heard of an object its follower wants (a manifest the
+follower heard announced in another cell, say) neither serves it nor asks for it, and now counts as
+one that does not serve. No measured world showed it, without an attacker or with one; an
+announcer that took on such a want itself, by asking for it, would close it.
+
+### 13.8 The optimum, and the nine scenarios
+
+The sweep of §13.1 with everything above, eight seeds each: the first piece and all of the hour
+(median over follower and source, in minutes), every pair complete in every world:
+
+| Piece (KiB × pieces per source) | Band O, 1 km²: first, all | Band L, 1 km² | Band O, 15 km² | Band L, 15 km² |
+|---|---|---|---|---|
+| 30 seconds (7 × 120) | 4.8, 30.8 | 9.0, 69.8 | 4.9, 53.4 | 15.5, 263.6 |
+| 1 minute (14 × 60) | 4.8, 24.2 | 9.1, 39.1 | 4.8, 50.1 | 14.8, 151.5 |
+| 3 minutes (42 × 20) | 5.4, 27.5 | 9.7, 25.8 | 5.7, 47.3 | 16.2, 80.4 |
+| 5 minutes (70 × 12) | 6.1, 24.5 | 10.3, 24.6 | 5.9, 46.0 | 19.2, 65.5 |
+| 10 minutes (141 × 6) | 7.8, 25.5 | 11.6, 21.1 | 8.8, 41.7 | 23.2, 54.9 |
+| 15 minutes (211 × 4) | 9.6, 25.2 | 11.7, 18.9 | 11.5, 39.9 | 30.3, 55.8 |
+| 30 minutes (423 × 2) | 14.3, 25.2 | 16.6, 20.9 | 19.6, 39.3 | 40.3, 56.6 |
+| One piece (846 × 1) | 20.5, 20.5 | 19.7, 19.7 | 36.9, 36.9 | 59.7, 59.7 |
+
+Two waits pull apart. The first piece comes about as soon as a piece can: within about 6 minutes
+in band O for pieces up to 5 minutes long, against 20 to 37 minutes for the hour in one piece. All
+of it comes soonest in one piece. In band O pieces cost a fifth to a half more in the
+neighbourhood (24 to 31 minutes against 20.5) and, across 15 km², a seventh or less from 10-minute
+pieces up. In band L pieces shorter than 3 minutes cost dearly: across 15 km² an hour in 30-second
+pieces took 4.4 hours and in 1-minute pieces 2.5, the asking of §13.5. Frames do not grow as pieces
+shrink, except in band L across 15 km², 562,000 for 30-second pieces against 448,000 to 456,000
+from 3 to 15 minutes.
+
+So the optimum is a range, not a size: **pieces of 5 to 15 minutes** start playback in a sixth to
+three fifths of the time the hour in one piece takes, and bring all of it within a third of the
+best in every scenario (10 and 15 minutes within a quarter). 10 minutes is a good default for long
+programmes. A song as it is, 3 to 5 minutes, is fine in band O; in band L across 15 km² an hour of
+such songs takes a fifth to a half longer than in 10-minute pieces. Below 3 minutes the answer is
+the asking by collection of §13.5, not a rule for publishers.
+
+No limit is needed. A large object is not slower to arrive whole than the same content in
+pieces; it only starts later, because the carousel and the asks serve the most listeners per
+byte first (§9.4), so small objects pass large ones and publishers are rewarded for cutting long
+programmes. What a large object could be abused for, a catalogue no node can carry, is the
+channel flood and store exhaustion of ABUSE.md, and its answer is ABUSE.md's bounded generosity,
+not a size field.
+
+The nine scenarios of §9.3 (SNAC music and speech alternating, twenty objects per source, eight
+seeds each), against main after §12; "delivered" is the mean over the seeds, with the worst in
+brackets, and the last column the change in bulk frames:
+
+| Scenario | Main: delivered, median, bulk frames | Now | Frames |
+|---|---|---|---|
+| Band O neighbourhood, 50 nodes, 1 km² | 100 % (100), 7.8 min, 6,930 | 100 % (100), 7.3 min, 6,596 | −5 % |
+| Band L neighbourhood, 50 nodes, 1 km² | 100 % (100), 17.0 min, 16,101 | 100 % (100), **10.8 min**, 13,872 | −14 % |
+| Band O, 100 nodes, 15 km² | 100 % (100), 8.6 min, 45,726 | 100 % (100), 8.4 min, 39,106 | −14 % |
+| Band L, 100 nodes, 15 km² | 100 % (100), 26.9 min, 134,672 | 100 % (100), **24.0 min**, 112,507 | −16 % |
+| ESP-NOW, 30 nodes, 1 km² | 100 % (100), 14.4 min, 42,956 | 100 % (100), 14.9 min, 42,934 | 0 % |
+| Two clusters 1.8 km apart, band L | 100 % (100), 20.1 min, 7,263 | 100 % (100), **17.3 min**, 5,855 | −19 % |
+| LoRa only, two nodes 5 km apart | 100 % (100), 47.4 min, 2,441 | 100 % (100), 47.1 min, 1,322 | −46 % |
+| Town, band O, 200 nodes, 30 km² | 100 % (100), 14.6 min, 176,430 | 100 % (100), 13.8 min, 142,274 | −19 % |
+| Town, band L, 200 nodes, 30 km² | 100 % (100), 36.0 min, 507,517 | 100 % (100), **33.6 min**, 365,429 | −28 % |
+
+Most of the speed is §13.2's phases per holder, which every band L scenario with more than one
+object per source needed; most of the frames are §13.3's manifests. ESP-NOW is the exception in
+both, and within its own spread: its eight worlds range from 21,000 to 88,000 bulk frames, so a
+difference of a few thousand in the mean says nothing either way.
