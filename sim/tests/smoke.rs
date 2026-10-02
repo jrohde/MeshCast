@@ -764,3 +764,31 @@ fn what_an_announcer_asked_for_is_forgotten_with_it() {
     assert!(new != old && !new.is_none(), "the follower should follow the other station");
     assert!(!b.engine.nodes[2].node.announcer_asked_for(&x), "what the old announcer asked for should be forgotten");
 }
+
+#[test]
+fn listeners_of_one_album_are_relayed_to() {
+    // 100 nodes on 15 km² in band L, three sources of four albums each, every listener following
+    // one album. Content crosses cells only through nodes that carry it, and with one carrier in
+    // four the chain of an album broke: 14 % of its listeners never had it. A follower now fetches,
+    // for another cell's listeners, what that cell's announcer has asked for in vain for
+    // `T_want_min` of a channel it follows, and keeps it to hand on (PROTOCOL.md §4).
+    let mut s = cell(BulkPreset::GfskL, 100, 12.0, 7);
+    s.area_km2 = 15.0;
+    s.stations = 2;
+    s.sources = 3;
+    s.tracks = 20;
+    s.mix = meshcast_sim::scenario::parse_mix("snac-music:42,snac-speech:22").unwrap();
+    s.collections = meshcast_sim::scenario::CollectionSpec { per_source: 4, follow: 1, cover_kb: 0 };
+    let mut b = build(&s, Params::default());
+    b.engine.run((s.hours * 3.6e6) as u64, 600_000);
+    let (mut pairs, mut missing) = (0, 0);
+    for (id, t) in &b.tracks {
+        for &f in &t.followers {
+            pairs += 1;
+            if !b.engine.metrics.completions.contains_key(&(f, *id)) {
+                missing += 1;
+            }
+        }
+    }
+    assert_eq!(missing, 0, "{missing} of {pairs} listener-piece pairs never completed");
+}
