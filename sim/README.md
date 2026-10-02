@@ -73,6 +73,11 @@ left out of whole content. An ensemble also reports what a follower holds at the
 `held_kb_per_follower`. `dynamics` keeps one series per channel and publishes each bulletin as a
 new episode of it.
 
+Ensembles and `dynamics` also report `table peaks`: the largest size each table a node fills from
+what it hears (neighbours, ids they offered, asks recorded, store entries and so on) reached in
+any honest node, sampled with the occupancy. They are what the caps of `docs/PROTOCOL.md` §8 were
+chosen against (`docs/ABUSE.md`, item 5).
+
 ## Looking inside one world
 
 `--seeds N` runs N worlds and reports their spread; compare designs on that, not on one run

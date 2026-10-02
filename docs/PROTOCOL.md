@@ -994,6 +994,13 @@ arrives a few minutes later than it otherwise would. That is the entire user-vis
   stations").
 - Requests are not authenticated, and answering them costs far more than sending them. The full
   inventory, with amplification factors and the rule it asks for, is in [ABUSE.md](ABUSE.md).
+- What a node keeps of what it hears is bounded. It keeps what it can use only: an ask for an
+  object it cannot name, by id or as a rendition it knows of, is not recorded by a carousel, a
+  follower notes only those of its announcer's asks that concern objects it knows, and only asks
+  for objects of a channel it follows count towards relaying. Tables keyed by names nobody checks
+  have caps (§8) and give way evidence first: a name heard once before one heard twice, then the
+  oldest. What a node carries is bounded by what it follows and serves, the bounded generosity of
+  ABUSE.md item 4.
 - Node ids are not authenticated either, and anyone can build a node that keeps none of these
   rules. What such a node can do beyond requests (poisoned symbols, names it does not own, time,
   ignoring the regulations, malformed frames, firmware images, what listeners give away) and what
@@ -1033,6 +1040,10 @@ arrives a few minutes later than it otherwise would. That is the entire user-vis
 | `T_jitter` (tx) | 0–500 ms | random delay before control/metadata frames |
 | repair overhead (v1) | 10 % | RaptorQ repair symbols per block |
 | gossip cap | 12 have + 12 want | per frame |
+| `max_neighbours` | 256 | neighbours a node keeps; a name heard once gives way first, then the one heard longest ago (§7) |
+| `max_offered_ids` | 8192 | ids offered by all neighbours together; what the neighbour heard longest ago offered goes first |
+| `max_conflicts` | 64 | announcers reported in conflict; the report heard longest ago goes first |
+| `max_askers_per_object` | 32 | askers a carousel keeps per object for its order; the one that asked longest ago goes first |
 
 ## 9. Open questions
 

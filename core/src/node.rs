@@ -455,7 +455,7 @@ impl Node {
     pub fn new(cfg: NodeConfig, now: Millis) -> Self {
         let discipline = Accounting::new(cfg.profile, &cfg.rule_choice);
         let ctrl = cfg.carriers.iter().position(|c| c.kind == CarrierKind::LoraControl).unwrap_or(0);
-        let cp = CarouselParams { max_passes: cfg.params.max_passes, want_ttl_ms: cfg.params.want_ttl_ms, t_repass_ms: cfg.params.t_want_min_ms };
+        let cp = CarouselParams { max_passes: cfg.params.max_passes, want_ttl_ms: cfg.params.want_ttl_ms, t_repass_ms: cfg.params.t_want_min_ms, max_askers: cfg.params.max_askers_per_object };
         let mut carriers = Vec::with_capacity(cfg.carriers.len());
         for c in &cfg.carriers {
             let bulk = c.kind.is_bulk();
@@ -543,7 +543,7 @@ impl Node {
     }
 
     fn carousel_params(&self) -> CarouselParams {
-        CarouselParams { max_passes: self.cfg.params.max_passes, want_ttl_ms: self.cfg.params.want_ttl_ms, t_repass_ms: self.cfg.params.t_want_min_ms }
+        CarouselParams { max_passes: self.cfg.params.max_passes, want_ttl_ms: self.cfg.params.want_ttl_ms, t_repass_ms: self.cfg.params.t_want_min_ms, max_askers: self.cfg.params.max_askers_per_object }
     }
 
     // ---------------------------------------------------------------- public API
@@ -653,6 +653,12 @@ impl Node {
 
     fn note_conflict(&mut self, other: NodeId, colour: u8, colours: u8) {
         if other != self.cfg.id && !other.is_none() {
+            // At most `max_conflicts`, the one reported longest ago giving way.
+            if !self.conflicts.contains_key(&other) && self.conflicts.len() >= self.cfg.params.max_conflicts.max(1) {
+                if let Some(gone) = self.conflicts.iter().min_by_key(|(_, (t, _, _))| *t).map(|(k, _)| *k) {
+                    self.conflicts.remove(&gone);
+                }
+            }
             self.conflicts.insert(other, (self.now, colour, colours));
             self.stats.conflicts_noted += 1;
         }
@@ -896,6 +902,43 @@ impl Node {
             }
         }
         (known, complete, short)
+    }
+
+    /// Diagnostic: the size of every table a node fills from what it hears, by name, for choosing
+    /// their caps (docs/ABUSE.md, "Someone else's firmware", item 5).
+    pub fn table_sizes(&self) -> Vec<(&'static str, usize)> {
+        let mut car = (0, 0, 0, 0);
+        for k in self.carriers.iter().filter_map(|c| c.carousel.as_ref()) {
+            let (a, b, c, d) = k.table_sizes();
+            car = (car.0 + a, car.1 + b, car.2 + c, car.3 + d);
+        }
+        alloc::vec![
+            ("neighbours", self.neighbors.len()),
+            ("ids offered by neighbours", self.neighbors.values().map(|n| n.haves.len()).sum()),
+            ("channels", self.manifests.len()),
+            ("roots", self.roots.len()),
+            ("collections", self.collections.len()),
+            ("piece lists", self.pieces.len()),
+            ("store entries", self.store.len()),
+            ("wants", self.wants.len()),
+            ("progress", self.progress.len()),
+            ("conflicts", self.conflicts.len()),
+            ("grants", self.grants.len()),
+            ("announcer asks", self.ann_asks.len()),
+            ("announcer grants", self.ann_grants.len()),
+            ("granted to us", self.granted_to_us.len()),
+            ("offers", self.offers.len()),
+            ("relay asks", self.relay_asks.len()),
+            ("relayed", self.relayed.len()),
+            ("corrected", self.corrected.len()),
+            ("renditions", self.renditions.len()),
+            ("renditions due", self.renditions_due.len()),
+            ("pending acks", self.pending_ack.len()),
+            ("carousel objects", car.0),
+            ("carousel askers", car.1),
+            ("carousel passes", car.2),
+            ("carousel places", car.3),
+        ]
     }
 
     /// Diagnostic: when a wanted object last brought a symbol and when we last asked for it.
@@ -2860,11 +2903,34 @@ impl Node {
 
     fn touch(&mut self, id: NodeId, rssi: i16) -> &mut Neighbor {
         let now = self.now;
+        // At most `max_neighbours`: a name heard once gives way before one heard twice, and then
+        // the one heard longest ago. Names are not checked, and every made-up one was kept for
+        // `neighbor_ttl` (docs/ABUSE.md, "Someone else's firmware", item 5).
+        if !self.neighbors.contains_key(&id) && self.neighbors.len() >= self.cfg.params.max_neighbours.max(1) {
+            if let Some(gone) = self.neighbors.iter().min_by_key(|(_, n)| (n.heard_count >= 2, n.last_heard)).map(|(k, _)| *k) {
+                self.neighbors.remove(&gone);
+            }
+        }
         let n = self.neighbors.entry(id).or_insert(Neighbor { last_heard: now, announcer: NodeId::NONE, score: 0, rssi, colour: 0, upload_phases: 1, heard_count: 0, haves: BTreeSet::new(), unread_sets: Vec::new() });
         n.last_heard = now;
         n.heard_count = n.heard_count.saturating_add(1);
         n.rssi = ((n.rssi as i32 + rssi as i32) / 2) as i16;
         n
+    }
+
+    /// At most `max_offered_ids` offered by all neighbours together: what the neighbour heard
+    /// longest ago offered is forgotten first (docs/ABUSE.md, "Someone else's firmware", item 5).
+    fn bound_offered(&mut self) {
+        let cap = self.cfg.params.max_offered_ids.max(1);
+        let mut total: usize = self.neighbors.values().map(|n| n.haves.len()).sum();
+        while total > cap {
+            let Some(id) = self.neighbors.iter().filter(|(_, n)| !n.haves.is_empty()).min_by_key(|(_, n)| n.last_heard).map(|(k, _)| *k) else { break };
+            if let Some(n) = self.neighbors.get_mut(&id) {
+                total -= n.haves.len();
+                n.haves.clear();
+                n.unread_sets.clear();
+            }
+        }
     }
 
     /// How many of our neighbours we hear better than `rssi`, as a fraction in thousandths.
@@ -3150,6 +3216,7 @@ impl Node {
             }
             nb.unread_sets.retain(|p| p.manifest != short);
         }
+        self.bound_offered();
         let ordered = col.kind != CollectionKind::Singles;
         if ordered {
             self.unordered.remove(&short);
@@ -3289,6 +3356,7 @@ impl Node {
                 }
             }
         }
+        self.bound_offered();
         let me = self.cfg.id;
         let now = self.now;
         // An announcer's HAVE lists what its carousel serves; it is not an offer, since
@@ -3337,8 +3405,13 @@ impl Node {
                     self.stats.renditions_refused += 1;
                     continue;
                 }
-                if let Some(car) = self.carriers[i].carousel.as_mut() {
-                    car.on_want(*w, g.node, now);
+                // An ask is recorded only for an object we can name, one we know or a rendition
+                // we know of: anyone can ask for made-up ids, and each would have been kept for
+                // `want_ttl` (docs/ABUSE.md, "Someone else's firmware", item 5).
+                if self.store.is_known(w) || self.renditions.contains_key(w) {
+                    if let Some(car) = self.carriers[i].carousel.as_mut() {
+                        car.on_want(*w, g.node, now);
+                    }
                 }
                 // A rendition a follower asks for: make it if we can, else ask for it like any
                 // object. An announcer never wants a rendition for itself.
@@ -3397,7 +3470,9 @@ impl Node {
                 }
             }
             if own {
-                for (w, grant, _) in g.want.iter() {
+                // Only what we know of: what our announcer asks for matters to us only for objects
+                // we want or hold, and made-up ids would each be kept for `want_ttl`.
+                for (w, grant, _) in g.want.iter().filter(|(w, _, _)| self.store.is_known(w)) {
                     self.ann_asks.insert(*w, now);
                     if !grant.is_none() {
                         self.ann_grants.insert(*w, now);
@@ -3415,11 +3490,12 @@ impl Node {
                 // a holder within a round, and relaying those only duplicated the work.
                 let wait = self.cfg.params.t_want_min_ms;
                 for w in asked {
+                    // Only an object of a channel we follow is relayed, so only its asks are kept.
+                    let Some(meta) = self.relay_meta(&w) else { continue };
                     let first = *self.relay_asks.entry(w).or_insert(now);
                     if now < first + wait {
                         continue;
                     }
-                    let Some(meta) = self.relay_meta(&w) else { continue };
                     self.relayed.insert(w);
                     if self.store.ensure(meta) {
                         self.quiet_complete.push(w);
