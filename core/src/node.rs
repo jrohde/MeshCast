@@ -941,6 +941,33 @@ impl Node {
         ]
     }
 
+    /// EXPERIMENT (backbone oracle): everything we want.
+    pub fn wants_list(&self) -> Vec<ShortId> {
+        self.wants.iter().copied().collect()
+    }
+
+    /// EXPERIMENT (backbone oracle): what we want that one of our own followers asked for.
+    pub fn listened_wants(&self) -> Vec<ShortId> {
+        self.wants.iter().filter(|w| self.carriers.iter().filter_map(|c| c.carousel.as_ref()).any(|k| k.wanted_by(w) > 0)).copied().collect()
+    }
+
+    /// EXPERIMENT (backbone oracle): every symbol we hold of a complete object, as BULK frames.
+    pub fn symbols_of(&self, id: &ShortId) -> Vec<Bulk> {
+        let mut out = Vec::new();
+        let Some(e) = self.store.entry(id) else { return out };
+        let (Some(len), true) = (e.len(), e.is_complete()) else { return out };
+        for block in 0..e.known_blocks() {
+            let k = self.store.block_k(id, block).unwrap_or(0);
+            for esi in 0..k {
+                let mut buf = alloc::vec![0u8; SYMBOL_SIZE];
+                if self.store.get_symbol(id, block, esi, &mut buf) {
+                    out.push(Bulk { object: *id, block, esi, len, payload: buf });
+                }
+            }
+        }
+        out
+    }
+
     /// Diagnostic: when a wanted object last brought a symbol and when we last asked for it.
     pub fn want_times(&self, id: &ShortId) -> Option<(Millis, Millis)> {
         self.progress.get(id).map(|p| (p.last_progress, p.last_want))
