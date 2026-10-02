@@ -214,7 +214,25 @@ second, with the other tests, on the stable toolchain. It found the collection, 
 decoders reserving room for as many entries as the input claimed: seven bytes claiming 4,096
 pieces made the collection decoder allocate 262,144 bytes. They now grow a list as its entries
 arrive, and the largest allocation of any decode in the test is 885 bytes, for 277 bytes of input.
-(b) is open.
+(b) holds for every table that names nobody checks can fill. The simulator reports the largest
+size each table filled from the air reached in any honest node (sim/README.md). Over the nine
+scenarios, the collection variants, pieces of 7 kB, the living network and its attacks, honest
+nodes kept at most 155 neighbours, 5,437 ids offered by them, 23 announcers in conflict and about
+35 askers per object in a carousel; five attackers asking under made-up names every five seconds
+raised the neighbours a node kept to 2,362 and the askers in one carousel to 22,296, and each
+made-up name stayed for an hour, so a node on its own firmware sending faster fills them without
+end. A node now keeps only what it can use (PROTOCOL.md §7): an ask for an object it cannot name
+is not recorded, nor an announcer's ask for one, and only asks for objects of a followed channel
+count towards relaying. And the tables keyed by names have caps that give way evidence first
+(PROTOCOL.md §8): 256 neighbours, 8,192 offered ids, 64 announcers in conflict, 32 askers per
+object. Under the same five attackers a node kept 256 neighbours and the carousel 870 askers, and
+everything was still delivered, with 0.4 % more frames; without them, the smoke test
+`made_up_names_are_kept_within_bounds` shows the same flood filling both tables past their caps.
+The nine scenarios, the collections, the size sweep, the living network and the false announcers
+moved within the spread of their worlds (band O 15 km² over sixteen worlds with 14 and 42 kB
+pieces: playback start 9.7 and 12.8 minutes against 9.7 and 12.6). What a node carries (its wants,
+its store, its grants) grows with what it follows and serves, up to 366 entries for an hour of
+music in 360 pieces, and is bounded by item 4, bounded generosity.
 
 **6. Firmware images.** An object can be a firmware image (PROTOCOL.md §1), and updates over the
 carousel are planned (ROADMAP.md).
@@ -254,10 +272,10 @@ object; whether an encrypted channel's objects need names only its listeners can
    the request budget of item 1 with a limit that follows from what renditions are for.
 4. **Bounded generosity.** An announcer serves at most so many channels and collections, chosen
    by how many distinct followers asked and for how long, rather than everything it hears of.
-5. **Someone else's firmware.** The requirements above, cheapest first: bounded tables (no change
-   on the air; the decoders are done), signed firmware images, verification in chunks, ids that
-   change, airtime as evidence, and authenticated announcer frames with the bound on time they
-   need.
+5. **Someone else's firmware.** The rest of the requirements above, cheapest first: signed
+   firmware images, verification in chunks, ids that change, airtime as evidence, and
+   authenticated announcer frames with the bound on time they need. The decoders and the tables
+   keyed by names are done; what a node carries is item 4.
 6. **Known peers, optionally.** A cell may require that requests come from a node whose key it
    has seen before, which makes the attacks above cost an identity rather than nothing. This is
    a deployment choice, not a default: MeshCast is meant to work with strangers.
