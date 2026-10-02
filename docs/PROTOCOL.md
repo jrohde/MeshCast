@@ -527,18 +527,22 @@ beacon and one per WANT entry. Hashing object and holder to a phase instead need
 often (the birthday problem), and fixed phases cut the airtime but made a bulletin 50 % slower;
 FEASIBILITY.md §9.6.
 
-An announcer divides its listening time under polite access and on a radio carrier no regulator
-caps (ESP-NOW), and announces K = 1 under a duty cycle. Under polite access every transmission is
-at most `Ton_max` and followed by a pause, so an upload is spread over minutes and hidden
-uploaders overlap. On a carrier without a limit the announcer's one receiver is the only limit,
-so dividing its time costs nothing in total; and on a hopping one, every upload to an announcer
-waits for the end of the meeting dwell, when its channel comes back, so hidden uploaders start
-together. Without phases, 45 % of the upload frames in the ESP-NOW neighbourhood collided at their
-own announcer; with them none did, the uploads needed half the frames, and the scenario's median
-went from 13.7 to 11.8 minutes (FEASIBILITY.md §15). Under a duty cycle budgeted per hour an
-upload is a burst of seconds at the full rate that rarely meets another, and the holder's own
-budget is what limits it: holding it to one phase in K made it K times slower (a median upload of
-39 s instead of 4 s in band O) and the bulletin a third to two fifths slower.
+An announcer divides its listening time on every radio carrier. Under polite access every
+transmission is at most `Ton_max` and followed by a pause, so an upload is spread over minutes and
+hidden uploaders overlap. On a carrier without a limit the announcer's one receiver is the only
+limit, so dividing its time costs nothing in total; and on a hopping one, every upload to an
+announcer waits for the end of the meeting dwell, when its channel comes back, so hidden uploaders
+start together. Without phases, 45 % of the upload frames in the ESP-NOW neighbourhood collided
+at their own announcer; with them none did, the uploads needed half the frames, and the
+scenario's median went from 13.7 to 11.8 minutes (FEASIBILITY.md §15). Under a duty cycle phases
+were first left out, because with a phase per grant a lone upload was held to one phase in K and
+took K times as long (a median upload of 39 s instead of 4 s in band O); with phases per holder a
+lone holder has the whole cycle. And two holders that hear each other do meet there: one that
+sends back to back never finds the channel busy, while the other backs off over a window that
+doubles each time it does, and in one band O world a source uploaded at a third of its rate for
+25 minutes. With phases under the duty cycle too, an hour of music reached a band O neighbourhood
+in 20.4 to 22.7 minutes in every world at every size from 14 kB up, where up to five worlds in
+eight had taken up to 18 minutes longer (FEASIBILITY.md §18).
 
 **The announcer keeps quiet in the phases it gave away.** A radio that transmits cannot receive,
 and carrier sensing does not stop an announcer from talking over an uploader it can decode but
