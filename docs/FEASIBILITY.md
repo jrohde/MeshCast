@@ -1814,3 +1814,106 @@ bulletin of one band O world took 6.6 minutes instead of 3.0; all other worlds w
 
 Also in this round: a store that keeps an object's bytes reserved a whole block of 1,024 symbols for
 it, so a 43 kB track took 205 kB; it now keeps exactly the object's symbols.
+
+## 15. Faults that collections exposed
+
+Collections (PROTOCOL.md §9, question 13) add a level of manifest, and measuring what that level
+costs found three faults that were there before it; fixing one of them exposed a fourth. Each is
+fixed and measured here against main, so that §16 can measure collections against a main without
+them. Eight seeds per scenario, as before.
+
+### 15.1 Uploads that start together
+
+In the ESP-NOW neighbourhood 45 % of the upload frames collided at their own announcer: 88,295 of
+194,306 over the eight worlds, between 23 % and 61 % per world. ESP-NOW hops, and an upload to an
+announcer waits for the end of the meeting dwell, when the announcer's own channel comes back:
+every holder with something for it starts at that moment, and holders that cannot hear each other
+cannot take turns by sensing the carrier. Dividing the announcer's listening time into phases
+stops exactly that (§9.6), but it had been kept to polite access, on the argument that elsewhere
+an upload is a burst of seconds that rarely meets another. That holds under band O's duty cycle,
+where each holder's own budget limits it and phases made uploads K times slower. It does not hold
+where no regulator caps the sender: there the announcer's one receiver is the only limit, so
+dividing its time costs nothing in total. With phases on every radio carrier without a cap, on
+top of the first fix of §15.2 (PROTOCOL.md §4):
+
+| ESP-NOW neighbourhood, 8 worlds | Before | Phases |
+|---|---|---|
+| Upload frames | 194,306 | 95,282 |
+| Of those, collided at their announcer | 45.4 % | 0.03 % |
+| Median | 13.7 min | **11.8 min** |
+| Bulk frames per world | 36,383 | 22,919 (−37 %) |
+
+Every other scenario ran byte for byte as before: they all have a regulator.
+
+### 15.2 A source that dropped its own uploads, and its own cell first
+
+A node drops what no manifest of interest names any more: wants, and with them its offers and
+the uploads it has queued. A source need not follow its own channel, and in the simulator it does
+not, so its own objects were not of interest to it: whenever it adopted another channel's
+manifest it dropped every upload of its own it had queued, until its announcer granted the object
+again a round later. A grant trace in a band L world showed it: a source granted the same
+manifest by two announcers in the same minute uploaded it to the first and dropped the second.
+Own objects are now offered and uploaded whatever the source follows (PROTOCOL.md §4, "You carry
+what you listen to").
+
+That alone made small pieces slower in the band L neighbourhood (an hour in 42 kB pieces 19.4 →
+21.5 minutes, the first piece later at every size), and the trace of the worst world showed why.
+Kept, a source's queue now served grants in the order they came, and a source granted by its own
+announcer and by another cell's uploaded to the other cell for ten minutes while its own waited:
+its own cell had everything after 44 minutes instead of 16, the other after 36 instead of 50. The
+dropped uploads had, by accident, put the own cell first. Now a holder uploads what its own
+announcer granted before what another cell's granted (PROTOCOL.md §4): its own cell is where it is
+heard best, and every follower there that gets an object becomes a holder for the neighbouring
+cells. With both rules, against main:
+
+| One hour of music, band L neighbourhood | First piece | All of it | Frames |
+|---|---|---|---|
+| 7 kB pieces | 10.4 → 9.5 min | 30.9 → **19.9** min | −1 % |
+| 14 kB | 9.7 → 9.5 | 23.9 → **18.1** | +1 % |
+| 42 kB | 10.2 → 9.6 | 19.4 → 19.1 | +3 % |
+| 141 kB | 12.3 → 10.9 | 20.9 → **18.0** | +2 % |
+| 211 kB | 12.1 → 11.4 | 17.5 → 18.5 | +2 % |
+| One piece | 19.7 → 19.4 | 19.7 → 19.4 | −1 % |
+
+The band O neighbourhood, one cell, ran byte for byte as before at every size. Across 15 km² band L
+moved by at most 3.1 minutes either way, and band O within the spread of its worlds, which is
+eight minutes per world and nearly a factor of three in frames (70 kB pieces 45.0 → 42.6 minutes,
+211 kB 39.8 → 42.1).
+
+### 15.3 Asking on an excursion
+
+A follower asks at most every `T_want_min`. In the two-cluster world where a follower goes on an
+excursion (§12.3) it asked the visited announcer for a manifest, had it a few seconds later, and
+then waited ten minutes to ask for the pieces the manifest named. At home that wait costs little,
+because an announcer passes a new manifest unasked and a follower asks on its cadence; on a visit
+only the visitor asks. A follower on an excursion now asks for what a manifest fetched there names
+soon: after a random wait of up to `T_offer`, at most every `T_gossip_min`, and only for what it
+never asked for (PROTOCOL.md §4). That world went from 54.9 to 45.9 minutes; every other world of
+every scenario ran as before. Asking soon at home too was tried and rejected: the band O
+neighbourhood went from 7.3 to 7.9 minutes and the town from 14.1 to 14.7, with up to 7 % more
+frames, because a cell full of followers asking at once after every new manifest cost the duty
+cycle more than it saved.
+
+### 15.4 The nine scenarios, the living network and the attacks
+
+| Scenario | Main: median, bulk frames | All four rules | Frames |
+|---|---|---|---|
+| Band O neighbourhood | 7.3 min, 6,596 | 7.3 min, 6,596 | 0 % |
+| Band L neighbourhood | 10.0 min, 13,935 | **9.6 min**, 13,991 | 0 % |
+| Band O, 15 km² | 8.4 min, 39,644 | 8.6 min, 38,366 | −3 % |
+| Band L, 15 km² | 22.6 min, 115,254 | **21.7 min**, 114,942 | 0 % |
+| ESP-NOW | 13.8 min, 36,862 | **11.9 min**, 23,057 | **−37 %** |
+| Two clusters, band L | 17.5 min, 5,839 | **16.4 min**, 5,811 | 0 % |
+| LoRa only, 5 km | 47.1 min, 1,322 | 47.1 min, 1,322 | 0 % |
+| Town, band O | 13.8 min, 144,093 | 14.1 min, 147,381 | +2 % |
+| Town, band L | 32.4 min, 358,860 | **30.5 min**, 360,637 | 0 % |
+
+Every scenario delivered 100 % in every world; the two band O networks of many cells moved within
+the spread of their worlds. The living network of §13.6, with nodes coming and going, held every
+current window in every world in both bands; band L newcomers caught up in 13.7 minutes on average
+(14.4 before), the slowest in 26.4 (29.4). Without an attacker and under a WANT flood, with or
+without made-up ids, no role changed after the first hour, as before. Against one false announcer
+99.4 % was delivered (99.0 % in the worst world), against five 97.6 % (93.9 %), against five
+claiming the maximum 96.5 % (92.8 %), each as good as §14 or a little better. The worst p90 moved
+by a few minutes either way, as a single publication in a single world does (band L without an
+attacker 12.0 → 15.6 minutes, band O under the flood 6.6 → 4.8).
