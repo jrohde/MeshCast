@@ -475,14 +475,18 @@ beacon and one per WANT entry. Hashing object and holder to a phase instead need
 often (the birthday problem), and fixed phases cut the airtime but made a bulletin 50 % slower;
 FEASIBILITY.md §9.6.
 
-An announcer divides its listening time only under polite access, and announces K = 1 elsewhere.
-Under polite access every transmission is at most `Ton_max` and followed by a pause, so an upload
-is spread over minutes and hidden uploaders overlap. Under a duty cycle budgeted per hour, or on a
-carrier without a limit, an upload is a burst of seconds at the full rate that rarely meets
-another; holding it to one phase in K made it K times slower (a median upload of 39 s instead of
-4 s in band O) and the bulletin a third to two fifths slower. This is the rule for time slots
-(§5.3) turned around: slots are for carriers the regulator does not cap, phases for the one where
-its cap makes uploads long.
+An announcer divides its listening time under polite access and on a radio carrier no regulator
+caps (ESP-NOW), and announces K = 1 under a duty cycle. Under polite access every transmission is
+at most `Ton_max` and followed by a pause, so an upload is spread over minutes and hidden
+uploaders overlap. On a carrier without a limit the announcer's one receiver is the only limit,
+so dividing its time costs nothing in total; and on a hopping one, every upload to an announcer
+waits for the end of the meeting dwell, when its channel comes back, so hidden uploaders start
+together. Without phases, 45 % of the upload frames in the ESP-NOW neighbourhood collided at their
+own announcer; with them none did, the uploads needed half the frames, and the scenario's median
+went from 13.7 to 11.8 minutes (FEASIBILITY.md §15). Under a duty cycle budgeted per hour an
+upload is a burst of seconds at the full rate that rarely meets another, and the holder's own
+budget is what limits it: holding it to one phase in K made it K times slower (a median upload of
+39 s instead of 4 s in band O) and the bulletin a third to two fifths slower.
 
 **The announcer keeps quiet in the phases it gave away.** A radio that transmits cannot receive,
 and carrier sensing does not stop an announcer from talking over an uploader it can decode but
@@ -526,7 +530,11 @@ granted upload is flowing is then not asked for a second object until it is done
 **A holder uploads what it was granted at once smallest first**, and among equal sizes in the
 order of the collection: Smith's rule as far as a holder can know it, since the pieces of one
 collection have about the same listeners. Granted in the collection's order, a 42 kB track went
-before every 22 kB bulletin of the same source.
+before every 22 kB bulletin of the same source. **Its own announcer comes first**: what its own
+announcer granted a holder uploads before what another cell's announcer granted it (a repair it
+was named for still goes first of all). Its own cell is where it is heard best, and every follower
+there that gets the object becomes a holder for the neighbouring cells; in the order the grants
+arrived, a source served another cell for ten minutes while its own waited (FEASIBILITY.md §15).
 **Ask first for the most listeners per byte**, the carousel's rule applied one step earlier: a
 holder uploads one object at a time, so the order of asking is the order of arriving, and a
 3-minute track must not wait behind a 540 kB object from the same source. (Asking in object-id
@@ -563,7 +571,12 @@ that hear each other. Each kind of pair has its own way across:
   another announcer list the object in its HAVE, follows that announcer, for what it has rather than
   for how well it is heard, until it holds everything it wanted that the announcer has, or until the
   visit brings nothing for `T_excursion`. Then it follows by signal again, and is back in its own
-  cell as a holder, where its announcer's ask finds it. This is an **excursion**. An excursion is
+  cell as a holder, where its announcer's ask finds it. This is an **excursion**. On a visit the
+  follower asks for what a manifest it fetched there names soon, after a random wait of up to
+  `T_offer` and at most every `T_gossip_min`, asking only for what it never asked for; at home its
+  announcer passes a new manifest unasked and the follower asks on its usual cadence, but on a
+  visit only the visitor asks, and waiting `T_want_min` to ask for what the manifest just fetched
+  named kept one two-cluster world waiting nine minutes longer (FEASIBILITY.md §15). An excursion is
   the last way in, not a shortcut: at 20 minutes, followers in slow but working multi-cell networks
   went out dozens of times a day and every visit cost the visited carousel a repeated pass (11 %
   more airtime for a minute of median); at 40 minutes they go only where their cell cannot get the
@@ -586,7 +599,10 @@ joined by nothing but their announcers' link are the case left open (§9, questi
 **You carry what you listen to.** A node registers, collects and keeps the objects of the
 channels it follows (and, as announcer, of every channel it serves). Objects that no manifest of
 interest references any more, because the channel was unfollowed or the object left the
-channel's window, are evicted; own objects are kept. An object leaves the window when the
+channel's window, are evicted, and offers and uploads of them dropped; own objects are kept, and
+offered and uploaded, whether a source follows its own channel or not (a source that did not
+dropped its queued uploads whenever it adopted another channel's manifest; FEASIBILITY.md §15).
+An object leaves the window when the
 manifest that drops it is held, not when it is announced (§2). A node that restarts, or stops
 announcing, evicts nothing for `want_ttl`: a station back from a power cut, or an announcer that
 steps down for minutes, would otherwise drop the library of every channel it does not follow
@@ -870,7 +886,7 @@ arrives a few minutes later than it otherwise would. That is the entire user-vis
 | `max_passes` | 1 | carousel passes per object unless re-wanted |
 | repetition spacing | 0, then `T_want_min` × 1, 2, 4, 8 | wait before an object is passed again; the level climbs with each repetition and resets after a rest of twice the wait |
 | `T_nack_stall` | 60 s | no progress on an ≥ 80 % object before a NACK |
-| `T_want_min` | 10 min | minimum interval between a follower's WANT frames |
+| `T_want_min` | 10 min | minimum interval between a follower's WANT frames, except, on an excursion, an ask for what a manifest fetched there names (§4) |
 | `T_gossip`, `T_gossip_min` | 5 min, 30 s | announcer/source gossip cadence and its floor |
 | `control_reserve` | 10 % | share of the band budget kept free for control frames |
 | own share | `min(regulatory, occ_high_own / (announcers heard + 1))` | content pacing ceiling; derived, not configured |
