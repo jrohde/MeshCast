@@ -38,6 +38,8 @@ pub struct CarouselParams {
     /// Unit of the repetition backoff: the second repetition of an object waits this long after
     /// the pass before, later ones up to eight times as long, however many ask (docs/ABUSE.md).
     pub t_repass_ms: Millis,
+    /// Askers kept per object (docs/ABUSE.md, "Someone else's firmware", item 5).
+    pub max_askers: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -90,7 +92,15 @@ impl Carousel {
     }
 
     pub fn on_want(&mut self, id: ShortId, from: NodeId, now: Millis) {
-        self.wants.entry(id).or_default().insert(from, now);
+        // At most `max_askers` per object, the one that asked longest ago giving way: the count
+        // only orders the carousel, and every made-up name would have been kept for `want_ttl`.
+        let askers = self.wants.entry(id).or_default();
+        if !askers.contains_key(&from) && askers.len() >= self.p.max_askers.max(1) {
+            if let Some(oldest) = askers.iter().min_by_key(|(_, t)| **t).map(|(n, _)| *n) {
+                askers.remove(&oldest);
+            }
+        }
+        askers.insert(from, now);
         if self.passes.contains_key(&id) {
             self.asked_since.entry(id).or_insert(now);
         }
@@ -140,6 +150,12 @@ impl Carousel {
     pub fn remove_manifest(&mut self, id: &ShortId) {
         self.manifests.remove(id);
         self.fresh.remove(id);
+    }
+
+    /// Diagnostic: objects asked for, askers over all of them, objects with a pass record, and
+    /// places known.
+    pub fn table_sizes(&self) -> (usize, usize, usize, usize) {
+        (self.wants.len(), self.wants.values().map(|w| w.len()).sum(), self.passes.len(), self.rank.len())
     }
 
     pub fn wanted_by(&self, id: &ShortId) -> usize {

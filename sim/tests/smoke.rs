@@ -753,7 +753,8 @@ fn what_an_announcer_asked_for_is_forgotten_with_it() {
     let old = b.engine.nodes[2].node.announcer_of(1);
     let gone = (old.0 - 1) as usize;
     assert!(gone == 1 || gone == 3, "the follower should follow a station");
-    let x = ShortId([0x42; 8]);
+    // An object the follower knows: what an announcer asks for is noted only for those.
+    let x: ShortId = *b.tracks.keys().next().unwrap();
     let ask = Frame::Gossip(Gossip { node: old, announcer: old, announcer_colour: 0, announcer_colours: 1, heard: Vec::new(), have: Vec::new(), have_sets: Vec::new(), want: vec![(x, meshcast_core::ids::NodeId::NONE, 0)], sets: Vec::new() });
     let now = b.engine.now;
     b.engine.nodes[2].node.handle_frame(now, 1, &ask, -60);
@@ -948,4 +949,37 @@ fn a_small_object_short_of_one_symbol_is_repaired() {
     }
     let at = at.expect("the follower should hold the collection manifest within 20 minutes");
     assert!(at <= 4 * 60_000, "the follower held the collection manifest after {:.1} min", at as f64 / 60_000.0);
+}
+
+#[test]
+fn made_up_names_are_kept_within_bounds() {
+    // Names are not checked, and every made-up one was kept for an hour: as a neighbour, and as an
+    // asker in the announcer's carousel. A follower on its own firmware asks once a second, each
+    // time under a new name, for half an hour. With the caps a node keeps at most `max_neighbours`
+    // and at most `max_askers_per_object` per object, and everyone still gets everything; without
+    // them the same flood fills both tables far beyond (docs/ABUSE.md, item 5).
+    let positions: Vec<(f64, f64)> = (0..12).map(|i| (150.0 * (i % 4) as f64, 150.0 * (i / 4) as f64)).collect();
+    let mut s = spec(BulkPreset::GfskO, positions, vec![0], vec![5], 0.5);
+    s.tracks = 6;
+    s.mix = meshcast_sim::scenario::parse_mix("snac-music:42").unwrap();
+    s.attack = Some(meshcast_sim::scenario::AttackSpec { attackers: 1, period_s: 1.0, spoof: true, renditions: false, lure: false, claim_max: false });
+    let p = Params::default();
+    let unbounded = Params { max_neighbours: usize::MAX, max_askers_per_object: usize::MAX, max_offered_ids: usize::MAX, max_conflicts: usize::MAX, ..Params::default() };
+    for (params, bounded) in [(p, true), (unbounded, false)] {
+        let mut b = build(&s, params);
+        b.engine.run((s.hours * 3.6e6) as u64, 600_000);
+        let peaks = &b.engine.metrics.table_peaks;
+        let (neighbours, askers, objects) = (peaks["neighbours"], peaks["carousel askers"], peaks["carousel objects"]);
+        if bounded {
+            assert!(neighbours <= p.max_neighbours, "{neighbours} neighbours kept");
+            assert!(askers <= objects * p.max_askers_per_object, "{askers} askers kept for {objects} objects");
+            for (id, t) in &b.tracks {
+                for &f in &t.followers {
+                    assert!(b.engine.metrics.completions.contains_key(&(f, *id)), "node {f} missing {id:?}");
+                }
+            }
+        } else {
+            assert!(neighbours > p.max_neighbours && askers > objects * p.max_askers_per_object, "the flood should exceed both caps without them: {neighbours} neighbours, {askers} askers for {objects} objects");
+        }
+    }
 }

@@ -241,6 +241,9 @@ struct Report {
     core_stats: Vec<(usize, String)>,
     /// Mean bytes a follower holds complete at the end, in kB.
     held_kb_per_follower: f64,
+    /// The largest size each table filled from the air reached in any honest node.
+    #[serde(default)]
+    table_peaks: BTreeMap<String, usize>,
     /// Per node: announcer followed, bulk frames received, bulk frames lost to collisions,
     /// tracks completed.
     per_node: Vec<(usize, u32, u64, u64, usize)>,
@@ -895,6 +898,7 @@ fn simulate(spec: ScenarioSpec, verbose: bool, failover: Option<(f64, f64)>) -> 
         failover: fo,
         core_stats,
         held_kb_per_follower,
+        table_peaks: eng.metrics.table_peaks.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
     };
     if std::env::var("MESHCAST_DEBUG_WANTS").is_ok() {
         for (i, n) in eng.nodes.iter().enumerate() {
@@ -927,6 +931,8 @@ struct SeedLine {
     frames_sent: u64,
     whole: WholeContent,
     held_kb_per_follower: f64,
+    #[serde(default)]
+    table_peaks: BTreeMap<String, usize>,
 }
 
 /// Several seeds of one scenario: the spread is the result, not any single run.
@@ -961,7 +967,7 @@ impl Ensemble {
             spec: reports[0].spec.clone(),
             seeds: reports
                 .iter()
-                .map(|r| SeedLine { seed: r.spec.seed, delivered: delivered(r), bulk_sent: r.bulk_sent, by_kind: by_kind(&r.objects), renditions: r.renditions.clone(), attack_frames: r.attack_frames, carousel_first: r.carousel_first, carousel_repeat: r.carousel_repeat, role_events: r.role_events, challenges: r.challenges, excursions: r.excursions, frames_sent: r.frames_sent, whole: r.whole.clone(), held_kb_per_follower: r.held_kb_per_follower })
+                .map(|r| SeedLine { seed: r.spec.seed, delivered: delivered(r), bulk_sent: r.bulk_sent, by_kind: by_kind(&r.objects), renditions: r.renditions.clone(), attack_frames: r.attack_frames, carousel_first: r.carousel_first, carousel_repeat: r.carousel_repeat, role_events: r.role_events, challenges: r.challenges, excursions: r.excursions, frames_sent: r.frames_sent, whole: r.whole.clone(), held_kb_per_follower: r.held_kb_per_follower, table_peaks: r.table_peaks.clone() })
                 .collect(),
         }
     }
@@ -996,6 +1002,14 @@ impl Ensemble {
             w(|x| x.first_p50_h), w(|x| x.all_p50_h), w(|x| x.all_p90_h), mean(&inc), mean(&fs));
         println!("  playback       first piece {}, start without waiting median {}, p90 {}",
             w(|x| x.piece0_p50_h), w(|x| x.start_p50_h), w(|x| x.start_p90_h));
+        let mut peaks: BTreeMap<&str, usize> = BTreeMap::new();
+        for s in &self.seeds {
+            for (k, v) in &s.table_peaks {
+                let p = peaks.entry(k.as_str()).or_insert(0);
+                *p = (*p).max(*v);
+            }
+        }
+        println!("  table peaks    {}", peaks.iter().map(|(k, v)| format!("{k} {v}")).collect::<Vec<_>>().join(", "));
         let roles: Vec<f64> = self.seeds.iter().map(|s| s.role_events as f64).collect();
         let ch: Vec<f64> = self.seeds.iter().map(|s| s.challenges as f64).collect();
         let ex: Vec<f64> = self.seeds.iter().map(|s| s.excursions as f64).collect();
@@ -1480,6 +1494,7 @@ fn run_dynamics(nodes: usize, area_km2: f64, stations: usize, channels: usize, f
         println!("nodes offline at the end: {}", offline.len());
     }
     println!("bulk airtime share, busiest nodes: {}", airtime.iter().map(|(i, a)| format!("{i}:{:.1}%", a * 100.0)).collect::<Vec<_>>().join(" "));
+    println!("table peaks: {}", eng.metrics.table_peaks.iter().map(|(k, v)| format!("{k} {v}")).collect::<Vec<_>>().join(", "));
     if let Some(path) = &common.out {
         fs::write(path, serde_json::to_string_pretty(&report).unwrap()).expect("write report");
         println!("full report written to {path}");

@@ -354,6 +354,12 @@ impl Engine {
             if !self.nodes[i].alive {
                 continue;
             }
+            if !self.attackers.iter().any(|a| a.node == i) {
+                for (name, size) in self.nodes[i].node.table_sizes() {
+                    let peak = self.metrics.table_peaks.entry(name).or_insert(0);
+                    *peak = (*peak).max(size);
+                }
+            }
             for c in 0..self.phys.len() {
                 let occ = self.occupancy(i, c, now);
                 self.metrics.occupancy_samples.push((now, i, c, occ));

@@ -93,6 +93,13 @@ pub struct Params {
     pub t_score_ms: Millis,
     /// Neighbours not heard for this long are forgotten.
     pub neighbor_ttl_ms: Millis,
+    /// Caps on what a node keeps of what it hears under names nobody checks (docs/ABUSE.md,
+    /// "Someone else's firmware", item 5): neighbours, the ids they offered in all, announcers
+    /// reported in conflict, and askers kept per object by a carousel.
+    pub max_neighbours: usize,
+    pub max_offered_ids: usize,
+    pub max_conflicts: usize,
+    pub max_askers_per_object: usize,
     /// Share of the regulatory budget (permille) kept free for control frames when the control
     /// and bulk carriers share a band.
     pub control_reserve: u16,
@@ -145,6 +152,10 @@ impl Default for Params {
             dwell_ms: 20_000,
             t_score_ms: 60_000,
             neighbor_ttl_ms: 3_600_000,
+            max_neighbours: 256,
+            max_offered_ids: 8192,
+            max_conflicts: 64,
+            max_askers_per_object: 32,
             control_reserve: 100,
             max_passes: 1,
             t_nack_stall_ms: 60_000,

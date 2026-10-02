@@ -16,6 +16,9 @@ pub struct RoleEvent {
 
 #[derive(Default, Debug)]
 pub struct Metrics {
+    /// The largest size every table a node fills from what it hears reached in any honest node,
+    /// sampled with the occupancy (docs/ABUSE.md, item 5).
+    pub table_peaks: BTreeMap<&'static str, usize>,
     /// Upload frames by what happened at the announcer they were meant for:
     /// [delivered, collided, receiver transmitting, receiver on another channel, too weak, receiver off].
     pub upload_outcome: [u64; 6],
