@@ -192,6 +192,12 @@ A collection manifest is not signed: the root names it by its full hash, so it i
 authentic as the root, and a node reads one only once it holds a valid root that names it. A
 cover is an object of content type 6 (§1.1).
 
+The order of `pieces` is the order a listener plays them in, and the network delivers in it: a
+piece's **place** is its position in the list, and the earlier place goes first wherever a node
+chooses what to ask for or upload next (§4). A series lists its window in the order it plays, so
+a provider that wants its newest episode heard first lists it first. The pieces of singles have
+no order: every one of them has place 0, as has anything that is not a piece.
+
 The two levels keep what changes small and what a listener fetches to what it follows. A new
 episode changes one collection manifest and the root, not the catalogue; a follower of one
 podcast of a provider with fifty collections fetches the root and that one collection manifest.
@@ -354,8 +360,9 @@ had (FEASIBILITY.md §14).
 Draft cap: 3 heard; HAVE ids and have sets within 96 bytes (8 × n_have + 18 × n_have_sets); wants
 and want sets within 104 bytes (13 × n_want + 23 × n_sets); at most 234 bytes, as before sets
 existed. For larger libraries a node rotates through its list across gossip rounds, most recently
-completed and most wanted first. Followers that are
-not sources send GOSSIP only when they have something new to offer that the announcer lacks (the
+completed and most wanted first. Which want sets go first when not all fit is in §4: one for
+every collection before a second for any, collections in progress first. Followers that are not
+sources send GOSSIP only when they have something new to offer that the announcer lacks (the
 "upload" case) or, rarely, a WANT for an object the announcer has never included; the default is
 silence.
 
@@ -415,8 +422,10 @@ the cell wants, as learned from GOSSIP and MANIFEST_ANNOUNCE, that the announcer
    is Smith's rule, which minimises the total time listeners wait on one shared transmitter.
    Among objects of one size it is simply most-wanted first; a small object no longer waits
    behind a large one; and every wanted object is still sent every round, so nothing starves.
-   Between objects that serve as many listeners per byte, the earlier piece of its collection
-   goes first, because it plays first.
+   Between objects that serve as many listeners per byte, the earlier place (§2) goes first,
+   because it plays first. Passing the earlier place first whatever its size was tried as well:
+   listeners in band L could start up to a minute sooner, and a band O town needed 7 % more
+   frames (FEASIBILITY.md §19).
 3. Merge NACKs received during the round; symbols named in NACKs are queued at the front of the
    next round.
 4. Objects that every heard follower reports complete leave the set.
@@ -577,16 +586,42 @@ pieces reached its last announcer after 140 minutes, against 50 in 10-minute pie
 uploads themselves took seconds (FEASIBILITY.md §14). So where rounds are dear, followers ask their
 announcer, announcers ask and grant, and holders offer in sets (§3.3): a whole collection in one
 round, and a holder learns every object granted to it at once and uploads them one after the
-other in its phase. Where asking is cheap, on a carrier that does not hop, a round asks for the
-most listeners per byte first and the next round comes as soon as that has arrived; there the
-order of arrival matters more than the number of rounds, and asking for everything at once put
-a cell's speech and music up side by side, so that speech arrived a third later. A holder whose
-granted upload is flowing is then not asked for a second object until it is done.
+other in its phase. Where asking is cheap, on a carrier that does not hop, a round asks for a
+few objects and the next round comes as soon as they have arrived; there the order of arrival
+matters more than the number of rounds, and asking for everything at once put a cell's speech
+and music up side by side, so that speech arrived a third later. A holder whose granted upload
+is flowing is then not asked for a second object until it is done.
 
-**A holder uploads what it was granted at once smallest first**, and among equal sizes in the
-order of the collection: Smith's rule as far as a holder can know it, since the pieces of one
-collection have about the same listeners. Granted in the collection's order, a 42 kB track went
-before every 22 kB bulletin of the same source. **Manifests come first**: a manifest a holder is
+**Earlier pieces first.** A listener plays a collection from its first piece (§2), so wherever an
+announcer chooses what to ask for, the earlier place goes first. Asking by name, it asks for the
+earlier place first, and among equal places for the most listeners per byte. Asking in sets, of
+which a frame holds four (§3.3), every collection gets a set before any gets a second;
+collections in progress, a piece of which arrived in the last `T_want_min` or is granted, go
+before the others; and within that the earliest place goes first, then the set asked for longest
+ago. What is flowing is not asked for, so a collection in progress gives up its place once its
+uploads run: as many collections are in flight as arrive, and one that stopped arriving takes
+turns with the rest.
+
+Each part answers a measurement (FEASIBILITY.md §19). In the order of manifest ids, the sets of
+the lowest ids and their grants filled the frame round after round, and one announcer asked three
+times in 26 minutes for a source whose manifest id sorted last, against 41 and 130 times for the
+other two. The earliest place first alone put every collection side by side, and where a band L
+network was asked for twelve albums at once they shared its uploads so thinly that listeners
+could play one through only 10.5 minutes later than before; with collections in progress first,
+0.4 minutes sooner than before, and the first piece 10.7 minutes sooner. By name, most listeners
+per byte first put a source's speech before the music it plays between. Together, listeners in a
+band O town could start a programme at its first piece and hear it through without waiting
+7.9 minutes sooner, in a band L town 5.3 minutes sooner. What it costs: speech on its own
+arrives later (in the band O town after 17.2 minutes instead of 8.0, while music came 5 minutes
+sooner), and in band L the median listener held all of a programme up to 2.3 minutes later; at
+the 90th percentile within a minute of before.
+
+**A holder uploads the earlier place first** (§2), whatever grant brought it, and among equal
+places the smallest first: Smith's rule as far as a holder can know it, since pieces at the same
+place have about the same listeners. The earlier rule sorted only what one grant brought,
+smallest first and then in the collection's order, behind everything earlier grants had lined
+up; in a 15 km² band L network one holder uploaded the first piece of a programme after 33
+later pieces of it (FEASIBILITY.md §19). **Manifests come first**: a manifest a holder is
 granted goes before the pieces it already lined up, after any repair it was named for. Nothing of
 a collection can be read without its manifest, and a manifest is a few symbols; lined up behind
 pieces, a collection manifest granted to a holder in a 15 km² band L network waited almost six
@@ -1050,6 +1085,7 @@ arrives a few minutes later than it otherwise would. That is the entire user-vis
     later, and abuse through size is the channel flood and store exhaustion of ABUSE.md. Retention
     stays the provider's choice: what leaves a collection leaves the mesh in time. How a player
     uses collections (follow the schedule like radio, newest first, in order, shuffled, move on
-    to the next episode) is the app's business. Open: the `integrity` slot of a piece (reserved,
-    §1), and granting the earlier pieces of a collection first, so that playback can start
-    sooner where everything is granted at once (FEASIBILITY.md §14).
+    to the next episode) is the app's business; the network delivers in the order the collection
+    manifest lists, the earlier place first (§2, §4), and listeners in a band O town could start
+    playing a programme 7.9 minutes sooner than when it went by size (FEASIBILITY.md §19). Open:
+    the `integrity` slot of a piece (reserved, §1).

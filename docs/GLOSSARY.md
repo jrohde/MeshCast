@@ -77,6 +77,10 @@ authentic as the root that names it by its full hash. A node believes a root it 
 
 **Object.** An immutable, hash-identified blob: track, bulletin, manifest, firmware image, page.
 
+**Place.** A piece's position in the list of its collection manifest, the order a listener plays
+it in; 0 for every piece of singles and for anything that is not a piece. Asking and uploading go
+by it, the earlier place first (PROTOCOL.md §2, §4).
+
 **Polite spectrum access.** The ETSI alternative to duty cycle: CCA, max 1 s on, 100 ms off,
 100 s per hour per 200 kHz, more with frequency agility (AFA).
 

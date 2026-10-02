@@ -97,6 +97,9 @@ struct Common {
     /// Give each collection a cover of this many kB.
     #[arg(long, default_value_t = 0)]
     cover_kb: u32,
+    /// Make the collections singles, whose pieces have no order.
+    #[arg(long)]
+    singles: bool,
 }
 
 impl Common {
@@ -111,7 +114,7 @@ impl Common {
     }
 
     fn collections(&self) -> scenario::CollectionSpec {
-        scenario::CollectionSpec { per_source: self.collections, follow: self.follow_collections, cover_kb: self.cover_kb }
+        scenario::CollectionSpec { per_source: self.collections, follow: self.follow_collections, cover_kb: self.cover_kb, singles: self.singles }
     }
 
     fn mix_items(&self) -> Vec<scenario::MixItem> {
@@ -280,6 +283,17 @@ struct WholeContent {
     last_after_announcer_p50_h: Option<f64>,
     #[serde(default)]
     last_after_announcer_p90_h: Option<f64>,
+    /// Per follower and collection it follows: when it held the collection's first piece, and
+    /// the earliest time it could have started playing the collection from that piece and played
+    /// it to the end without waiting (the latest of each piece's arrival less the playing time of
+    /// the pieces before it). Medians, and the 90th percentile of the start; a collection never
+    /// held whole counts as never started.
+    #[serde(default)]
+    piece0_p50_h: Option<f64>,
+    #[serde(default)]
+    start_p50_h: Option<f64>,
+    #[serde(default)]
+    start_p90_h: Option<f64>,
 }
 
 /// One follower and one source: when the first and the last of the source's objects arrived,
@@ -290,6 +304,10 @@ struct Pair {
     complete: bool,
     last_id: Option<meshcast_core::ids::ShortId>,
 }
+
+/// A piece a follower follows: its place in the collection, how long it plays, and when the
+/// follower held it.
+type Followed = (usize, u64, Option<Millis>);
 
 /// Content is what a listener wants whole: a source's objects together, however it split them.
 fn whole_content(tracks: &BTreeMap<meshcast_core::ids::ShortId, scenario::TrackInfo>, completions: &BTreeMap<(usize, meshcast_core::ids::ShortId), Millis>, announcer: &[Option<usize>]) -> WholeContent {
@@ -326,6 +344,36 @@ fn whole_content(tracks: &BTreeMap<meshcast_core::ids::ShortId, scenario::TrackI
     at_ann.sort_by(|a, b| a.partial_cmp(b).unwrap());
     after_ann.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let h = |ms: Millis| ms as f64 / 3.6e6;
+    // Per follower and collection: its pieces in order, with playing time and arrival.
+    let mut listens: BTreeMap<(usize, usize, usize), Vec<Followed>> = BTreeMap::new();
+    for (id, t) in tracks {
+        if t.label == scenario::COVER {
+            continue;
+        }
+        for &f in &t.followers {
+            listens.entry((f, t.source, t.collection)).or_default().push((t.index, t.play_ms, completions.get(&(f, *id)).copied()));
+        }
+    }
+    let mut piece0: Vec<f64> = Vec::new();
+    let mut start: Vec<f64> = Vec::new();
+    for pieces in listens.values_mut() {
+        pieces.sort_unstable_by_key(|p| p.0);
+        if let Some(a) = pieces[0].2 {
+            piece0.push(h(a));
+        }
+        let mut before = 0u64;
+        let mut s = Some(0u64);
+        for &(_, play, arrived) in pieces.iter() {
+            s = match (s, arrived) {
+                (Some(s), Some(a)) => Some(s.max(a.saturating_sub(before))),
+                _ => None,
+            };
+            before += play;
+        }
+        start.push(s.map(h).unwrap_or(f64::INFINITY));
+    }
+    piece0.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    start.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let mut first: Vec<f64> = per.values().filter(|e| e.first != Millis::MAX).map(|e| h(e.first)).collect();
     // A pair that never completed counts as never: it sorts after every finite time.
     let mut all: Vec<f64> = per.values().map(|e| if e.complete { h(e.last) } else { f64::INFINITY }).collect();
@@ -341,6 +389,9 @@ fn whole_content(tracks: &BTreeMap<meshcast_core::ids::ShortId, scenario::TrackI
         last_at_announcer_p90_h: percentile(&at_ann, 0.9),
         last_after_announcer_p50_h: percentile(&after_ann, 0.5),
         last_after_announcer_p90_h: percentile(&after_ann, 0.9),
+        piece0_p50_h: percentile(&piece0, 0.5),
+        start_p50_h: fin(percentile(&start, 0.5)),
+        start_p90_h: fin(percentile(&start, 0.9)),
     }
 }
 
@@ -943,6 +994,8 @@ impl Ensemble {
         let inc: Vec<f64> = self.seeds.iter().map(|s| s.whole.incomplete * 100.0).collect();
         println!("  whole content  first object {}, all of it median {}, p90 {}; never all {:.1} %; all frames mean {:.0}",
             w(|x| x.first_p50_h), w(|x| x.all_p50_h), w(|x| x.all_p90_h), mean(&inc), mean(&fs));
+        println!("  playback       first piece {}, start without waiting median {}, p90 {}",
+            w(|x| x.piece0_p50_h), w(|x| x.start_p50_h), w(|x| x.start_p90_h));
         let roles: Vec<f64> = self.seeds.iter().map(|s| s.role_events as f64).collect();
         let ch: Vec<f64> = self.seeds.iter().map(|s| s.challenges as f64).collect();
         let ex: Vec<f64> = self.seeds.iter().map(|s| s.excursions as f64).collect();
@@ -1059,7 +1112,7 @@ fn run_dynamics(nodes: usize, area_km2: f64, stations: usize, channels: usize, f
         renditions: common.renditions(),
         attack: common.attack(),
         // One series per channel, followed whole: a bulletin is a new episode of it.
-        collections: scenario::CollectionSpec { per_source: 1, follow: 0, cover_kb: common.cover_kb },
+        collections: scenario::CollectionSpec { per_source: 1, follow: 0, cover_kb: common.cover_kb, singles: false },
     };
     let params = params();
     let mut built = build(&spec, params);
@@ -1151,7 +1204,7 @@ fn run_dynamics(nodes: usize, area_km2: f64, stations: usize, channels: usize, f
                 src.collections = vec![series];
                 built.engine.poke(node);
                 let followers: Vec<usize> = (0..nodes).filter(|&i| subs[i].contains(&c)).collect();
-                built.tracks.insert(o.id.short(), TrackInfo { label: "speech".into(), source: node, index: next_index[c] - 1, bytes: o.len, followers: followers.clone(), rendition: None, small: Vec::new(), slot_ms: None });
+                built.tracks.insert(o.id.short(), TrackInfo { label: "speech".into(), source: node, index: next_index[c] - 1, bytes: o.len, followers: followers.clone(), rendition: None, small: Vec::new(), slot_ms: None, collection: 0, play_ms: o.kind.codec().map(|c| c.duration_ms(o.len)).unwrap_or(0) });
                 pubs.push((o.id.short(), t, followers));
             }
             2 => {

@@ -71,11 +71,15 @@ pub struct CollectionSpec {
     pub follow: usize,
     /// Size of each collection's cover in kB; 0 means none.
     pub cover_kb: u32,
+    /// Whether the collections are singles, whose pieces have no order; otherwise one collection
+    /// is a series and several are albums.
+    #[serde(default)]
+    pub singles: bool,
 }
 
 impl Default for CollectionSpec {
     fn default() -> Self {
-        CollectionSpec { per_source: 1, follow: 0, cover_kb: 0 }
+        CollectionSpec { per_source: 1, follow: 0, cover_kb: 0, singles: false }
     }
 }
 
@@ -133,6 +137,11 @@ pub struct TrackInfo {
     pub small: Vec<usize>,
     /// When the schedule plays it (ms from the start of the simulation).
     pub slot_ms: Option<u64>,
+    /// The collection of its source it belongs to, in the source's order, and how long it plays.
+    #[serde(default)]
+    pub collection: usize,
+    #[serde(default)]
+    pub play_ms: u64,
 }
 
 /// A publishing node and what it needs to publish again later.
@@ -310,7 +319,7 @@ pub fn build(spec: &ScenarioSpec, params: Params) -> Built {
         let mut covers = Vec::new();
         for (k, part) in objects.chunks(chunk).enumerate() {
             let ids: Vec<ShortId> = part.iter().map(|o| o.id.short()).collect();
-            let kind = if per == 1 { CollectionKind::Series } else { CollectionKind::Album };
+            let kind = if spec.collections.singles { CollectionKind::Singles } else if per == 1 { CollectionKind::Series } else { CollectionKind::Album };
             collections.push(Collection { cid: k as u32 + 1, kind, title: format!("Collection {k} of node {s}"), pieces: part.to_vec(), schedule: schedule.iter().filter(|e| ids.contains(&e.object)).cloned().collect() });
             covers.push((spec.collections.cover_kb > 0).then(|| cover_object(spec.seed, s, k, spec.collections.cover_kb * 1024)));
         }
@@ -359,11 +368,11 @@ pub fn build(spec: &ScenarioSpec, params: Params) -> Built {
             let rendition = table.entries.iter().find(|r| r.parent == o.id.short()).map(|r| (r.id.short(), r.len));
             let followers = &of_collection[t / chunk];
             let small_here: Vec<usize> = if rendition.is_some() { followers.iter().copied().filter(|f| small.contains(f)).collect() } else { Vec::new() };
-            tracks.insert(o.id.short(), TrackInfo { label: labels[t].clone(), source: s, index: t, bytes: o.len, followers: followers.clone(), rendition, small: small_here, slot_ms: Some(3600_000 * (t as u64 + 1)) });
+            tracks.insert(o.id.short(), TrackInfo { label: labels[t].clone(), source: s, index: t, bytes: o.len, followers: followers.clone(), rendition, small: small_here, slot_ms: Some(3_600_000 * (t as u64 + 1)), collection: t / chunk, play_ms: o.kind.codec().map(|c| c.duration_ms(o.len)).unwrap_or(0) });
         }
         for (k, v) in covers.iter().enumerate() {
             if let Some((v, _)) = v {
-                tracks.insert(v.id.short(), TrackInfo { label: COVER.into(), source: s, index: objects.len() + k, bytes: v.len, followers: of_collection[k].clone(), rendition: None, small: Vec::new(), slot_ms: None });
+                tracks.insert(v.id.short(), TrackInfo { label: COVER.into(), source: s, index: objects.len() + k, bytes: v.len, followers: of_collection[k].clone(), rendition: None, small: Vec::new(), slot_ms: None, collection: k, play_ms: 0 });
             }
         }
         source_infos.push(SourceInfo { node: s, key, channel: chan, objects, collections, covers: covers.iter().map(|v| v.as_ref().map(|(v, _)| ObjectRef { id: v.id, len: v.len })).collect(), seq: 1 });
