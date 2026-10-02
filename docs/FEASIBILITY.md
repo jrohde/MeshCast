@@ -2419,3 +2419,15 @@ Not tried yet, in the order they look worth trying:
    but asks for it, or for the manifest that names it, is honest and unable, not false; the
    follower should go on an excursion, not leave its cell leaderless for an hour. This needs care,
    because a false announcer could ask forever (ABUSE.md, election capture).
+
+An upper bound for option 1, measured with an oracle (branch `experiment/backbone-oracle`, not
+merged): every minute each announcer is handed, for free and at once, what an announcer it can hear
+holds. Handed only what its own followers asked for, band L delivered 69.0 to 88.5 % (against 69.7
+to 85.8): content cannot cross a cell whose announcer nobody asks. Handed everything it wants, which
+by its generosity is every channel it hears of, 85.4 to 90.2 %, with 1,073 to 2,910 transfers per
+world; excursions fell only from about 300 to 228 to 289. So even a perfect backbone leaves a tenth
+of the bulletins late. At the end of such a world 14 listener-bulletin pairs were still missing,
+and in them the listener did not know the bulletin existed: its announcer had neither the
+channel's newest root nor any announcer in reach that had it. Roots travel only through nodes
+that follow the channel or announcers that fetched them, and in a sparse band L network neither
+reaches every cell. Whatever comes next has to carry the roots, not only the pieces.
