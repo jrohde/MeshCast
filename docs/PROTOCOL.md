@@ -203,10 +203,10 @@ Rules:
   dropped.
 - **Subscribing** is storing in the follow list either a channel id, meaning every collection of
   that channel now and later, or a channel id and a `cid`, meaning that collection. The node then
-  wants the channel's root manifest, the collection manifests of what it follows, and their
-  pieces and covers; it registers, collects and keeps nothing of the collections it does not
-  follow. An announcer serves every collection of every channel it serves, as it serves every
-  channel.
+  wants the channel's root manifest and all its collection manifests, which are small and tell it
+  what another cell asks for (§4), and the pieces and covers of what it follows; of the other
+  collections it fetches only what it relays (§4). An announcer serves every collection of every
+  channel it serves, as it serves every channel.
 - **A new root alone does not cost a collection its pieces.** A node keeps, per collection, the
   collection manifest it adopted, and with it its pieces, until it holds the one a newer root
   names; a collection that a newer root no longer names has left the channel. This is the rule
@@ -335,8 +335,8 @@ it, and a want for such an object was granted and answered over and over; FEASIB
 | 14 | 6 × n_heard | other announcers this node hears: id (4), colour (1), colours (1); the conflict report (§5) |
 | … | 8 × n_have | short ids the node has completely |
 | … | 18 × n_have_sets | have sets: manifest short id (8), first piece (2), bitmap (8) |
-| … | 13 × n_want | wants: short id (8), granted holder (4; 0 = open ask), upload phase of the grant (1; §4) |
-| … | 23 × n_sets | want sets: manifest short id (8), first piece (2), bitmap (8), granted holder (4; 0 = open ask), upload phase (1) |
+| … | 13 × n_want | wants: short id (8), granted holder (4; 0 = open ask), phase byte (1): the upload phase of the grant in its low four bits (§4), and in bit 7 an announcer's mark that one of its own followers asked for the object |
+| … | 23 × n_sets | want sets: manifest short id (8), first piece (2), bitmap (8), granted holder (4; 0 = open ask), phase byte (1) as for a want |
 | … | 2 | CRC-16 |
 
 **Sets** name pieces by their place in a collection manifest (§2): bit *i* of the bitmap is piece
@@ -629,6 +629,17 @@ that hear each other. Each kind of pair has its own way across:
 
 - *A follower of one cell hears the other cell's announcer, and holds what it asks for*: it
   answers the open ask with an offer in the rendezvous, and uploads when granted (above).
+- *It hears the other cell ask, for its listeners, for something of a channel it follows that it
+  does not hold*: it relays. An announcer marks in its asks what its own followers asked for
+  (§3.3). Once such an ask has gone unmet for `T_want_min`, a follower that hears it and follows
+  the channel, whatever collections of it it listens to, wants the piece or cover itself, fetches
+  it in its own cell like anything it wants, keeps it, and answers the next ask with an offer. It
+  relays for listeners, not to fill another announcer's library, and only what nobody met, since
+  most asks are answered by a holder within a round. Followers of single collections carry less
+  than followers of whole channels, and with every listener of a 15 km² band L network following
+  one album of four the chain of carriers of an album broke: in one world 14 % of its listeners
+  never had it. With relaying every listener had its album, and where nothing was missing it cost
+  6 % more frames at most (FEASIBILITY.md §17).
 - *A follower hears another cell's announcer that has what it wants, which its own cannot get*: it
   goes there. A follower whose want has brought no symbol for `T_excursion` (draft 40 min), whose
   announcer has not granted the object to any uploader in that time and does not list it itself (a

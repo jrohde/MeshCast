@@ -38,6 +38,7 @@ of yours can spend. Anything above one is a lever.
 | **Conflict poisoning** | A report naming announcers with a high colour count | Everyone's slot cycle grows to that count and each announcer idles all but one slot of it | Was measured at 8/9 idle by accident alone |
 | **Store exhaustion** | A huge catalogue on a channel someone follows | Followers fetch and keep it | Bounded by what they follow |
 | **Changed collections** | A root of your own channel that flags every collection manifest as changed (PROTOCOL.md §2) | Every holder of the root lists them with it and uploads them after it, up to a HAVE frame of them per root | Bounded by your own channel: the channel flood |
+| **Relay ask** | As an announcer, asks marked as for listeners (PROTOCOL.md §3.3), for every piece of a channel, repeated for `T_want_min` | Every follower of that channel that hears you fetches what you asked for in its own cell and keeps it | Bounded by the channels each follower follows: at most what following them whole costs, once per object |
 
 Two of these are structural rather than incidental. An announcer is generous by design: it serves
 whatever its cell asks for, which is exactly what an attacker needs. And control frames are free
