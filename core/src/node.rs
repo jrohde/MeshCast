@@ -11,7 +11,7 @@ use crate::election::{step_up_order, Election, Transition};
 use crate::fatsoen::Fatsoen;
 use crate::frame::{AnnounceEntry, Beacon, Bulk, CarrierKind, CAP_IP, CAP_MAINS, Class, Frame, FrameType, Gossip, ManifestAnnounce, Nack, PieceSet, WantSet, ASK_LISTENED, HAVE_BUDGET, HAVE_SET_BYTES, MAX_ANNOUNCE_ENTRIES, MAX_GOSSIP_IDS, MAX_NACK_RANGES, MAX_WANT, PHASE_MASK, SYMBOL_SIZE, WANT_BUDGET, WANT_SET_BYTES};
 use crate::ids::{ChannelId, NodeId, ShortId};
-use crate::manifest::{Collection, CollectionRef, Manifest, ObjectRef};
+use crate::manifest::{Collection, CollectionKind, CollectionRef, Manifest, ObjectRef};
 use crate::rendition::RenditionTable;
 use crate::object::{ContentType, ObjectMeta};
 use crate::params::{Params, SCORE_MAX};
@@ -217,6 +217,10 @@ struct RootIndex {
 }
 
 /// A source transmitting an object to the announcer: either a full pass or a NACKed list.
+/// A want set before it is packed: its collection manifest, the holder it is granted to (NONE
+/// for an open ask) and its phase byte (PROTOCOL.md §3.3).
+type SetKey = (ShortId, NodeId, u8);
+
 #[derive(Clone, Debug)]
 struct Upload {
     object: ShortId,
@@ -235,6 +239,8 @@ struct Upload {
     phase: u8,
     /// A manifest, root or collection: it goes before the objects it names (PROTOCOL.md §4).
     manifest: bool,
+    /// Its place among the uploads of its rank: lower goes first (PROTOCOL.md §4).
+    order: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -263,10 +269,11 @@ impl CarrierRt {
             (None, _) => self.upload = Some(u),
             (Some(_), true) => self.upload_queue.push_front(u),
             (Some(_), false) => {
-                // Repairs, then manifests, then our own announcer's grants, then other cells'.
+                // Repairs, then manifests, then our own announcer's grants, then other cells';
+                // within each, by `order`.
                 let rank = |q: &Upload| if q.list.is_some() { 0 } else if q.manifest { 1 } else if q.to == own { 2 } else { 3 };
-                let r = rank(&u);
-                let at = self.upload_queue.iter().position(|q| rank(q) > r).unwrap_or(self.upload_queue.len());
+                let r = (rank(&u), u.order);
+                let at = self.upload_queue.iter().position(|q| (rank(q), q.order) > r).unwrap_or(self.upload_queue.len());
                 self.upload_queue.insert(at, u);
             }
         }
@@ -421,6 +428,12 @@ pub struct Node {
     /// The pieces of every collection manifest we adopted, in the order it lists them: what a
     /// set's bitmap refers to (PROTOCOL.md §3.3).
     pieces: BTreeMap<ShortId, Vec<ShortId>>,
+    /// The collection manifests among those whose pieces have no order (singles, PROTOCOL.md §2):
+    /// every piece of one is first.
+    unordered: BTreeSet<ShortId>,
+    /// When a piece of each collection we adopted last arrived: a collection is in progress
+    /// while its pieces arrive or are granted (PROTOCOL.md §4).
+    moved: BTreeMap<ShortId, Millis>,
     /// Holder: the collection manifests we last listed in a HAVE with each root manifest, which
     /// we upload after it when granted it (PROTOCOL.md §4).
     offered_with: BTreeMap<ShortId, Vec<ShortId>>,
@@ -517,6 +530,8 @@ impl Node {
             last_probe: 0,
             ask_rest_at: None,
             pieces: BTreeMap::new(),
+            unordered: BTreeSet::new(),
+            moved: BTreeMap::new(),
             offered_with: BTreeMap::new(),
             relayed: BTreeSet::new(),
             relay_asks: BTreeMap::new(),
@@ -883,6 +898,19 @@ impl Node {
         (known, complete, short)
     }
 
+    /// Diagnostic: what the next round of asking names, its sets read by our piece lists. It is
+    /// built as for a GOSSIP and counts as asked.
+    pub fn ask_now(&mut self) -> Vec<ShortId> {
+        let (want, sets) = self.take_ask(false);
+        let mut out: Vec<ShortId> = want.iter().map(|(id, _, _)| *id).collect();
+        for w in &sets {
+            if let Some(list) = self.pieces.get(&w.set.manifest) {
+                out.extend(w.set.pieces().filter_map(|k| list.get(k as usize).copied()));
+            }
+        }
+        out
+    }
+
     /// Diagnostic: whether we take our announcer to be asking for `id` itself (PROTOCOL.md §2).
     pub fn announcer_asked_for(&self, id: &ShortId) -> bool {
         self.ann_asks.get(id).map(|t| self.now < *t + self.cfg.params.want_ttl_ms).unwrap_or(false)
@@ -1195,6 +1223,8 @@ impl Node {
             self.progress.remove(&id);
             // What we no longer hold we no longer read: a root's index, a collection's pieces.
             self.roots.remove(&id);
+            self.unordered.remove(&id);
+            self.moved.remove(&id);
             if self.pieces.remove(&id).is_some() {
                 self.collections.retain(|_, s| *s != id);
             }
@@ -1277,6 +1307,8 @@ impl Node {
         self.collections.clear();
         self.relayed.clear();
         self.pieces.clear();
+        self.unordered.clear();
+        self.moved.clear();
         self.own_manifests.clear();
         self.renditions.clear();
         self.renditions_due.clear();
@@ -1987,6 +2019,22 @@ impl Node {
         index
     }
 
+    /// Where each piece plays: its place in the list of its collection manifest, or 0 in a
+    /// collection without an order, whose every piece is first. The order of asking, uploading
+    /// and passing goes by it (PROTOCOL.md §4).
+    fn places(&self) -> BTreeMap<ShortId, u16> {
+        let mut places = BTreeMap::new();
+        for (m, list) in &self.pieces {
+            let ordered = !self.unordered.contains(m);
+            for (k, id) in list.iter().enumerate() {
+                let k = if ordered { k as u16 } else { 0 };
+                let e = places.entry(*id).or_insert(k);
+                *e = (*e).min(k);
+            }
+        }
+        places
+    }
+
     /// What we ask for in one GOSSIP: manifests, renditions and anything else by name, and the
     /// pieces of a manifest we hold as sets, one per granted holder and phase (open asks have
     /// none). Twenty pieces of one collection take one entry rather than twenty spread over three
@@ -1997,7 +2045,7 @@ impl Node {
         let ids = self.wants_to_ask(new_only);
         let index = if self.rounds_are_dear() { self.piece_index() } else { BTreeMap::new() };
         let mut singles = Vec::new();
-        let mut groups: BTreeMap<(ShortId, NodeId, u8), Vec<u16>> = BTreeMap::new();
+        let mut groups: BTreeMap<SetKey, Vec<u16>> = BTreeMap::new();
         for id in ids {
             let (grant, phase) = self.grants.get(&id).map(|(h, _, p)| (*h, *p)).unwrap_or((NodeId::NONE, 0));
             // An announcer marks what its own followers asked for: an ask for listeners, which a
@@ -2018,8 +2066,40 @@ impl Node {
             budget -= 13;
             want.push(e);
         }
+        // Which sets fit (§4, FEASIBILITY.md §19). Every collection gets one before any gets a
+        // second: in the order of manifest ids the sets of the lowest ids and their grants filled
+        // the budget round after round, and one announcer asked three times in 26 minutes for a
+        // source whose manifest id sorted last. Collections in progress, a piece of which arrived
+        // in the last `T_want_min` or is granted, go before the others: what is flowing is not
+        // asked for, so a collection in progress gives up its place once its uploads run, and as
+        // many collections are in flight as arrive; one that stopped arriving takes turns again.
+        // Asked for side by side, twelve albums of a band L network shared its uploads and each
+        // could be played through only later. Within that, the earliest place first (§2), then
+        // the one asked for longest ago.
+        let asked = |m: &ShortId, ks: &[u16]| -> Millis {
+            let list = self.pieces.get(m);
+            ks.iter().filter_map(|k| list.and_then(|l| l.get(*k as usize))).map(|id| self.progress.get(id).map(|p| p.last_want).unwrap_or(0)).min().unwrap_or(0)
+        };
+        let first = |m: &ShortId, ks: &[u16]| if self.unordered.contains(m) { 0 } else { ks.iter().copied().min().unwrap_or(u16::MAX) };
+        let window = self.cfg.params.t_want_min_ms;
+        let recent = |t: Millis| t != 0 && now < t + window;
+        let moving: BTreeSet<ShortId> = groups
+            .keys()
+            .map(|g| g.0)
+            .filter(|m| {
+                self.moved.get(m).map(|t| recent(*t)).unwrap_or(false)
+                    || self.pieces.get(m).map(|l| l.iter().any(|id| self.grants.contains_key(id) || self.progress.get(id).map(|p| recent(p.last_progress)).unwrap_or(false))).unwrap_or(false)
+            })
+            .collect();
+        let mut order: Vec<(u16, Millis, SetKey)> = groups.iter().map(|(g, ks)| (first(&g.0, ks), asked(&g.0, ks), *g)).collect();
+        order.sort_unstable();
+        let mut seen = BTreeSet::new();
+        let mut order: Vec<(bool, bool, usize, SetKey)> = order.into_iter().enumerate().map(|(i, (_, _, g))| (!seen.insert(g.0), !moving.contains(&g.0), i, g)).collect();
+        order.sort_unstable();
         let mut sets = Vec::new();
-        'groups: for ((m, grant, phase), mut ks) in groups {
+        'groups: for (_, _, _, g) in order {
+            let (m, grant, phase) = g;
+            let mut ks = groups.remove(&g).unwrap_or_default();
             for set in PieceSet::cover(m, &mut ks) {
                 if budget < WANT_SET_BYTES {
                     break 'groups;
@@ -2223,18 +2303,23 @@ impl Node {
                 .collect();
             ids.into_iter().filter(|id| !self.grants.get(id).map(|(h, _, _)| busy_holders.contains(h)).unwrap_or(false)).collect()
         };
-        // Ask first for what serves the most listeners per byte (Smith's rule, as in the
-        // carousel): a holder uploads one object at a time, so the order of asking is the order
-        // of arriving, and a small object must not wait behind a large one of the same source.
+        // Ask first for the earlier place (§4): a holder uploads one object at a time, so the
+        // order of asking is the order of arriving, and a listener plays a collection from its
+        // first piece. Among equal places, the most listeners per byte first (Smith's rule, as
+        // in the carousel), so that a small object does not wait behind a large one. Most
+        // listeners per byte first put a source's speech before the music it plays between, and
+        // a band O town could start playing eight minutes later (FEASIBILITY.md §19).
         let mut ids = ids;
         let key = |id: &ShortId| {
             let listeners = self.carriers.iter().filter_map(|c| c.carousel.as_ref()).map(|k| k.wanted_by(id)).max().unwrap_or(0).max(1) as u128;
             let bytes = self.store.entry(id).and_then(|e| e.len()).unwrap_or(1).max(1) as u128;
             (listeners, bytes)
         };
+        let places = self.places();
+        let place = |id: &ShortId| places.get(id).copied().unwrap_or(0);
         ids.sort_by(|a, b| {
             let ((la, ba), (lb, bb)) = (key(a), key(b));
-            (lb * ba).cmp(&(la * bb)).then(a.cmp(b))
+            place(a).cmp(&place(b)).then((lb * ba).cmp(&(la * bb))).then(a.cmp(b))
         });
         ids
     }
@@ -2882,6 +2967,12 @@ impl Node {
         // A manifest we asked for: what it names is the rest of that ask (PROTOCOL.md §4).
         let asked = self.progress.get(&id).map(|p| p.last_want != 0).unwrap_or(false);
         self.progress.remove(&id);
+        let now = self.now;
+        for (m, list) in &self.pieces {
+            if list.contains(&id) {
+                self.moved.insert(*m, now);
+            }
+        }
         // A grant ends when its object arrives.
         self.repair_phases.remove(&id);
         let granted = self.grants.get(&id).copied();
@@ -3049,10 +3140,16 @@ impl Node {
             }
             nb.unread_sets.retain(|p| p.manifest != short);
         }
+        let ordered = col.kind != CollectionKind::Singles;
+        if ordered {
+            self.unordered.remove(&short);
+        } else {
+            self.unordered.insert(short);
+        }
         for car in self.carriers.iter_mut().filter_map(|c| c.carousel.as_mut()) {
             car.add_manifest(short, new);
             for (k, id) in list.iter().enumerate() {
-                car.set_rank(*id, k as u16);
+                car.set_rank(*id, if ordered { k as u16 } else { 0 });
             }
         }
         self.pieces.insert(short, list);
@@ -3140,6 +3237,8 @@ impl Node {
         if self.collections.values().any(|v| *v == s) {
             return;
         }
+        self.unordered.remove(&s);
+        self.moved.remove(&s);
         self.pieces.remove(&s);
         for c in self.carriers.iter_mut() {
             if let Some(car) = c.carousel.as_mut() {
@@ -3345,7 +3444,7 @@ impl Node {
                     let queued = c.upload_queue.iter().any(|u| u.object == *w && u.to == g.node);
                     if !active && !queued && !granted.iter().any(|u| u.object == *w) {
                         let manifest = self.store.entry(w).map(|e| e.kind().is_manifest()).unwrap_or(false);
-                        granted.push(Upload { object: *w, to: g.node, start_at: now, started: false, block: 0, esi: 0, list: None, phase: *phase & PHASE_MASK, manifest });
+                        granted.push(Upload { object: *w, to: g.node, start_at: now, started: false, block: 0, esi: 0, list: None, phase: *phase & PHASE_MASK, manifest, order: 0 });
                     }
                 } else if grant.is_none() {
                     // Open ask: offer, unless we are already uploading it to this announcer.
@@ -3366,15 +3465,18 @@ impl Node {
                     self.offers.retain(|(o, a, _)| !(o == w && *a == g.node));
                 }
             }
-            // What we were granted at once we upload smallest first, and among equal sizes in
-            // the order of the collection: Smith's rule as far as a holder can know it. The
-            // listeners of the pieces of one collection are about the same, so the size decides;
-            // a set grant that went in the collection's order put a 42 kB track before every
-            // 22 kB bulletin of the same source (FEASIBILITY.md §14).
+            // What we were granted we upload the earlier place first, whichever grant brought it,
+            // and among equal places smallest first (§4): a listener plays a collection from its
+            // first piece. Lined up behind what each earlier grant brought, the first piece of a
+            // programme went after 33 later ones (FEASIBILITY.md §19). Anything that is no
+            // piece, and every piece of singles, is first.
             if !granted.is_empty() {
-                let index = self.piece_index();
-                let key = |u: &Upload| (self.store.entry(&u.object).and_then(|e| e.len()).unwrap_or(u32::MAX), index.get(&u.object).map(|(_, k)| *k).unwrap_or(u16::MAX));
-                granted.sort_by_key(key);
+                let places = self.places();
+                for u in granted.iter_mut() {
+                    let len = self.store.entry(&u.object).and_then(|e| e.len()).unwrap_or(u32::MAX);
+                    u.order = ((places.get(&u.object).copied().unwrap_or(0) as u64) << 32) | len as u64;
+                }
+                granted.sort_by_key(|u| u.order);
                 let own = self.announcer_of(i);
                 // A root manifest brings the collection manifests new in it, right after it: the
                 // announcer reads them only once it holds the root.
@@ -3385,7 +3487,7 @@ impl Node {
                         if !granted.iter().any(|x| x.object == s) && !all.iter().any(|x: &Upload| x.object == s) {
                             self.granted_to_us.insert((s, u.to), now);
                             self.stats.follow_ups_sent += 1;
-                            all.push(Upload { object: s, to: u.to, start_at: now, started: false, block: 0, esi: 0, list: None, phase: u.phase, manifest: true });
+                            all.push(Upload { object: s, to: u.to, start_at: now, started: false, block: 0, esi: 0, list: None, phase: u.phase, manifest: true, order: 0 });
                         }
                     }
                 }
@@ -3626,7 +3728,7 @@ impl Node {
                     }
                     _ if c.upload_queue.iter().any(|u| u.object == n.object && u.to == n.node) => {}
                     _ => {
-                        c.add_upload(Upload { object: n.object, to: n.node, start_at, started: false, block: n.block, esi: 0, list: Some(list), phase, manifest: false }, true, NodeId::NONE);
+                        c.add_upload(Upload { object: n.object, to: n.node, start_at, started: false, block: n.block, esi: 0, list: Some(list), phase, manifest: false, order: 0 }, true, NodeId::NONE);
                         self.stats.repairs_queued += 1;
                     }
                 }

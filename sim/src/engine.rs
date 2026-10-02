@@ -603,6 +603,19 @@ impl Engine {
         self.push(end, Ev::TxEnd(id));
     }
 
+    /// `OX`: an offer reaching, or failing to reach, an announcer that wants what it offers.
+    fn trace_offer(&self, tx: &Transmission, offered: &[meshcast_core::ids::ShortId], j: usize, outcome: &str, by: usize) {
+        if offered.is_empty() || self.nodes[j].node.role(tx.carrier) != meshcast_core::node::Role::Announcer {
+            return;
+        }
+        for o in offered {
+            if self.nodes[j].node.wants_object(o) {
+                let by = if by == usize::MAX { String::from("-") } else { by.to_string() };
+                eprintln!("OX {} {} {} {:?} {} by={} meet={}", tx.start, tx.from, j, o, outcome, by, self.nodes[j].node.in_meeting(tx.carrier, tx.start));
+            }
+        }
+    }
+
     fn rx_dbm(&self, from: usize, to: usize, carrier: usize) -> f64 {
         let n = self.nodes.len();
         self.phys[carrier].tx_dbm - self.phys[carrier].pl0_db - self.loss[from * n + to] as f64
@@ -634,6 +647,11 @@ impl Engine {
         let mut delivered = 0u64;
         let candidates = tx.candidates.clone();
         let decoded = Frame::decode(&tx.bytes).ok();
+        // What this frame offers, as its sender means it, for the offer trace.
+        let offered: Vec<meshcast_core::ids::ShortId> = match (&decoded, self.trace_grants) {
+            (Some(Frame::Gossip(g)), true) if g.announcer != g.node => self.nodes[tx.from].node.unpacked(g).have,
+            _ => Vec::new(),
+        };
         for (j, rx) in candidates {
             if !self.nodes[j].alive {
                 continue;
@@ -645,6 +663,7 @@ impl Engine {
                 if tx.upload_to == Some(j) {
                     self.metrics.upload_outcome[2] += 1;
                 }
+                self.trace_offer(&tx, &offered, j, "hd", usize::MAX);
                 continue;
             }
             let mut worst = f64::NEG_INFINITY;
@@ -717,9 +736,11 @@ impl Engine {
                 if tx.frame_type == FrameType::Bulk {
                     self.metrics.per_node_bulk[j].1 += 1;
                 }
+                self.trace_offer(&tx, &offered, j, "col", worst_from);
                 continue;
             }
             delivered += 1;
+            self.trace_offer(&tx, &offered, j, "ok", usize::MAX);
             if tx.upload_to == Some(j) {
                 self.metrics.upload_outcome[0] += 1;
                 if self.trace_grants {

@@ -56,7 +56,11 @@ pieces waits for: per follower and source, how long until the follower held the 
 source's objects and until it held all of them (the median of each, the 90th percentile of the
 second, and the share of pairs that never held all), with the mean number of frames sent of any
 kind; and where the last piece waited, when the follower's announcer held it and how much later
-the follower did, which tells a supply problem from a delivery problem. The cell report also
+the follower did, which tells a supply problem from a delivery problem. It also reports **playback**, per
+follower and collection it follows: when the follower held the collection's first piece, and the
+earliest time it could have started playing the collection there and played it to the end without
+waiting, given how long each piece plays (the latest of each piece's arrival less the playing time
+of the pieces before it). The cell report also
 breaks down collisions between uploads to one announcer by cause. `--tracks N --mix snac-music:42` splits a source's content into N pieces of 42 kB; the
 object-size sweep of `docs/FEASIBILITY.md` §13 is built from those two options. `dynamics` also
 prints how many manifest corrections followers sent to their announcer (`docs/PROTOCOL.md` §2).
@@ -80,7 +84,9 @@ new episode of it.
 - `MESHCAST_TRACE_GRANTS=1` writes one line per event to stderr: `GA` open ask, `GT` grant, `GH`
   grant heard by its holder, `OF` offer, `UP` upload frame sent, `UO` upload frame received by
   its announcer, `UC` upload frame collided there, `BO` other symbol of an object an announcer
-  wants, `MA` manifest announcement, `OC` object completed, and at the end `MISSING` for every
+  wants, `MA` manifest announcement, `OC` object completed, `OX` an offer reaching (`ok`) or not reaching
+  (`col` collided, with the interferer; `hd` the announcer was sending) an announcer that wants
+  what it offers, and at the end `MISSING` for every
   object a follower lacks (with the announcers it hears and who listed the object, to tell
   whether an excursion or a named repair was possible) and `NOLEN` for every want whose length
   the wanter does not know.

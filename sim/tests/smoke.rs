@@ -622,7 +622,7 @@ fn a_follower_of_one_collection_carries_only_that_collection() {
     // and keeps the pieces and cover of its collection, and nothing of the other (PROTOCOL.md §2).
     let mut s = spec(BulkPreset::GfskO, vec![(0.0, 0.0), (1000.0, 0.0), (500.0, 0.0)], vec![0], vec![2], 3.0);
     s.tracks = 4;
-    s.collections = meshcast_sim::scenario::CollectionSpec { per_source: 2, follow: 1, cover_kb: 4 };
+    s.collections = meshcast_sim::scenario::CollectionSpec { per_source: 2, follow: 1, cover_kb: 4, singles: false };
     let mut b = build(&s, Params::default());
     b.engine.nodes[2].node.unfollow(b.sources[0].channel);
     b.engine.run(3 * 3_600_000, 600_000);
@@ -778,7 +778,7 @@ fn listeners_of_one_album_are_relayed_to() {
     s.sources = 3;
     s.tracks = 20;
     s.mix = meshcast_sim::scenario::parse_mix("snac-music:42,snac-speech:22").unwrap();
-    s.collections = meshcast_sim::scenario::CollectionSpec { per_source: 4, follow: 1, cover_kb: 0 };
+    s.collections = meshcast_sim::scenario::CollectionSpec { per_source: 4, follow: 1, cover_kb: 0, singles: false };
     let mut b = build(&s, Params::default());
     b.engine.run((s.hours * 3.6e6) as u64, 600_000);
     let (mut pairs, mut missing) = (0, 0);
@@ -814,4 +814,100 @@ fn two_uploaders_under_a_duty_cycle_take_turns() {
         }
     }
     assert!(last < 25 * 60_000, "the last listener had the hour after {:.1} min", last as f64 / 60_000.0);
+}
+
+/// A source with one station between it and a follower, and `grant` frames from that station.
+fn granted_world(tracks: usize, mix: &str, singles: bool) -> (meshcast_sim::scenario::Built, Vec<meshcast_core::ids::ShortId>) {
+    let mut s = spec(BulkPreset::GfskO, vec![(0.0, 0.0), (1000.0, 0.0), (500.0, 0.0)], vec![0], vec![2], 1.0);
+    s.tracks = tracks;
+    s.mix = meshcast_sim::scenario::parse_mix(mix).unwrap();
+    s.collections.singles = singles;
+    let mut b = build(&s, Params::default());
+    b.engine.run(3_600_000, 600_000);
+    let mut pieces: Vec<(usize, meshcast_core::ids::ShortId)> = b.tracks.iter().map(|(id, t)| (t.index, *id)).collect();
+    pieces.sort();
+    (b, pieces.into_iter().map(|(_, id)| id).collect())
+}
+
+fn grant_frame(station: meshcast_core::ids::NodeId, to: meshcast_core::ids::NodeId, ids: &[meshcast_core::ids::ShortId]) -> meshcast_core::frame::Frame {
+    use meshcast_core::frame::{Frame, Gossip};
+    Frame::Gossip(Gossip { node: station, announcer: station, announcer_colour: 0, announcer_colours: 1, heard: Vec::new(), have: Vec::new(), have_sets: Vec::new(), want: ids.iter().map(|id| (*id, to, 0)).collect(), sets: Vec::new() })
+}
+
+#[test]
+fn a_holder_uploads_earlier_pieces_first() {
+    // A listener plays a collection from its first piece, so the earlier piece is needed first,
+    // whichever grant brought it. A holder lined up what each grant brought behind what it already
+    // had, and the first piece of a programme went after 33 later ones (FEASIBILITY.md §19).
+    let (mut b, p) = granted_world(4, "snac-music:42", false);
+    let station = b.engine.nodes[2].node.id();
+    let src = &mut b.engine.nodes[0].node;
+    let me = src.id();
+    let now = b.engine.now;
+    src.handle_frame(now, 1, &grant_frame(station, me, &[p[2], p[3]]), -60);
+    src.handle_frame(now, 1, &grant_frame(station, me, &[p[1]]), -60);
+    let order: Vec<_> = src.uploads(1).iter().map(|(id, _)| *id).collect();
+    assert_eq!(order, vec![p[2], p[1], p[3]], "piece 1 should go right after the running upload of piece 2");
+}
+
+#[test]
+fn a_holder_uploads_singles_smallest_first() {
+    // The pieces of singles have no order: every one is first, and among them the smallest goes
+    // first, as the carousel serves the most listeners per byte first (PROTOCOL.md §4). An album
+    // of the same pieces goes in its order.
+    for singles in [false, true] {
+        let (mut b, p) = granted_world(4, "snac-music:42,snac-speech:22", singles);
+        let station = b.engine.nodes[2].node.id();
+        let src = &mut b.engine.nodes[0].node;
+        let me = src.id();
+        let now = b.engine.now;
+        src.handle_frame(now, 1, &grant_frame(station, me, &p), -60);
+        let order: Vec<_> = src.uploads(1).iter().map(|(id, _)| *id).collect();
+        let want = if singles { vec![p[1], p[3], p[0], p[2]] } else { p.clone() };
+        assert_eq!(order, want, "singles {singles}: the upload order is wrong");
+    }
+}
+
+#[test]
+fn an_announcer_asks_for_every_collection_s_first_pieces() {
+    // Band L: an announcer asks in sets, four to a frame (PROTOCOL.md §3.3). In the order of
+    // manifest ids, the sets of the lowest ids filled every frame while they were wanted, and the
+    // pieces of a collection whose id sorted last were asked for three times in 26 minutes. Now
+    // every collection gets a set before any gets a second, collections in progress first, and
+    // once nothing has arrived for `T_want_min` none is in progress: two rounds name the first
+    // missing piece of every collection (FEASIBILITY.md §19).
+    let mut s = spec(BulkPreset::GfskL, vec![(0.0, 0.0), (300.0, 0.0), (150.0, 0.0)], vec![0], vec![2], 1.0);
+    s.tracks = 16;
+    s.mix = meshcast_sim::scenario::parse_mix("snac-music:14").unwrap();
+    s.collections.per_source = 8;
+    let mut b = build(&s, Params::default());
+    let manifests: Vec<_> = b.sources[0].collections.iter().map(|c| c.as_object().0.id.short()).collect();
+    let mut t = 0;
+    while !manifests.iter().all(|m| b.engine.nodes[2].node.holds(m)) {
+        t += 5_000;
+        assert!(t < 3_600_000, "the station should hold every collection manifest within an hour");
+        b.engine.run(t, 600_000);
+    }
+    // Nobody else holds the pieces now: the station keeps asking, and after `T_want_min` no
+    // collection is in progress any more.
+    b.engine.set_alive(0, false);
+    b.engine.run(t + 15 * 60_000, 600_000);
+    let mut lacking: Vec<Vec<meshcast_core::ids::ShortId>> = vec![Vec::new(); 8];
+    let mut by_index: Vec<(usize, meshcast_core::ids::ShortId)> = b.tracks.iter().map(|(id, tr)| (tr.index, *id)).collect();
+    by_index.sort();
+    for (k, id) in by_index {
+        if !b.engine.nodes[2].node.holds(&id) {
+            lacking[k / 2].push(id);
+        }
+    }
+    let open = lacking.iter().filter(|l| !l.is_empty()).count();
+    assert!(open > 4, "more collections than fit one frame should be wanted, {open} are");
+    let station = &mut b.engine.nodes[2].node;
+    let mut asked = station.ask_now();
+    asked.extend(station.ask_now());
+    for (c, l) in lacking.iter().enumerate() {
+        if let Some(first) = l.first() {
+            assert!(asked.contains(first), "collection {c}: its first missing piece was not asked for in two rounds");
+        }
+    }
 }
