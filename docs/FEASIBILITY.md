@@ -1917,3 +1917,153 @@ without made-up ids, no role changed after the first hour, as before. Against on
 claiming the maximum 96.5 % (92.8 %), each as good as §14 or a little better. The worst p90 moved
 by a few minutes either way, as a single publication in a single world does (band L without an
 attacker 12.0 → 15.6 minutes, band O under the flood 6.6 → 4.8).
+
+## 16. Collections
+
+A provider now publishes collections (PROTOCOL.md §2): a signed root manifest per channel names
+its albums, series and singles, each with a collection manifest that lists its pieces and is as
+authentic as the root that names it by its full hash, and with a cover, a JPEG object. A node
+follows a whole channel or single collections. In the simulator a source publishes its pieces as
+one series by default; `--collections`, `--follow-collections` and `--cover-kb` vary that
+(sim/README.md). Eight seeds per scenario, as before.
+
+### 16.1 What a second level costs to discover
+
+The first measurement, against main as #11 left it, put every collection manifest one round of
+asking behind its root: the band L neighbourhood took 13.8 minutes instead of 10.0, ESP-NOW 20.9
+instead of 13.8, the two clusters 21.3 instead of 17.5, the band L town 35.1 instead of 32.4. A
+trace of the neighbourhood's station showed the rounds: the roots at 5.3 minutes, their
+collection manifests at 8.7, the first piece at 12.3, where main had had the first piece at 8.8.
+On a hopping carrier an announcer asks only in the meeting dwell, every 1.7 minutes there, and
+each level took an open ask in one dwell and a grant in the next.
+
+### 16.2 A root brings what changed in it
+
+The root now flags the collection manifests that are new in it (`changed`), and a grant of the
+root covers those (PROTOCOL.md §4): a holder lists them with the root in the HAVE that offers it,
+an announcer that grants the root on that HAVE takes them as granted to the same holder in the
+same phase, and the holder uploads them right after the root, which the announcer must hold
+first to read them. In a smoke test the collection manifest otherwise reached the station 200
+seconds after its root. The first version let the holder upload what it held and the announcer
+count what the holder had listed at any time; in the ring of hidden uploaders that pushed the
+collisions at the station above the test's 2 % (2.1 %). Holder and announcer now go by the same
+frame, so they agree on whose phase an upload uses. That took the band L
+neighbourhood to 11.1 minutes, ESP-NOW to 14.9, the two clusters to 18.8 and the band L town to
+33.1, and tracing what was still left found the four rules of §15.
+
+### 16.3 Manifests first at the holder
+
+On top of §15, the 15 km² band L network was still 0.9 minutes slower than main. Per announcer, a
+collection manifest mostly arrived with its root, but in one world a holder granted a collection
+manifest at 15.1 minutes uploaded it at 20.9, after the pieces it had lined up before. Nothing of
+a collection can be read without its manifest, and a manifest is a few symbols, so a holder now
+uploads a manifest before the pieces it already lined up, after any repair (PROTOCOL.md §4). The
+band L town went from 31.3 to 30.4 minutes, the 15 km² network from 22.6 to 22.2.
+
+### 16.4 An ask answered in full
+
+In the living network with nodes coming and going, newcomers took longer: 21.5 minutes on average
+in band L instead of 13.7 on main, the slowest 50.4, and in band O 20.8 instead of 13.3, the
+slowest 64.8. A newcomer has to ask for everything, and each of its asks waited `T_want_min`: the
+root, then the collection manifest, then the pieces. What a manifest a follower asked for names
+is now the rest of that ask, asked for soon, after a random wait of up to `T_offer`, at most
+every `T_gossip_min` and only for what was never asked for (PROTOCOL.md §4). A manifest that came
+unasked, from a pass, changes nothing; asking soon after every manifest had cost the band O
+networks more than it saved (§15.3). Newcomers then caught up in 9.1 minutes in band L, the
+slowest in 22.2, and in 8.0 in band O, the slowest in 19.8: faster than on main. In the matrix it
+moved the band O networks by a few tenths either way and took LoRa from 47.2 to 46.0 minutes. It
+also changed one smoke test's world: a follower in the source's cell that asked for the root now
+asked for the pieces at once, its station passed them, and the edge of the next cell overheard
+them, so the excursion the test is about was no longer needed; in the test that neighbour no
+longer follows the channel.
+
+### 16.5 What an announcer asked for is about that announcer
+
+One band O world still had a newcomer that waited 65 minutes for one piece. Its announcer learned
+the channel's new root only an hour after it was published, though the newcomer held it from the
+first minute. A follower tells its announcer of a newer manifest (PROTOCOL.md §2), but not while
+the announcer is asking for that manifest itself, and the newcomer took its announcer to be
+asking: it had first followed another announcer, which had asked for the root, and what an
+announcer asks for was remembered for `want_ttl` whoever announced. Counted, 61 of the 69 times
+the newcomer saw its announcer behind, it held back for that reason. What a follower's announcer
+asked for and granted is now forgotten when it follows another one. That world's slowest newcomer
+then took 16 minutes. On main the rule changed nothing measurable: every cell of one announcer
+ran byte for byte as before, the 15 km² band O network went from 8.6 to 8.2 minutes, the band L
+town from 30.5 to 30.2, and newcomers stayed as they were.
+
+### 16.6 Following one collection, and covers
+
+Twenty pieces per source, an hour of mixed SNAC: one series, or four albums of five followed
+whole, or four albums of which each follower follows one at random, with and without a cover of
+16 kB for each album (an assumed size). Medians in minutes over the eight worlds: the first piece
+and all of it per follower and source, of what that follower follows; what a follower holds at
+the end; bulk frames.
+
+| Band O neighbourhood | First | All | Held | Frames |
+|---|---|---|---|---|
+| One series | 4.8 | 19.4 | 1,283 kB | 13,003 |
+| Four albums, followed whole | 4.9 | 22.4 | 1,283 kB | 13,092 |
+| One album each | 6.0 | **18.3** | **322 kB** | 13,200 |
+| Four albums with covers | 6.6 | 23.1 | 1,412 kB | 14,380 |
+| One album each, with its cover | 7.1 | 19.4 | 355 kB | 14,516 |
+
+| 15 km² | Band O: all, frames | Band L: all, frames, worst world delivered |
+|---|---|---|
+| One series | 34.1, 113,479 | 49.7, 326,415, 100 % |
+| Four albums, followed whole | 35.9, 117,262 | 57.9, 306,534, 100 % |
+| One album each | **23.1**, **90,992** | 52.0, 245,597, **86 %** |
+| Four albums with covers | 36.4, 128,053 | 64.2, 340,829, 100 % |
+| One album each, with its cover | 27.6, 98,386 | 67.8, 280,261, 86 % |
+
+A follower of one album of four holds a quarter, and where its cell is all it needs it has its
+album sooner, since the carousel passes fewer pieces for fewer listeners: 22 % fewer frames
+across 15 km² of band O. Its first piece comes later because it is the first of its own album,
+which may be the third the source uploads. Splitting a source into collections costs a little in
+itself, 1.3 to 3 minutes in the neighbourhoods and across 15 km² of band O, 8 across 15 km² of
+band L (the median piece 33.9 against 38.6 minutes there). A cover arrived after 5 to 9 minutes,
+after 18 to 26 across 15 km² of band L, and cost about 10 % more frames at 16 kB.
+
+The 86 % is the open question this leaves. In two band L worlds of 15 km², the listeners of one
+album in a far part of the network never got its pieces: their announcers and they held the root
+and wanted the pieces, and no announcer or holder within reach had them. Content crosses cells
+only through nodes that carry it (PROTOCOL.md §4), and with each listener carrying one album of
+four, the chain of carriers for an album broke where a whole channel's never did. Carrying every
+collection manifest of a followed channel, so that a cell can at least read what its neighbours
+list, changed nothing (86 to 87 %): what was missing was carriers of the pieces. Whether a node
+should relay collections of a channel it follows but does not listen to, and how much, is the
+other side of ABUSE.md's bounded generosity, and the next question.
+
+### 16.7 The nine scenarios, the living network, the attacks, the size sweep
+
+| Scenario | Main: median, bulk frames | Collections | Frames |
+|---|---|---|---|
+| Band O neighbourhood | 7.3 min, 6,596 | 7.5 min, 6,600 | 0 % |
+| Band L neighbourhood | 9.6 min, 13,991 | 9.6 min, 14,168 | +1 % |
+| Band O, 15 km² | 8.6 min, 38,366 | 8.7 min, 39,495 | +3 % |
+| Band L, 15 km² | 21.7 min, 114,942 | 22.2 min, 116,455 | +1 % |
+| ESP-NOW | 11.9 min, 23,057 | 12.0 min, 23,899 | +4 % |
+| Two clusters, band L | 16.4 min, 5,811 | 16.5 min, 5,910 | +2 % |
+| LoRa only, 5 km | 47.1 min, 1,322 | **46.0 min**, 1,322 | 0 % |
+| Town, band O | 14.1 min, 147,381 | 14.8 min, 151,252 | +3 % |
+| Town, band L | 30.5 min, 360,637 | 30.4 min, 364,398 | +1 % |
+
+Every scenario delivered 100 % in every world. A second level of manifest costs a few tenths of a
+minute and up to 4 % more frames where there are many cells, and nothing in a cell of its own;
+across 15 km² of band L five of eight worlds were slower, by up to 2.2 minutes, two faster.
+
+In the living network every world held every current window in both bands. A bulletin is now a
+root, a collection manifest and a piece, so uploads rose by 38 % (band L 181 to 251 per world,
+band O 79 to 109), each extra one a few symbols. Newcomers caught up faster than on main (§16.4).
+With nodes coming and going, more announcers stepped up where nodes went off and on, and
+followers changed announcer more often: role changes after the first hour 216 on average in band
+L against 193, the most in one world 380 against 276; without nodes coming and going none, as
+before. Against one false announcer 99.4 % was delivered (98.7 % in the worst world), against
+five 97.1 % (93.1 %), against five claiming the maximum 96.3 % (93.0 %), within a point of main.
+
+The size sweep of §13 moved by a few minutes either way at most sizes. In the band O
+neighbourhood it showed a pattern that main has too: a world either has all of an hour's music
+after about 20 minutes or 10 to 25 minutes later, and collections changed which worlds fall
+which way (at 70 kB, five of eight late instead of one). In a late world one of the two sources
+uploaded at a third of its rate for 25 minutes, deferring to a busy channel 4,576 times (41 times on
+main): the other source's frames, sent back to back, left it no gap. That is the chaining of §14.2
+between two holders rather than an announcer and a holder, and it is open.
