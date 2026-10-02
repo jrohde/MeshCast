@@ -55,6 +55,9 @@ pub struct Carousel {
     manifests: BTreeSet<ShortId>,
     /// Manifests not passed since they became new: each gets one pass without being asked.
     fresh: BTreeSet<ShortId>,
+    /// An object's place in its collection: among objects serving as many listeners per byte,
+    /// the earlier one goes first, because it plays first.
+    rank: BTreeMap<ShortId, u16>,
     /// Completed passes, the time the last pass ended, and how often in a row it was passed
     /// again without resting (the backoff level).
     passes: BTreeMap<ShortId, (u16, Millis, u8)>,
@@ -78,6 +81,7 @@ impl Carousel {
             wants: BTreeMap::new(),
             manifests: BTreeSet::new(),
             fresh: BTreeSet::new(),
+            rank: BTreeMap::new(),
             passes: BTreeMap::new(),
             asked_since: BTreeMap::new(),
             rebuilds: 0,
@@ -122,6 +126,11 @@ impl Carousel {
     pub fn add_manifest(&mut self, id: ShortId) {
         self.manifests.insert(id);
         self.fresh.insert(id);
+    }
+
+    /// `id` is piece `k` of a manifest this carousel serves.
+    pub fn set_rank(&mut self, id: ShortId, k: u16) {
+        self.rank.insert(id, k);
     }
 
     pub fn remove_manifest(&mut self, id: &ShortId) {
@@ -237,12 +246,13 @@ impl Carousel {
             }
         }
         // a before b when a.listeners / a.bytes > b.listeners / b.bytes, compared without division.
+        let rank = |id: &ShortId| self.rank.get(id).copied().unwrap_or(u16::MAX);
         scored.sort_by(|a, b| {
             let (l, r) = (a.0 as u128 * b.1 as u128, b.0 as u128 * a.1 as u128);
             if a.0 == u64::MAX || b.0 == u64::MAX {
                 b.0.cmp(&a.0).then(a.2.cmp(&b.2))
             } else {
-                r.cmp(&l).then(a.2.cmp(&b.2))
+                r.cmp(&l).then(rank(&a.2).cmp(&rank(&b.2))).then(a.2.cmp(&b.2))
             }
         });
         self.set = scored.into_iter().map(|(_, _, id)| id).collect();

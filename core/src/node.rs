@@ -9,7 +9,7 @@ use crate::carousel::{Carousel, CarouselParams, Item};
 use crate::discipline::{Accounting, Verdict};
 use crate::election::{step_up_order, Election, Transition};
 use crate::fatsoen::Fatsoen;
-use crate::frame::{AnnounceEntry, Beacon, Bulk, CarrierKind, CAP_IP, CAP_MAINS, Class, Frame, FrameType, Gossip, ManifestAnnounce, Nack, MAX_ANNOUNCE_ENTRIES, MAX_GOSSIP_IDS, MAX_NACK_RANGES, MAX_WANT, SYMBOL_SIZE};
+use crate::frame::{AnnounceEntry, Beacon, Bulk, CarrierKind, CAP_IP, CAP_MAINS, Class, Frame, FrameType, Gossip, ManifestAnnounce, Nack, PieceSet, WantSet, HAVE_BUDGET, HAVE_SET_BYTES, MAX_ANNOUNCE_ENTRIES, MAX_GOSSIP_IDS, MAX_NACK_RANGES, MAX_WANT, SYMBOL_SIZE, WANT_BUDGET, WANT_SET_BYTES};
 use crate::ids::{ChannelId, NodeId, ShortId};
 use crate::manifest::Manifest;
 use crate::rendition::RenditionTable;
@@ -138,6 +138,9 @@ pub struct Stats {
     pub manifest_corrections: u64,
     /// One-symbol NACKs sent to an announcer that had been silent, asking it to show it serves.
     pub probes: u64,
+    /// Want sets sent, and the pieces they asked for.
+    pub want_sets: u64,
+    pub want_set_pieces: u64,
     pub conflicts_noted: u64,
     /// New symbols that arrived for an object we had asked for and had an uploader assigned to,
     /// against ones that simply came past. The split says whether a node is being served or is
@@ -166,6 +169,9 @@ struct Neighbor {
     /// someone made up (ABUSE.md), so it counts towards our score only from the second.
     heard_count: u16,
     haves: BTreeSet<ShortId>,
+    /// HAVE sets of a manifest we do not hold yet: kept, and read once we adopt that manifest.
+    /// A follower about to fetch from another cell often lacks the manifest the sets refer to.
+    unread_sets: Vec<PieceSet>,
 }
 
 /// One manifest of a channel.
@@ -374,6 +380,9 @@ pub struct Node {
     following_since: Millis,
     /// When we last asked our announcer for one symbol as proof that it serves (§5.2).
     last_probe: Millis,
+    /// The pieces of every manifest we adopted, in the order it lists them: what a want set's
+    /// bitmap refers to (PROTOCOL.md §3.3).
+    pieces: BTreeMap<ShortId, Vec<ShortId>>,
     pub stats: Stats,
 }
 
@@ -454,6 +463,7 @@ impl Node {
             keep_until: 0,
             following_since: now,
             last_probe: 0,
+            pieces: BTreeMap::new(),
             stats,
             cfg,
             now,
@@ -1076,6 +1086,10 @@ impl Node {
         let chan = manifest.channel_id();
         let old = self.manifests.get(&chan).and_then(|i| i.adopted);
         self.manifests.insert(chan, ManifestInfo { adopted: Some(ManifestRef { seq: manifest.seq, short, len: meta.len }), announced: None });
+        if let Some(o) = old.filter(|o| o.short != short) {
+            self.pieces.remove(&o.short);
+        }
+        self.pieces.insert(short, manifest.objects.iter().map(|o| o.id.short()).collect());
         self.own_manifests.retain(|(c, _, _, _)| *c != chan);
         self.own_manifests.push((chan, short, manifest.seq, meta.len));
         if let Some(o) = old {
@@ -1098,6 +1112,9 @@ impl Node {
                     }
                 }
                 car.add_manifest(short);
+                for (k, o) in manifest.objects.iter().enumerate() {
+                    car.set_rank(o.id.short(), k as u16);
+                }
             }
         }
         self.prune_wants();
@@ -1111,6 +1128,7 @@ impl Node {
         self.store = MemStore::new(self.cfg.keep_bytes_below);
         self.follows.clear();
         self.manifests.clear();
+        self.pieces.clear();
         self.own_manifests.clear();
         self.renditions.clear();
         self.renditions_due.clear();
@@ -1724,7 +1742,7 @@ impl Node {
             self.last_report = self.now;
             return;
         }
-        let g = Gossip { node: self.cfg.id, announcer: self.gossip_announcer_field(), announcer_colour: self.announcer_colouring_field().0, announcer_colours: self.announcer_colouring_field().1, heard, have: Vec::new(), want: Vec::new() };
+        let g = Gossip { node: self.cfg.id, announcer: self.gossip_announcer_field(), announcer_colour: self.announcer_colouring_field().0, announcer_colours: self.announcer_colouring_field().1, heard, have: Vec::new(), have_sets: Vec::new(), want: Vec::new(), sets: Vec::new() };
         let cell = self.cell_carrier();
         self.enqueue(cell, Frame::Gossip(g));
         self.stats.conflict_reports_sent += 1;
@@ -1734,21 +1752,21 @@ impl Node {
 
     fn gossip_round(&mut self) {
         let announcing = self.is_announcing();
-        let mut have: Vec<ShortId> = Vec::new();
-        if announcing {
+        // What we have: an announcer what its carousel serves, in a rotation when it does not all
+        // fit; anyone else its own objects not yet carried. Pieces of a manifest go as sets.
+        let (have, have_sets) = if announcing {
             let ids: Vec<ShortId> = self.store.complete_ids().copied().collect();
-            if !ids.is_empty() {
-                for j in 0..ids.len().min(MAX_GOSSIP_IDS) {
-                    have.push(ids[(self.have_cursor + j) % ids.len()]);
-                }
-                self.have_cursor = (self.have_cursor + MAX_GOSSIP_IDS) % ids.len();
-            }
+            let (have, sets, taken) = self.pack_have(&ids, self.have_cursor);
+            self.have_cursor = self.have_cursor.wrapping_add(taken.max(1));
+            (have, sets)
         } else {
-            have = self.pending_ack.keys().filter(|id| self.store.has_complete(id)).take(MAX_GOSSIP_IDS).copied().collect();
-        }
-        let want = self.take_wants();
-        if !have.is_empty() || !want.is_empty() {
-            let g = Gossip { node: self.cfg.id, announcer: self.gossip_announcer_field(), announcer_colour: self.announcer_colouring_field().0, announcer_colours: self.announcer_colouring_field().1, heard: self.heard_field(), have, want };
+            let ids: Vec<ShortId> = self.pending_ack.keys().filter(|id| self.store.has_complete(id)).copied().collect();
+            let (have, sets, _) = self.pack_have(&ids, 0);
+            (have, sets)
+        };
+        let (want, sets) = self.take_ask();
+        if !have.is_empty() || !have_sets.is_empty() || !want.is_empty() || !sets.is_empty() {
+            let g = Gossip { node: self.cfg.id, announcer: self.gossip_announcer_field(), announcer_colour: self.announcer_colouring_field().0, announcer_colours: self.announcer_colouring_field().1, heard: self.heard_field(), have, have_sets, want, sets };
             self.enqueue(self.cell_carrier(), Frame::Gossip(g));
         }
         let mut whole = false;
@@ -1792,7 +1810,143 @@ impl Node {
 
     /// Ask only for what is not coming: objects with a symbol in the last stall interval are
     /// flowing and are left out. Each entry carries the granted uploader, if any.
-    fn take_wants(&mut self) -> Vec<(ShortId, NodeId, u8)> {
+    /// Whether a round of asking is dear: on a hopping carrier an announcer asks, and holders
+    /// offer to another cell, only in the meeting dwell, once a hop cycle. There a round asks for
+    /// everything, in sets; where asking is cheap a round asks for the most listeners per byte
+    /// first and comes back as soon as it has arrived, because then the order of arrival matters
+    /// more than the number of rounds (FEASIBILITY.md §14).
+    fn rounds_are_dear(&self) -> bool {
+        self.hops(self.cell_carrier())
+    }
+
+    /// Every piece of every manifest we adopted, with its manifest and its place in it.
+    fn piece_index(&self) -> BTreeMap<ShortId, (ShortId, u16)> {
+        let mut index = BTreeMap::new();
+        for (m, list) in &self.pieces {
+            for (k, id) in list.iter().enumerate() {
+                index.entry(*id).or_insert((*m, k as u16));
+            }
+        }
+        index
+    }
+
+    /// What we ask for in one GOSSIP: manifests, renditions and anything else by name, and the
+    /// pieces of a manifest we hold as sets, one per granted holder and phase (open asks have
+    /// none). Twenty pieces of one collection take one entry rather than twenty spread over three
+    /// rounds, for a follower asking its announcer and for an announcer asking holders alike
+    /// (PROTOCOL.md §3.3, FEASIBILITY.md §14). What does not fit waits for the next round.
+    fn take_ask(&mut self) -> (Vec<(ShortId, NodeId, u8)>, Vec<WantSet>) {
+        let now = self.now;
+        let ids = self.wants_to_ask();
+        let index = if self.rounds_are_dear() { self.piece_index() } else { BTreeMap::new() };
+        let mut singles = Vec::new();
+        let mut groups: BTreeMap<(ShortId, NodeId, u8), Vec<u16>> = BTreeMap::new();
+        for id in ids {
+            let (grant, phase) = self.grants.get(&id).map(|(h, _, p)| (*h, *p)).unwrap_or((NodeId::NONE, 0));
+            match index.get(&id) {
+                Some((m, k)) => groups.entry((*m, grant, phase)).or_default().push(*k),
+                None => singles.push((id, grant, phase)),
+            }
+        }
+        let mut budget = WANT_BUDGET;
+        let mut want = Vec::new();
+        for e in singles {
+            if budget < 13 || want.len() >= MAX_WANT {
+                break;
+            }
+            budget -= 13;
+            want.push(e);
+        }
+        let mut sets = Vec::new();
+        'groups: for ((m, grant, phase), mut ks) in groups {
+            for set in PieceSet::cover(m, &mut ks) {
+                if budget < WANT_SET_BYTES {
+                    break 'groups;
+                }
+                budget -= WANT_SET_BYTES;
+                sets.push(WantSet { set, grant, phase });
+            }
+        }
+        for (id, _, _) in &want {
+            self.progress.entry(*id).or_default().last_want = now;
+        }
+        for w in &sets {
+            let list = self.pieces.get(&w.set.manifest).cloned().unwrap_or_default();
+            for k in w.set.pieces() {
+                if let Some(id) = list.get(k as usize) {
+                    self.progress.entry(*id).or_default().last_want = now;
+                }
+            }
+        }
+        self.stats.want_sets += sets.len() as u64;
+        self.stats.want_set_pieces += sets.iter().map(|w| w.set.bits.count_ones() as u64).sum::<u64>();
+        (want, sets)
+    }
+
+    /// A HAVE list as ids and sets, from `skip` on in a rotation over `ids` when not all fit:
+    /// pieces of a manifest we hold go as sets, everything else by name. Returns how many of the
+    /// rotation's entries were taken.
+    fn pack_have(&self, ids: &[ShortId], skip: usize) -> (Vec<ShortId>, Vec<PieceSet>, usize) {
+        let index = if self.rounds_are_dear() { self.piece_index() } else { BTreeMap::new() };
+        let mut groups: BTreeMap<ShortId, Vec<u16>> = BTreeMap::new();
+        let mut singles = Vec::new();
+        for id in ids {
+            match index.get(id) {
+                Some((m, k)) => groups.entry(*m).or_default().push(*k),
+                None => singles.push(*id),
+            }
+        }
+        let mut entries: Vec<Result<PieceSet, ShortId>> = Vec::new();
+        for (m, mut ks) in groups {
+            entries.extend(PieceSet::cover(m, &mut ks).into_iter().map(Ok));
+        }
+        entries.extend(singles.into_iter().map(Err));
+        let (mut have, mut sets, mut budget, mut taken) = (Vec::new(), Vec::new(), HAVE_BUDGET, 0);
+        let n = entries.len();
+        for j in 0..n {
+            let e = &entries[(skip + j) % n];
+            let cost = if e.is_ok() { HAVE_SET_BYTES } else { 8 };
+            if cost > budget || (e.is_err() && have.len() >= MAX_GOSSIP_IDS) {
+                break;
+            }
+            budget -= cost;
+            taken += 1;
+            match e {
+                Ok(p) => sets.push(*p),
+                Err(id) => have.push(*id),
+            }
+        }
+        (have, sets, taken)
+    }
+
+    /// Diagnostic: `g` with its sets unpacked by our piece lists, as we would read it.
+    pub fn unpacked(&self, g: &Gossip) -> Gossip {
+        self.unpack_sets(g)
+    }
+
+    /// Sets in a received GOSSIP, unpacked into ids and WANT entries by the manifests we hold;
+    /// pieces of a manifest we do not hold (an older or newer version) are left out, and the
+    /// sender asks or offers again once it and we hold the same.
+    fn unpack_sets(&self, g: &Gossip) -> Gossip {
+        let mut e = g.clone();
+        for p in &g.have_sets {
+            if let Some(list) = self.pieces.get(&p.manifest) {
+                e.have.extend(p.pieces().filter_map(|k| list.get(k as usize).copied()));
+            }
+        }
+        for w in &g.sets {
+            if let Some(list) = self.pieces.get(&w.set.manifest) {
+                e.want.extend(w.set.pieces().filter_map(|k| list.get(k as usize).map(|id| (*id, w.grant, w.phase))));
+            }
+        }
+        e.have_sets.clear();
+        e.sets.clear();
+        e
+    }
+
+    /// What we want and should ask for now, most listeners per byte first. Lapses grants that
+    /// stopped bringing symbols on the way.
+    fn wants_to_ask(&mut self) -> Vec<ShortId> {
         let now = self.now;
         let stall = self.cfg.params.t_nack_stall_ms;
         let t_grant = self.cfg.params.t_grant_ms;
@@ -1856,21 +2010,24 @@ impl Node {
         if ids.is_empty() {
             return Vec::new();
         }
-        // One object per granted holder at a time: a holder whose grant is flowing is busy, so
-        // other objects granted to it are not asked for now.
-        let busy_holders: Vec<NodeId> = self
-            .grants
-            .iter()
-            .filter(|(id, _)| {
-                let p = self.progress.get(id).copied().unwrap_or_default();
-                p.last_progress != 0 && now < p.last_progress + stall
-            })
-            .map(|(_, (h, _, _))| *h)
-            .collect();
-        let ids: Vec<ShortId> = ids.into_iter().filter(|id| !self.grants.get(id).map(|(h, _, _)| busy_holders.contains(h)).unwrap_or(false)).collect();
-        if ids.is_empty() {
-            return Vec::new();
-        }
+        // Where rounds are dear a holder learns every object granted to it at once and uploads
+        // them one after the other in its phase; holding grants back until its current upload
+        // ended cost a round of asking per object. Where they are cheap a holder whose grant is
+        // flowing is not asked for a second object until it is done (FEASIBILITY.md §14).
+        let ids: Vec<ShortId> = if self.rounds_are_dear() {
+            ids
+        } else {
+            let busy_holders: Vec<NodeId> = self
+                .grants
+                .iter()
+                .filter(|(id, _)| {
+                    let p = self.progress.get(id).copied().unwrap_or_default();
+                    p.last_progress != 0 && now < p.last_progress + stall
+                })
+                .map(|(_, (h, _, _))| *h)
+                .collect();
+            ids.into_iter().filter(|id| !self.grants.get(id).map(|(h, _, _)| busy_holders.contains(h)).unwrap_or(false)).collect()
+        };
         // Ask first for what serves the most listeners per byte (Smith's rule, as in the
         // carousel): a holder uploads one object at a time, so the order of asking is the order
         // of arriving, and a small object must not wait behind a large one of the same source.
@@ -1884,12 +2041,7 @@ impl Node {
             let ((la, ba), (lb, bb)) = (key(a), key(b));
             (lb * ba).cmp(&(la * bb)).then(a.cmp(b))
         });
-        let n = ids.len().min(MAX_WANT);
-        let v: Vec<ShortId> = ids.into_iter().take(n).collect();
-        for id in &v {
-            self.progress.entry(*id).or_default().last_want = now;
-        }
-        v.into_iter().map(|id| match self.grants.get(&id) { Some((g, _, p)) => (id, *g, *p), None => (id, NodeId::NONE, 0) }).collect()
+        ids
     }
 
     /// Followers stay silent unless they have wants that the announcer is not serving.
@@ -1908,8 +2060,8 @@ impl Node {
             now >= p.last_progress.max(p.last_want) + stall
         });
         if (self.want_refresh || stalled) && now >= self.next_want_at {
-            let want = self.take_wants();
-            let g = Gossip { node: self.cfg.id, announcer: self.gossip_announcer_field(), announcer_colour: self.announcer_colouring_field().0, announcer_colours: self.announcer_colouring_field().1, heard: self.heard_field(), have: Vec::new(), want };
+            let (want, sets) = self.take_ask();
+            let g = Gossip { node: self.cfg.id, announcer: self.gossip_announcer_field(), announcer_colour: self.announcer_colouring_field().0, announcer_colours: self.announcer_colouring_field().1, heard: self.heard_field(), have: Vec::new(), have_sets: Vec::new(), want, sets };
             let cell = self.cell_carrier();
             self.enqueue(cell, Frame::Gossip(g));
             self.stats.wants_sent += 1;
@@ -2387,7 +2539,7 @@ impl Node {
 
     fn touch(&mut self, id: NodeId, rssi: i16) -> &mut Neighbor {
         let now = self.now;
-        let n = self.neighbors.entry(id).or_insert(Neighbor { last_heard: now, announcer: NodeId::NONE, score: 0, rssi, colour: 0, upload_phases: 1, heard_count: 0, haves: BTreeSet::new() });
+        let n = self.neighbors.entry(id).or_insert(Neighbor { last_heard: now, announcer: NodeId::NONE, score: 0, rssi, colour: 0, upload_phases: 1, heard_count: 0, haves: BTreeSet::new(), unread_sets: Vec::new() });
         n.last_heard = now;
         n.heard_count = n.heard_count.saturating_add(1);
         n.rssi = ((n.rssi as i32 + rssi as i32) / 2) as i16;
@@ -2538,6 +2690,22 @@ impl Node {
         // A newer announcement still pending stays wanted; one this manifest answers is done.
         let announced = info.announced.filter(|n| n.seq > m.seq);
         self.manifests.insert(chan, ManifestInfo { adopted: Some(ManifestRef { seq: m.seq, short, len }), announced });
+        if let Some(o) = old.filter(|o| o.short != short) {
+            self.pieces.remove(&o.short);
+        }
+        self.pieces.insert(short, m.objects.iter().map(|o| o.id.short()).collect());
+        // What neighbours said they have of this manifest before we could read it.
+        let list: Vec<ShortId> = m.objects.iter().map(|o| o.id.short()).collect();
+        for nb in self.neighbors.values_mut() {
+            for p in nb.unread_sets.iter().filter(|p| p.manifest == short) {
+                for k in p.pieces() {
+                    if let (Some(id), true) = (list.get(k as usize), nb.haves.len() < 512) {
+                        nb.haves.insert(*id);
+                    }
+                }
+            }
+            nb.unread_sets.retain(|p| p.manifest != short);
+        }
         if old.map(|o| o.short == short).unwrap_or(false) {
             // Re-adoption (e.g. follow() after the fact): only the wants below matter.
         } else {
@@ -2551,6 +2719,9 @@ impl Node {
                     }
                 }
                 car.add_manifest(short);
+                for (k, o) in m.objects.iter().enumerate() {
+                    car.set_rank(o.id.short(), k as u16);
+                }
             }
         }
         // You carry what you listen to: objects are registered (and thus collected from the air)
@@ -2600,6 +2771,14 @@ impl Node {
         if g.node == self.cfg.id {
             return;
         }
+        let unread: Vec<PieceSet> = g.have_sets.iter().filter(|p| !self.pieces.contains_key(&p.manifest)).copied().collect();
+        let unpacked;
+        let g = if g.have_sets.is_empty() && g.sets.is_empty() {
+            g
+        } else {
+            unpacked = self.unpack_sets(g);
+            &unpacked
+        };
         // A node that says it follows someone else is not listening for uploads: whatever we
         // were sending it, and the grants it gave us, ended with its role.
         if g.announcer != g.node {
@@ -2611,6 +2790,12 @@ impl Node {
             for h in &g.have {
                 if n.haves.len() < 512 {
                     n.haves.insert(*h);
+                }
+            }
+            for p in unread {
+                n.unread_sets.retain(|q| !(q.manifest == p.manifest && q.first == p.first));
+                if n.unread_sets.len() < 16 {
+                    n.unread_sets.push(p);
                 }
             }
         }
@@ -2727,6 +2912,7 @@ impl Node {
             } else if !from_announcer {
                 continue;
             }
+            let mut granted: Vec<Upload> = Vec::new();
             for (w, grant, phase) in g.want.iter() {
                 // A rendition we can make counts as held; it is made only when we are granted it,
                 // so that one node, not every capable one, spends the work.
@@ -2750,8 +2936,8 @@ impl Node {
                     }
                     let active = c.upload.as_ref().map(|u| u.object == *w && u.to == g.node).unwrap_or(false);
                     let queued = c.upload_queue.iter().any(|u| u.object == *w && u.to == g.node);
-                    if !active && !queued {
-                        c.add_upload(Upload { object: *w, to: g.node, start_at: now, started: false, block: 0, esi: 0, list: None, phase: *phase }, false);
+                    if !active && !queued && !granted.iter().any(|u| u.object == *w) {
+                        granted.push(Upload { object: *w, to: g.node, start_at: now, started: false, block: 0, esi: 0, list: None, phase: *phase });
                     }
                 } else if grant.is_none() {
                     // Open ask: offer, unless we are already uploading it to this announcer.
@@ -2772,6 +2958,20 @@ impl Node {
                     self.offers.retain(|(o, a, _)| !(o == w && *a == g.node));
                 }
             }
+            // What we were granted at once we upload smallest first, and among equal sizes in
+            // the order of the collection: Smith's rule as far as a holder can know it. The
+            // listeners of the pieces of one collection are about the same, so the size decides;
+            // a set grant that went in the collection's order put a 42 kB track before every
+            // 22 kB bulletin of the same source (FEASIBILITY.md §14).
+            if !granted.is_empty() {
+                let index = self.piece_index();
+                let key = |u: &Upload| (self.store.entry(&u.object).and_then(|e| e.len()).unwrap_or(u32::MAX), index.get(&u.object).map(|(_, k)| *k).unwrap_or(u16::MAX));
+                granted.sort_by_key(key);
+                let c = &mut self.carriers[i];
+                for u in granted {
+                    c.add_upload(u, false);
+                }
+            }
         }
     }
 
@@ -2790,8 +2990,9 @@ impl Node {
             return;
         }
         self.offers.retain(|(_, a, at)| !sendable(a, at));
-        let have: Vec<ShortId> = due.iter().map(|(o, _)| *o).take(MAX_GOSSIP_IDS).collect();
-        let g = Gossip { node: self.cfg.id, announcer: self.gossip_announcer_field(), announcer_colour: self.announcer_colouring_field().0, announcer_colours: self.announcer_colouring_field().1, heard: self.heard_field(), have, want: Vec::new() };
+        let ids: Vec<ShortId> = due.iter().map(|(o, _)| *o).collect();
+        let (have, have_sets, _) = self.pack_have(&ids, 0);
+        let g = Gossip { node: self.cfg.id, announcer: self.gossip_announcer_field(), announcer_colour: self.announcer_colouring_field().0, announcer_colours: self.announcer_colouring_field().1, heard: self.heard_field(), have, have_sets, want: Vec::new(), sets: Vec::new() };
         let cell = self.cell_carrier();
         self.enqueue(cell, Frame::Gossip(g));
     }
