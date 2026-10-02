@@ -36,8 +36,11 @@ all objects.
   manifest is adopted, the want is dropped). Only an object too large for the node to keep at
   all is tracked by count alone, as every large object is.
 - **Integrity**: v0 verifies the full object hash on completion and discards the object on
-  mismatch. v1 option: a Merkle root over symbol hashes in the manifest so a poisoned symbol can be
-  rejected on arrival (costs 4 bytes per symbol in the manifest).
+  mismatch, so one wrong symbol per pass can keep an object from completing. v1 verifies an object
+  in pieces as they arrive against its id, using the BLAKE3 tree the id already is the root of
+  (1024-byte chunks); the tree travels as its own object, named in the `integrity` slot of the
+  piece's entry (§2). A tag per symbol, as first drafted here at 4 bytes, would need at least
+  64 bits. Requirement and open questions: ABUSE.md, "Someone else's firmware".
 
 ### 1.1 Content types and the two audio codecs
 
@@ -972,7 +975,7 @@ arrives a few minutes later than it otherwise would. That is the entire user-vis
 
 - Authenticity: manifests are signed by the channel key; a node never plays or schedules an
   object that is not referenced by a valid manifest of a followed channel.
-- Integrity: full object hash; v1 per-symbol Merkle proof option.
+- Integrity: full object hash; v1 verifies chunk by chunk against the object's BLAKE3 tree (§1).
 - Confidentiality: per-channel symmetric encryption, opt-in.
 - Availability: any node can jam any radio; the protocol offers no defence beyond frequency
   agility and store-and-forward. Denial by flooding bogus BULK frames wastes the attacker's
@@ -983,6 +986,10 @@ arrives a few minutes later than it otherwise would. That is the entire user-vis
   stations").
 - Requests are not authenticated, and answering them costs far more than sending them. The full
   inventory, with amplification factors and the rule it asks for, is in [ABUSE.md](ABUSE.md).
+- Node ids are not authenticated either, and anyone can build a node that keeps none of these
+  rules. What such a node can do beyond requests (poisoned symbols, names it does not own, time,
+  ignoring the regulations, malformed frames, firmware images, what listeners give away) and what
+  the design must do about each is in ABUSE.md, "Someone else's firmware".
 
 ## 8. Parameters (draft, to be tuned in simulation)
 
