@@ -485,3 +485,125 @@ fn a_station_back_from_a_power_cut_keeps_its_library() {
     b.engine.run(3_600_000 + 600_000 + 120_000, 600_000);
     assert!(objects.iter().all(|id| b.engine.nodes[2].node.holds(id)), "a restart should not cost the station its library");
 }
+
+#[test]
+fn hidden_uploaders_take_turns_on_espnow_too() {
+    // The ring of `hidden_uploaders_take_turns_at_their_announcer`, at ESP-NOW's range (about
+    // 460 m at exponent 3). No regulator caps an ESP-NOW sender, so the announcer's receiver is
+    // the only limit, and uploads to it wait for the end of the meeting dwell and start together.
+    // Before phases were used where nothing caps the sender, 45 % of ESP-NOW's upload frames
+    // collided at their announcer (FEASIBILITY.md §15.1).
+    let mut positions: Vec<(f64, f64)> = (0..6)
+        .map(|i| {
+            let a = i as f64 * std::f64::consts::PI / 3.0;
+            (420.0 * a.cos(), 420.0 * a.sin())
+        })
+        .collect();
+    positions.push((0.0, 0.0));
+    for i in 0..6 {
+        positions.push((20.0 * (i as f64 - 2.5), 25.0));
+    }
+    let mut s = spec(BulkPreset::EspNow, positions, (0..6).collect(), vec![6], 3.0);
+    s.tracks = 4;
+    s.mix = meshcast_sim::scenario::parse_mix("snac-music:42,snac-speech:22").unwrap();
+    let mut b = build(&s, Params::default());
+    b.engine.run((s.hours * 3.6e6) as u64, 600_000);
+    let o = b.engine.metrics.upload_outcome;
+    let sent: u64 = o.iter().sum();
+    assert!(sent > 0, "no uploads happened");
+    assert!(o[1] * 100 <= sent * 2, "uploads collided at the station: {o:?}");
+    for (id, t) in &b.tracks {
+        for &f in &t.followers {
+            assert!(b.engine.metrics.completions.contains_key(&(f, *id)), "node {f} missing {id:?}");
+        }
+    }
+}
+
+#[test]
+fn a_source_keeps_its_own_uploads() {
+    // A source need not follow its own channel, so its own objects are not of interest to it.
+    // It dropped its queued uploads of them whenever it dropped what no manifest of interest
+    // names, as on adopting another channel's manifest (FEASIBILITY.md §15.2).
+    use meshcast_core::frame::{Frame, Gossip};
+    use meshcast_core::ids::NodeId;
+    let s = spec(BulkPreset::GfskO, vec![(0.0, 0.0), (1000.0, 0.0), (500.0, 0.0)], vec![0], vec![2], 1.0);
+    let mut b = build(&s, Params::default());
+    b.engine.run(3_600_000, 600_000);
+    let own: Vec<_> = b.tracks.keys().copied().collect();
+    let src = &mut b.engine.nodes[0].node;
+    let me = src.id();
+    let ann = NodeId(99);
+    let grant = Frame::Gossip(Gossip { node: ann, announcer: ann, announcer_colour: 0, announcer_colours: 1, heard: Vec::new(), have: Vec::new(), have_sets: Vec::new(), want: own.iter().map(|id| (*id, me, 0)).collect(), sets: Vec::new() });
+    let now = b.engine.now;
+    src.handle_frame(now, 1, &grant, -60);
+    let queued = |n: &meshcast_core::node::Node| own.iter().filter(|id| n.uploads(1).contains(&(**id, ann))).count();
+    assert_eq!(queued(src), own.len(), "both objects should be lined up for the announcer that granted them");
+    let chan = b.sources[0].channel;
+    src.unfollow(chan);
+    assert_eq!(queued(src), own.len(), "a source should keep its uploads of its own objects");
+}
+
+#[test]
+fn an_excursion_asks_for_what_it_fetched_names() {
+    // The two-cluster world of the `clusters` scenario (first seed's positions, world 2) in which
+    // a follower of the far cluster goes on an excursion. It asked the visited announcer for the
+    // manifest, had it seconds later, and waited `T_want_min` to ask for what the manifest named:
+    // the far cluster had everything after 55 minutes. On a visit only the visitor asks, so it
+    // now asks for that soon (FEASIBILITY.md §15.3).
+    let (size, radius_m, distance_m) = (10, 300.0, 1800.0);
+    let mut rng = meshcast_core::rng::Rng::new(1 ^ 0xC1);
+    let mut positions = Vec::new();
+    for cluster in 0..2 {
+        let cx = cluster as f64 * distance_m;
+        for _ in 0..size {
+            let r = radius_m * rng.unit().sqrt();
+            let a = rng.unit() * 2.0 * std::f64::consts::PI;
+            positions.push((cx + r * a.cos(), r * a.sin()));
+        }
+    }
+    let n = positions.len();
+    let mut s = spec(BulkPreset::GfskL, positions, vec![0], vec![n - 1], 2.0);
+    s.tracks = 8;
+    s.mix = meshcast_sim::scenario::parse_mix("snac-music:42,snac-speech:22").unwrap();
+    s.shadow_db = 6.0;
+    s.seed = 2;
+    let mut b = build(&s, Params::default());
+    b.engine.run((s.hours * 3.6e6) as u64, 600_000);
+    // The scenario measure: each object's median over its followers, averaged over the objects.
+    let m = &b.engine.metrics;
+    let mut medians = Vec::new();
+    for (id, t) in &b.tracks {
+        let mut c: Vec<u64> = t.followers.iter().map(|f| m.completions.get(&(*f, *id)).copied().unwrap_or(u64::MAX)).collect();
+        c.sort_unstable();
+        let k = c.len();
+        medians.push(if k % 2 == 1 { c[k / 2] as f64 } else { (c[k / 2 - 1] as f64 + c[k / 2] as f64) / 2.0 });
+    }
+    let mean = medians.iter().sum::<f64>() / medians.len() as f64 / 60_000.0;
+    assert!(mean < 50.0, "the median follower had an object after {mean:.1} min");
+}
+
+#[test]
+fn a_holder_serves_its_own_announcer_first() {
+    // A source granted objects by another cell's announcer and then by its own uploads its own
+    // announcer's next: its own cell is where it is heard best, and every follower there that gets
+    // an object becomes a holder for the neighbouring cells. In arrival order a source served
+    // another cell for ten minutes while its own cell waited (FEASIBILITY.md §15.2).
+    use meshcast_core::frame::{Frame, Gossip};
+    use meshcast_core::ids::NodeId;
+    let mut s = spec(BulkPreset::GfskO, vec![(0.0, 0.0), (1000.0, 0.0), (500.0, 0.0)], vec![0], vec![2], 1.0);
+    s.tracks = 3;
+    let mut b = build(&s, Params::default());
+    b.engine.run(3_600_000, 600_000);
+    let own: Vec<_> = b.tracks.keys().copied().collect();
+    let station = b.engine.nodes[2].node.id();
+    let src = &mut b.engine.nodes[0].node;
+    assert_eq!(src.announcer_of(1), station, "the source should follow the station");
+    let me = src.id();
+    let grant = |ann: NodeId, ids: &[meshcast_core::ids::ShortId]| Frame::Gossip(Gossip { node: ann, announcer: ann, announcer_colour: 0, announcer_colours: 1, heard: Vec::new(), have: Vec::new(), have_sets: Vec::new(), want: ids.iter().map(|id| (*id, me, 0)).collect(), sets: Vec::new() });
+    let now = b.engine.now;
+    let other = NodeId(99);
+    src.handle_frame(now, 1, &grant(other, &own[..2]), -60);
+    src.handle_frame(now, 1, &grant(station, &own[2..]), -60);
+    let order: Vec<NodeId> = src.uploads(1).iter().map(|(_, to)| *to).collect();
+    assert_eq!(order, vec![other, station, other], "the own announcer's grant should come right after the running upload");
+}

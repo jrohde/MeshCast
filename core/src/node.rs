@@ -114,6 +114,8 @@ pub struct Stats {
     /// Announcer side: offers granted, and grants that lapsed without progress.
     pub grants_given: u64,
     pub grants_lapsed: u64,
+    /// Follower asks for what a manifest just adopted named, sooner than `T_want_min`.
+    pub wants_rest: u64,
     /// How well we heard the holder, summed over grants that ended in completion and over grants
     /// that lapsed (dBm; divide by the counts).
     pub grant_rssi_completed: i64,
@@ -237,11 +239,17 @@ struct Progress {
 
 impl CarrierRt {
     /// Start an upload, or line it up behind the one in progress. Urgent work (a repair) goes to
-    /// the head of the queue. One place decides, so an upload can never be queued behind nothing.
-    fn add_upload(&mut self, u: Upload, urgent: bool) {
+    /// the head of the queue, and a grant from our own announcer `own` before any whole upload
+    /// to another cell's (PROTOCOL.md §4). One place decides, so an upload can never be queued
+    /// behind nothing.
+    fn add_upload(&mut self, u: Upload, urgent: bool, own: NodeId) {
         match (&self.upload, urgent) {
             (None, _) => self.upload = Some(u),
             (Some(_), true) => self.upload_queue.push_front(u),
+            (Some(_), false) if u.to == own => {
+                let at = self.upload_queue.iter().position(|q| q.to != own && q.list.is_none()).unwrap_or(self.upload_queue.len());
+                self.upload_queue.insert(at, u);
+            }
             (Some(_), false) => self.upload_queue.push_back(u),
         }
     }
@@ -378,6 +386,8 @@ pub struct Node {
     keep_until: Millis,
     /// When we began to follow our current announcer: evidence against it counts from then.
     following_since: Millis,
+    /// When to ask for the rest: what a manifest we just adopted named (`ask_rest_soon`).
+    ask_rest_at: Option<Millis>,
     /// When we last asked our announcer for one symbol as proof that it serves (§5.2).
     last_probe: Millis,
     /// The pieces of every manifest we adopted, in the order it lists them: what a want set's
@@ -463,6 +473,7 @@ impl Node {
             keep_until: 0,
             following_since: now,
             last_probe: 0,
+            ask_rest_at: None,
             pieces: BTreeMap::new(),
             stats,
             cfg,
@@ -757,6 +768,12 @@ impl Node {
         self.store.has_complete(id)
     }
 
+    /// Diagnostic: the uploads we are running or have lined up on `carrier`, as (object, to).
+    pub fn uploads(&self, carrier: usize) -> Vec<(ShortId, NodeId)> {
+        let c = &self.carriers[carrier];
+        c.upload.iter().chain(c.upload_queue.iter()).map(|u| (u.object, u.to)).collect()
+    }
+
     /// Diagnostic: every wanted object with its progress, grant and timers.
     pub fn want_report(&self) -> alloc::string::String {
         use core::fmt::Write;
@@ -1034,13 +1051,15 @@ impl Node {
     /// Drop wants for objects that no manifest of interest references any more (unfollowed
     /// channels, or objects that left a channel's manifest).
     fn prune_wants(&mut self) {
-        let keep = self.interesting_objects();
+        let mut keep = self.interesting_objects();
         let stale: Vec<ShortId> = self.wants.iter().filter(|id| !keep.contains(id)).copied().collect();
         for id in stale {
             self.wants.remove(&id);
             self.progress.remove(&id);
             self.grants.remove(&id);
         }
+        keep.extend(self.own_objects.iter().copied());
+        keep.extend(self.own_manifests.iter().map(|(_, s, _, _)| *s));
         self.offers.retain(|(o, _, _)| keep.contains(o));
         for c in self.carriers.iter_mut() {
             c.upload_queue.retain(|u| keep.contains(&u.object));
@@ -1579,13 +1598,20 @@ impl Node {
         }
     }
 
-    /// Whether an announcer on `carrier` divides its listening time into upload phases. Only
-    /// under polite access: there every transmission is short and followed by a pause, so an
-    /// upload is spread over minutes and hidden uploaders overlap. Under a duty cycle budgeted
-    /// per hour, or with no limit, an upload is a burst of seconds at the full rate; it rarely
+    /// Whether an announcer on `carrier` divides its listening time into upload phases. Under
+    /// polite access every transmission is short and followed by a pause, so an upload is spread
+    /// over minutes and hidden uploaders overlap. On a radio carrier no regulator caps, the
+    /// receiver is the only limit, so dividing its time costs nothing in total, and on a hopping
+    /// one uploads to an announcer all wait for the end of the meeting dwell and start together:
+    /// 45 % of ESP-NOW's upload frames collided at their announcer (FEASIBILITY.md §15). Under a
+    /// duty cycle budgeted per hour an upload is a burst of seconds at the full rate that rarely
     /// meets another, and holding it to one phase in K made it K times slower.
     fn divides_listening_time(&self, carrier: usize) -> bool {
-        self.carriers[carrier].p.band.map(|b| matches!(self.discipline.rule(b), Access::Polite { .. })).unwrap_or(false)
+        let c = &self.carriers[carrier];
+        match c.p.band {
+            Some(b) => matches!(self.discipline.rule(b), Access::Polite { .. }),
+            None => c.p.kind != CarrierKind::Ip,
+        }
     }
 
     /// The receiver divides its listening time among those it asked to speak: each grant carries
@@ -1686,6 +1712,7 @@ impl Node {
         self.repair_phases.clear();
         self.phase_heard = [0; MAX_UPLOAD_PHASES as usize];
         self.granted_to_us.clear();
+        self.ask_rest_at = None;
         self.offers.clear();
         self.corrections.clear();
         self.correction_at = None;
@@ -1764,7 +1791,7 @@ impl Node {
             let (have, sets, _) = self.pack_have(&ids, 0);
             (have, sets)
         };
-        let (want, sets) = self.take_ask();
+        let (want, sets) = self.take_ask(false);
         if !have.is_empty() || !have_sets.is_empty() || !want.is_empty() || !sets.is_empty() {
             let g = Gossip { node: self.cfg.id, announcer: self.gossip_announcer_field(), announcer_colour: self.announcer_colouring_field().0, announcer_colours: self.announcer_colouring_field().1, heard: self.heard_field(), have, have_sets, want, sets };
             self.enqueue(self.cell_carrier(), Frame::Gossip(g));
@@ -1835,9 +1862,9 @@ impl Node {
     /// none). Twenty pieces of one collection take one entry rather than twenty spread over three
     /// rounds, for a follower asking its announcer and for an announcer asking holders alike
     /// (PROTOCOL.md §3.3, FEASIBILITY.md §14). What does not fit waits for the next round.
-    fn take_ask(&mut self) -> (Vec<(ShortId, NodeId, u8)>, Vec<WantSet>) {
+    fn take_ask(&mut self, new_only: bool) -> (Vec<(ShortId, NodeId, u8)>, Vec<WantSet>) {
         let now = self.now;
-        let ids = self.wants_to_ask();
+        let ids = self.wants_to_ask(new_only);
         let index = if self.rounds_are_dear() { self.piece_index() } else { BTreeMap::new() };
         let mut singles = Vec::new();
         let mut groups: BTreeMap<(ShortId, NodeId, u8), Vec<u16>> = BTreeMap::new();
@@ -1946,7 +1973,7 @@ impl Node {
 
     /// What we want and should ask for now, most listeners per byte first. Lapses grants that
     /// stopped bringing symbols on the way.
-    fn wants_to_ask(&mut self) -> Vec<ShortId> {
+    fn wants_to_ask(&mut self, new_only: bool) -> Vec<ShortId> {
         let now = self.now;
         let stall = self.cfg.params.t_nack_stall_ms;
         let t_grant = self.cfg.params.t_grant_ms;
@@ -1989,7 +2016,7 @@ impl Node {
             .iter()
             .filter(|id| {
                 let p = self.progress.get(id).copied().unwrap_or_default();
-                if !(now >= p.last_progress + stall || p.last_progress == 0) {
+                if !(now >= p.last_progress + stall || p.last_progress == 0) || (new_only && p.last_want != 0) {
                     return false;
                 }
                 // An object that is nearly complete is repaired by NACK rather than re-asked
@@ -2059,15 +2086,38 @@ impl Node {
             let p = self.progress.get(id).copied().unwrap_or_default();
             now >= p.last_progress.max(p.last_want) + stall
         });
-        if (self.want_refresh || stalled) && now >= self.next_want_at {
-            let (want, sets) = self.take_ask();
+        let full = (self.want_refresh || stalled) && now >= self.next_want_at;
+        // What a manifest we just adopted names is the rest of an ask already made, not a new
+        // one: asked for soon, at most every `T_gossip_min`, and only what was never asked for.
+        // `T_want_min` spaces asking again for what has not come (PROTOCOL.md §3.3).
+        let rest = !full && self.ask_rest_at.map(|t| now >= t).unwrap_or(false) && now >= self.last_want_tx + self.cfg.params.t_gossip_min_ms;
+        if full || rest {
+            let (want, sets) = self.take_ask(rest);
+            self.ask_rest_at = None;
+            if want.is_empty() && sets.is_empty() && rest {
+                return;
+            }
             let g = Gossip { node: self.cfg.id, announcer: self.gossip_announcer_field(), announcer_colour: self.announcer_colouring_field().0, announcer_colours: self.announcer_colouring_field().1, heard: self.heard_field(), have: Vec::new(), have_sets: Vec::new(), want, sets };
             let cell = self.cell_carrier();
             self.enqueue(cell, Frame::Gossip(g));
             self.stats.wants_sent += 1;
-            self.want_refresh = false;
             self.last_want_tx = now;
-            self.next_want_at = now + self.cfg.params.t_want_min_ms;
+            if full {
+                self.want_refresh = false;
+                self.next_want_at = now + self.cfg.params.t_want_min_ms;
+            } else {
+                self.stats.wants_rest += 1;
+            }
+        }
+    }
+
+    /// A manifest we follow brought new wants while we are on an excursion: ask for them soon,
+    /// after a random wait of up to `T_offer`. At home our announcer passes new manifests
+    /// unasked and we ask on our usual cadence; on a visit only we ask, and every `T_want_min`
+    /// spent waiting to ask for what the manifest just fetched names keeps the visit longer.
+    fn ask_rest_soon(&mut self) {
+        if self.ask_rest_at.is_none() && !self.is_announcing() && self.excursion.is_some() {
+            self.ask_rest_at = Some(self.now + self.rng.below(self.cfg.params.t_offer_ms.max(1)));
         }
     }
 
@@ -2756,6 +2806,9 @@ impl Node {
                 }
             }
         }
+        if self.follows.contains(&chan) && !to_want.is_empty() {
+            self.ask_rest_soon();
+        }
         for id in to_want {
             self.add_want(id);
         }
@@ -2967,9 +3020,10 @@ impl Node {
                 let index = self.piece_index();
                 let key = |u: &Upload| (self.store.entry(&u.object).and_then(|e| e.len()).unwrap_or(u32::MAX), index.get(&u.object).map(|(_, k)| *k).unwrap_or(u16::MAX));
                 granted.sort_by_key(key);
+                let own = self.announcer_of(i);
                 let c = &mut self.carriers[i];
                 for u in granted {
-                    c.add_upload(u, false);
+                    c.add_upload(u, false, own);
                 }
             }
         }
@@ -3204,7 +3258,7 @@ impl Node {
                     }
                     _ if c.upload_queue.iter().any(|u| u.object == n.object && u.to == n.node) => {}
                     _ => {
-                        c.add_upload(Upload { object: n.object, to: n.node, start_at, started: false, block: n.block, esi: 0, list: Some(list), phase }, true);
+                        c.add_upload(Upload { object: n.object, to: n.node, start_at, started: false, block: n.block, esi: 0, list: Some(list), phase }, true, NodeId::NONE);
                         self.stats.repairs_queued += 1;
                     }
                 }
