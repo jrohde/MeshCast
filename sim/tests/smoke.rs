@@ -25,6 +25,7 @@ fn spec(bulk: BulkPreset, positions: Vec<(f64, f64)>, sources: Vec<usize>, stati
         sources_at: Some(sources),
         renditions: None,
         attack: None,
+        collections: Default::default(),
     }
 }
 
@@ -285,7 +286,10 @@ fn island(params: Params, lure: bool) -> (usize, u64) {
     // away in band L (range about 985 m). Only one follower of B, at 900 m from A, hears A at
     // all; nobody in A's cell hears B's cell. The stations do not hear each other. With `lure`, a
     // node 800 m from that follower poses as an announcer that has everything: 6 dB weaker for it than
-    // B, so it does not follow it by signal, but stronger than A.
+    // B, so it does not follow it by signal, but stronger than A. A's neighbour does not follow the
+    // channel, so nothing in A's cell asks and A passes nothing that the edge follower could
+    // overhear: an excursion is the only way in. (When it followed, its prompt ask after an asked-
+    // for manifest made A pass the pieces, and B's cell overheard them; PROTOCOL.md §4.)
     let mut positions = vec![(-400.0, 0.0), (-300.0, 50.0), (0.0, 0.0), (900.0, 0.0), (1350.0, 0.0), (1500.0, 100.0), (1550.0, -100.0)];
     if lure {
         positions.push((900.0, 800.0));
@@ -293,6 +297,8 @@ fn island(params: Params, lure: bool) -> (usize, u64) {
     let mut s = spec(BulkPreset::GfskL, positions, vec![0], vec![2, 4], 6.0);
     s.mix = meshcast_sim::scenario::parse_mix("snac-music:42,snac-speech:22").unwrap();
     let mut b = build(&s, params);
+    let chan = b.sources[0].channel;
+    b.engine.nodes[1].node.unfollow(chan);
     if lure {
         b.engine.attackers.push(meshcast_sim::engine::Attacker::new(7, 5_000, false, true, false));
         b.engine.nodes[7].mute = true;
@@ -302,7 +308,7 @@ fn island(params: Params, lure: bool) -> (usize, u64) {
     b.engine.run((s.hours * 3.6e6) as u64, 600_000);
     let mut missing = 0;
     for (id, t) in &b.tracks {
-        for &f in t.followers.iter().filter(|&&f| f != 7) {
+        for &f in t.followers.iter().filter(|&&f| f != 7 && f != 1) {
             if !b.engine.metrics.completions.contains_key(&(f, *id)) {
                 missing += 1;
             }
@@ -432,7 +438,7 @@ fn a_false_announcement_blocks_nothing() {
     // (PROTOCOL.md §2, ABUSE.md).
     use meshcast_core::frame::{AnnounceEntry, Frame, ManifestAnnounce};
     use meshcast_core::ids::{NodeId, ShortId};
-    use meshcast_core::manifest::Manifest;
+    use meshcast_core::manifest::{Collection, CollectionKind, Manifest};
     use meshcast_core::object::ContentType;
     let s = spec(BulkPreset::GfskO, vec![(0.0, 0.0), (1000.0, 0.0), (500.0, 0.0)], vec![0], vec![2], 4.0);
     let mut b = build(&s, Params::default());
@@ -456,9 +462,10 @@ fn a_false_announcement_blocks_nothing() {
     let o = meshcast_sim::scenario::track_object(s.seed, src.node, src.objects.len(), 20_000, ContentType::Speech);
     src.objects.push(o.clone());
     src.seq += 1;
-    let m = Manifest::sign(&src.key, src.seq, "Channel", src.objects.clone(), Vec::new(), None);
+    let series = Collection { cid: 1, kind: CollectionKind::Series, title: "Series".into(), pieces: src.objects.clone(), schedule: Vec::new() };
+    let m = Manifest::sign(&src.key, src.seq, "Channel", vec![series.reference(None, true)], None, None);
     let node = src.node;
-    b.engine.nodes[node].node.publish(&m, &[(o.meta(), None)]);
+    b.engine.nodes[node].node.publish(&m, &[series], &[(o.meta(), None)]);
     b.engine.poke(node);
     b.engine.run(3 * 3_600_000, 600_000);
     let seq = b.sources[0].seq;
@@ -606,4 +613,154 @@ fn a_holder_serves_its_own_announcer_first() {
     src.handle_frame(now, 1, &grant(station, &own[2..]), -60);
     let order: Vec<NodeId> = src.uploads(1).iter().map(|(_, to)| *to).collect();
     assert_eq!(order, vec![other, station, other], "the own announcer's grant should come right after the running upload");
+}
+
+#[test]
+fn a_follower_of_one_collection_carries_only_that_collection() {
+    // A provider publishes two collections, each with a cover; the follower follows one of them
+    // and the station serves both. You carry what you listen to: the follower fetches, collects
+    // and keeps the pieces and cover of its collection, and nothing of the other (PROTOCOL.md §2).
+    let mut s = spec(BulkPreset::GfskO, vec![(0.0, 0.0), (1000.0, 0.0), (500.0, 0.0)], vec![0], vec![2], 3.0);
+    s.tracks = 4;
+    s.collections = meshcast_sim::scenario::CollectionSpec { per_source: 2, follow: 1, cover_kb: 4 };
+    let mut b = build(&s, Params::default());
+    b.engine.nodes[2].node.unfollow(b.sources[0].channel);
+    b.engine.run(3 * 3_600_000, 600_000);
+    let (mine, other): (Vec<_>, Vec<_>) = b.tracks.iter().partition(|(_, t)| t.followers.contains(&1));
+    assert_eq!((mine.len(), other.len()), (3, 3), "two pieces and a cover each");
+    assert!(mine.iter().all(|(id, _)| b.engine.nodes[1].node.holds(id)), "the follower should hold its collection");
+    assert!(other.iter().all(|(id, _)| !b.engine.nodes[1].node.holds(id)), "the follower should hold nothing of the other collection");
+    assert!(b.tracks.keys().all(|id| b.engine.nodes[2].node.holds(id)), "the station should serve both");
+}
+
+#[test]
+fn a_new_root_keeps_a_collection_until_its_manifest_is_held() {
+    // A new root manifest names a new collection manifest. Until that is held, the follower keeps
+    // the pieces of the collection manifest it holds: a new root alone must not cost it its
+    // window, as an announcement alone must not (PROTOCOL.md §2). Here the new collection
+    // manifest never comes, and the window must stay.
+    use meshcast_core::frame::{AnnounceEntry, Frame, ManifestAnnounce};
+    use meshcast_core::ids::NodeId;
+    use meshcast_core::manifest::{Collection, CollectionKind, Manifest};
+    use meshcast_core::object::ContentType;
+    let s = spec(BulkPreset::GfskO, vec![(0.0, 0.0), (1000.0, 0.0), (500.0, 0.0)], vec![0], vec![2], 4.0);
+    let mut b = build(&s, Params::default());
+    b.engine.run(3_600_000, 600_000);
+    let window: Vec<_> = b.tracks.keys().copied().collect();
+    assert!(window.iter().all(|id| b.engine.nodes[1].node.holds(id)), "the follower should hold the window after an hour");
+    let src = &b.sources[0];
+    let mut pieces = src.objects.clone();
+    pieces.push(meshcast_sim::scenario::track_object(s.seed, src.node, pieces.len(), 20_000, ContentType::Speech));
+    let series = Collection { cid: 1, kind: CollectionKind::Series, title: "Series".into(), pieces, schedule: Vec::new() };
+    let root = Manifest::sign(&src.key, src.seq + 1, "Channel", vec![series.reference(None, true)], None, None);
+    let (meta, bytes) = root.as_object();
+    let chan = src.channel;
+    let f = &mut b.engine.nodes[1].node;
+    f.store.insert_complete(meta, Some(&bytes));
+    let now = b.engine.now;
+    let hint = Frame::ManifestAnnounce(ManifestAnnounce { node: NodeId(99), entries: vec![AnnounceEntry { channel: chan, manifest: meta.id.short(), seq: root.seq, len: meta.len }], whole: false });
+    f.handle_frame(now, 1, &hint, -60);
+    assert_eq!(f.manifest_state(&chan).map(|m| (m.0, m.2)), Some((root.seq, true)), "the new root should be adopted");
+    b.engine.run(3 * 3_600_000, 600_000);
+    assert!(window.iter().all(|id| b.engine.nodes[1].node.holds(id)), "a new root alone should not evict the window");
+}
+
+#[test]
+fn a_root_brings_the_collection_manifests_new_in_it() {
+    // A source publishes a new episode: a new collection manifest and a new root naming it. The
+    // root's grant covers the collection manifests new in it that its holder listed with it, so
+    // the station has both in one round of asking; asked for separately, the collection manifest
+    // cost a second round, on a hopping carrier a meeting dwell or two (PROTOCOL.md §4).
+    use meshcast_core::manifest::{Collection, CollectionKind, Manifest};
+    use meshcast_core::object::ContentType;
+    let s = spec(BulkPreset::GfskL, vec![(0.0, 0.0), (600.0, 0.0), (300.0, 0.0)], vec![0], vec![2], 3.0);
+    let mut b = build(&s, Params::default());
+    b.engine.run(3_600_000, 600_000);
+    let src = &mut b.sources[0];
+    let o = meshcast_sim::scenario::track_object(s.seed, src.node, src.objects.len(), 20_000, ContentType::Speech);
+    src.objects.push(o.clone());
+    src.seq += 1;
+    let series = Collection { cid: 1, kind: CollectionKind::Series, title: "Series".into(), pieces: src.objects.clone(), schedule: Vec::new() };
+    let root = Manifest::sign(&src.key, src.seq, "Channel", vec![series.reference(None, true)], None, None);
+    let node = src.node;
+    b.engine.nodes[node].node.publish(&root, std::slice::from_ref(&series), &[(o.meta(), None)]);
+    b.engine.poke(node);
+    b.engine.run(3 * 3_600_000, 600_000);
+    let at = |id: meshcast_core::ids::ShortId| b.engine.metrics.completions.get(&(2, id)).copied();
+    let (r, c) = (at(root.as_object().0.id.short()), at(series.as_object().0.id.short()));
+    let (Some(r), Some(c)) = (r, c) else { panic!("the station should have the root and the collection manifest: {r:?} {c:?}") };
+    assert!(c <= r + 10_000, "the collection manifest came {:.1} s after its root", (c as f64 - r as f64) / 1000.0);
+    assert!(b.engine.nodes[2].node.holds(&o.id.short()), "the new episode should arrive");
+}
+
+#[test]
+fn a_holder_uploads_manifests_first() {
+    // Nothing of a collection can be read without its manifest, and a manifest is a few symbols:
+    // a holder uploads a manifest it is granted before the pieces it already lined up, as the
+    // carousel passes manifests before anything else (PROTOCOL.md §4).
+    use meshcast_core::frame::{Frame, Gossip};
+    let mut s = spec(BulkPreset::GfskO, vec![(0.0, 0.0), (1000.0, 0.0), (500.0, 0.0)], vec![0], vec![2], 1.0);
+    s.tracks = 3;
+    let mut b = build(&s, Params::default());
+    b.engine.run(3_600_000, 600_000);
+    let pieces: Vec<_> = b.tracks.keys().copied().collect();
+    let manifest = b.sources[0].collections[0].as_object().0.id.short();
+    let station = b.engine.nodes[2].node.id();
+    let src = &mut b.engine.nodes[0].node;
+    let me = src.id();
+    let grant = |ids: &[meshcast_core::ids::ShortId]| Frame::Gossip(Gossip { node: station, announcer: station, announcer_colour: 0, announcer_colours: 1, heard: Vec::new(), have: Vec::new(), have_sets: Vec::new(), want: ids.iter().map(|id| (*id, me, 0)).collect(), sets: Vec::new() });
+    let now = b.engine.now;
+    src.handle_frame(now, 1, &grant(&pieces), -60);
+    src.handle_frame(now, 1, &grant(&[manifest]), -60);
+    let order: Vec<_> = src.uploads(1).iter().map(|(id, _)| *id).collect();
+    assert_eq!(order.len(), 4, "three pieces and the manifest should be lined up: {order:?}");
+    assert_eq!(order[1], manifest, "the manifest should come right after the running upload: {order:?}");
+}
+
+#[test]
+fn a_follower_asks_for_the_rest_of_its_ask() {
+    // A follower that has to ask for a manifest asks soon for what it names: that is the rest of
+    // the same ask. A channel followed again, after its objects were evicted, is the root, then
+    // its collection manifest, then the pieces, and each ask waited `T_want_min` (10 minutes):
+    // newcomers in a living network took 21 minutes instead of 14 (FEASIBILITY.md §16.4).
+    let s = spec(BulkPreset::GfskO, vec![(0.0, 0.0), (1000.0, 0.0), (500.0, 0.0)], vec![0], vec![2], 3.0);
+    let mut b = build(&s, Params::default());
+    let chan = b.sources[0].channel;
+    b.engine.run(3_600_000, 600_000);
+    let holds_all = |b: &meshcast_sim::scenario::Built| b.tracks.keys().all(|id| b.engine.nodes[1].node.holds(id));
+    assert!(holds_all(&b), "the follower should hold everything after an hour");
+    b.engine.nodes[1].node.unfollow(chan);
+    b.engine.run(3_600_000 + 600_000, 600_000);
+    assert!(b.tracks.keys().all(|id| !b.engine.nodes[1].node.holds(id)), "unfollowing should evict the channel");
+    let t = b.engine.now;
+    b.engine.nodes[1].node.follow(chan);
+    b.engine.poke(1);
+    b.engine.run(t + 12 * 60_000, 600_000);
+    assert!(holds_all(&b), "the follower should have the channel back within 12 minutes");
+}
+
+#[test]
+fn what_an_announcer_asked_for_is_forgotten_with_it() {
+    // A follower does not correct an announcer that is asking for a manifest itself (PROTOCOL.md
+    // §2). What its old announcer had asked for says nothing about a new one: remembered for
+    // `want_ttl`, it kept a follower from telling its new announcer of a root for an hour, and a
+    // newcomer waited 65 minutes for one piece (FEASIBILITY.md §16).
+    use meshcast_core::frame::{Frame, Gossip};
+    use meshcast_core::ids::ShortId;
+    let s = spec(BulkPreset::GfskO, vec![(0.0, 0.0), (400.0, 0.0), (800.0, 0.0), (1200.0, 0.0)], vec![0], vec![1, 3], 2.0);
+    let mut b = build(&s, Params::default());
+    b.engine.run(3_600_000, 600_000);
+    let old = b.engine.nodes[2].node.announcer_of(1);
+    let gone = (old.0 - 1) as usize;
+    assert!(gone == 1 || gone == 3, "the follower should follow a station");
+    let x = ShortId([0x42; 8]);
+    let ask = Frame::Gossip(Gossip { node: old, announcer: old, announcer_colour: 0, announcer_colours: 1, heard: Vec::new(), have: Vec::new(), have_sets: Vec::new(), want: vec![(x, meshcast_core::ids::NodeId::NONE, 0)], sets: Vec::new() });
+    let now = b.engine.now;
+    b.engine.nodes[2].node.handle_frame(now, 1, &ask, -60);
+    assert!(b.engine.nodes[2].node.announcer_asked_for(&x), "the follower should note its announcer's ask");
+    b.engine.set_alive(gone, false);
+    b.engine.run(now + 30 * 60_000, 600_000);
+    let new = b.engine.nodes[2].node.announcer_of(1);
+    assert!(new != old && !new.is_none(), "the follower should follow the other station");
+    assert!(!b.engine.nodes[2].node.announcer_asked_for(&x), "what the old announcer asked for should be forgotten");
 }

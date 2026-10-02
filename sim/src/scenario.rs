@@ -4,10 +4,10 @@ use std::collections::BTreeMap;
 
 use meshcast_core::ed25519_dalek::SigningKey;
 use meshcast_core::ids::{NodeId, ObjectId, ShortId};
-use meshcast_core::manifest::{Manifest, ManifestObject, ObjectRef, ScheduleEntry};
+use meshcast_core::manifest::{Collection, CollectionKind, CollectionRef, Manifest, ManifestObject, ObjectRef, ScheduleEntry};
 use meshcast_core::rendition::{Rendition, RenditionTable};
 use meshcast_core::node::NodeConfig;
-use meshcast_core::object::ContentType;
+use meshcast_core::object::{ContentType, ObjectMeta};
 use meshcast_core::params::Params;
 use meshcast_core::rng::Rng;
 use serde::Serialize;
@@ -60,6 +60,25 @@ pub struct RenditionSpec {
     pub players_render: bool,
 }
 
+/// How a source groups its objects into collections (PROTOCOL.md §2), and what its followers
+/// follow.
+#[derive(Clone, Debug, Serialize)]
+pub struct CollectionSpec {
+    /// Collections per source: its objects in order, split over this many.
+    pub per_source: usize,
+    /// How many of a source's collections each of its followers follows, chosen at random;
+    /// 0 means the whole channel.
+    pub follow: usize,
+    /// Size of each collection's cover in kB; 0 means none.
+    pub cover_kb: u32,
+}
+
+impl Default for CollectionSpec {
+    fn default() -> Self {
+        CollectionSpec { per_source: 1, follow: 0, cover_kb: 0 }
+    }
+}
+
 /// Nodes that flood their announcer with WANTs (docs/ABUSE.md).
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct AttackSpec {
@@ -97,6 +116,7 @@ pub struct ScenarioSpec {
     pub stations_at: Option<Vec<usize>>,
     pub sources_at: Option<Vec<usize>>,
     pub renditions: Option<RenditionSpec>,
+    pub collections: CollectionSpec,
     pub attack: Option<AttackSpec>,
 }
 
@@ -121,6 +141,8 @@ pub struct SourceInfo {
     pub key: SigningKey,
     pub channel: meshcast_core::ids::ChannelId,
     pub objects: Vec<ManifestObject>,
+    pub collections: Vec<Collection>,
+    pub covers: Vec<Option<ObjectRef>>,
     pub seq: u32,
 }
 
@@ -135,6 +157,17 @@ pub struct Built {
 pub fn track_object(seed: u64, source: usize, index: usize, len: u32, kind: ContentType) -> ManifestObject {
     let id = ObjectId::of(format!("track {source} {index} seed {seed}").as_bytes());
     ManifestObject { id, len, kind, title: format!("Track {index}") }
+}
+
+/// The report label of covers, which the whole-content measure leaves out.
+pub const COVER: &str = "cover";
+
+/// The cover of collection `k` of a source: `len` bytes standing in for a JPEG, named by their
+/// hash like any object, so that a node that keeps a small object's bytes can check them.
+pub fn cover_object(seed: u64, source: usize, k: usize, len: u32) -> (ObjectMeta, Vec<u8>) {
+    let tag = format!("cover {source} {k} seed {seed} ");
+    let bytes: Vec<u8> = tag.bytes().cycle().take(len as usize).collect();
+    (ObjectMeta { id: ObjectId::of(&bytes), len, kind: ContentType::Image }, bytes)
 }
 
 /// The Opus rendition of an audio object at `kbps`: as long as the codes play, at that rate.
@@ -246,6 +279,7 @@ pub fn build(spec: &ScenarioSpec, params: Params) -> Built {
     let mut tracks = BTreeMap::new();
     let mut source_infos = Vec::new();
     let mut rng2 = Rng::new(spec.seed ^ 0xF00D);
+    let mut rc = Rng::new(spec.seed ^ 0xC011);
     for &s in &sources {
         let mut kb = [0u8; 32];
         for (k, b) in kb.iter_mut().enumerate() {
@@ -269,31 +303,70 @@ pub fn build(spec: &ScenarioSpec, params: Params) -> Built {
             objects.push(o);
         }
         let schedule: Vec<ScheduleEntry> = objects.iter().enumerate().map(|(t, o)| ScheduleEntry { object: o.id.short(), start: 3600 * (t as u64 + 1), repeat: 0 }).collect();
+        // The objects in order, split over the source's collections; each its own cover.
+        let per = spec.collections.per_source.max(1);
+        let chunk = spec.tracks.div_ceil(per).max(1);
+        let mut collections = Vec::new();
+        let mut covers = Vec::new();
+        for (k, part) in objects.chunks(chunk).enumerate() {
+            let ids: Vec<ShortId> = part.iter().map(|o| o.id.short()).collect();
+            let kind = if per == 1 { CollectionKind::Series } else { CollectionKind::Album };
+            collections.push(Collection { cid: k as u32 + 1, kind, title: format!("Collection {k} of node {s}"), pieces: part.to_vec(), schedule: schedule.iter().filter(|e| ids.contains(&e.object)).cloned().collect() });
+            covers.push((spec.collections.cover_kb > 0).then(|| cover_object(spec.seed, s, k, spec.collections.cover_kb * 1024)));
+        }
         // The source names its renditions in a table; the manifest names the table.
         let (table_meta, table_bytes) = table.as_object();
         let table_ref = (!table.entries.is_empty()).then_some(ObjectRef { id: table_meta.id, len: table_meta.len });
-        let m = Manifest::sign_with_renditions(&key, 1, &format!("Channel of node {s}"), objects.clone(), schedule, None, table_ref);
+        let refs: Vec<CollectionRef> = collections.iter().zip(&covers).map(|(c, v)| c.reference(v.as_ref().map(|(v, _)| ObjectRef { id: v.id, len: v.len }), true)).collect();
+        let m = Manifest::sign(&key, 1, &format!("Channel of node {s}"), refs, None, table_ref);
         let chan = m.channel_id();
         if table_ref.is_some() {
             metas.push((table_meta, Some(&table_bytes[..])));
         }
-        engine.nodes[s].node.publish(&m, &metas);
+        for v in covers.iter().flatten() {
+            metas.push((v.0, Some(&v.1[..])));
+        }
+        engine.nodes[s].node.publish(&m, &collections, &metas);
+        // Followers of the channel, and of each collection: the whole channel, or a few of its
+        // collections chosen at random.
         let mut followers = Vec::new();
+        let mut of_collection: Vec<Vec<usize>> = vec![Vec::new(); collections.len()];
         for i in 0..n {
             if i == s {
                 continue;
             }
             if spec.follow_fraction >= 1.0 || rng2.unit() < spec.follow_fraction {
-                engine.nodes[i].node.follow(chan);
                 followers.push(i);
+                if spec.collections.follow == 0 {
+                    engine.nodes[i].node.follow(chan);
+                    for f in of_collection.iter_mut() {
+                        f.push(i);
+                    }
+                } else {
+                    let mut choice: Vec<usize> = (0..collections.len()).collect();
+                    for k in (1..choice.len()).rev() {
+                        let j = rc.below(k as u64 + 1) as usize;
+                        choice.swap(k, j);
+                    }
+                    for &k in choice.iter().take(spec.collections.follow) {
+                        engine.nodes[i].node.follow_collection(chan, collections[k].cid);
+                        of_collection[k].push(i);
+                    }
+                }
             }
         }
         for (t, o) in objects.iter().enumerate() {
             let rendition = table.entries.iter().find(|r| r.parent == o.id.short()).map(|r| (r.id.short(), r.len));
+            let followers = &of_collection[t / chunk];
             let small_here: Vec<usize> = if rendition.is_some() { followers.iter().copied().filter(|f| small.contains(f)).collect() } else { Vec::new() };
             tracks.insert(o.id.short(), TrackInfo { label: labels[t].clone(), source: s, index: t, bytes: o.len, followers: followers.clone(), rendition, small: small_here, slot_ms: Some(3600_000 * (t as u64 + 1)) });
         }
-        source_infos.push(SourceInfo { node: s, key, channel: chan, objects, seq: 1 });
+        for (k, v) in covers.iter().enumerate() {
+            if let Some((v, _)) = v {
+                tracks.insert(v.id.short(), TrackInfo { label: COVER.into(), source: s, index: objects.len() + k, bytes: v.len, followers: of_collection[k].clone(), rendition: None, small: Vec::new(), slot_ms: None });
+            }
+        }
+        source_infos.push(SourceInfo { node: s, key, channel: chan, objects, collections, covers: covers.iter().map(|v| v.as_ref().map(|(v, _)| ObjectRef { id: v.id, len: v.len })).collect(), seq: 1 });
     }
     engine.rendition_ids = tracks.values().filter_map(|t| t.rendition.map(|(id, _)| id)).collect();
     if let Some(a) = spec.attack.as_ref().filter(|a| a.attackers > 0) {

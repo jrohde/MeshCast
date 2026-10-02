@@ -61,6 +61,14 @@ breaks down collisions between uploads to one announcer by cause. `--tracks N --
 object-size sweep of `docs/FEASIBILITY.md` §13 is built from those two options. `dynamics` also
 prints how many manifest corrections followers sent to their announcer (`docs/PROTOCOL.md` §2).
 
+A source publishes its pieces as collections (`docs/PROTOCOL.md` §2): one series by default.
+`--collections N` splits them in order over N albums, `--follow-collections K` makes each follower
+follow K of a source's collections, chosen at random, instead of the whole channel, and
+`--cover-kb N` gives every collection a cover of N kB. Covers are reported as their own kind and
+left out of whole content. An ensemble also reports what a follower holds at the end, in kB, as
+`held_kb_per_follower`. `dynamics` keeps one series per channel and publishes each bulletin as a
+new episode of it.
+
 ## Looking inside one world
 
 `--seeds N` runs N worlds and reports their spread; compare designs on that, not on one run
