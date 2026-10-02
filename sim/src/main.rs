@@ -1176,6 +1176,9 @@ fn run_dynamics(nodes: usize, area_km2: f64, stations: usize, channels: usize, f
     }
     events.sort();
     let mut offline: Vec<usize> = Vec::new();
+    // When each node was switched off, and from when to when, for time that counts.
+    let mut went_off: BTreeMap<usize, Millis> = BTreeMap::new();
+    let mut switched_off: Vec<Vec<(Millis, Millis)>> = vec![Vec::new(); nodes];
     // Newcomer, when it joined, and the catalogue that existed at that moment: a cold start is
     // measured against what was there to fetch, not against bulletins published later.
     let mut newcomers: Vec<(usize, Millis, Vec<ShortId>)> = Vec::new();
@@ -1218,9 +1221,13 @@ fn run_dynamics(nodes: usize, area_km2: f64, stations: usize, channels: usize, f
                     if let Some(pos) = offline.iter().position(|&x| x == i) {
                         offline.remove(pos);
                         built.engine.set_alive(i, true);
+                        if let Some(s) = went_off.remove(&i) {
+                            switched_off[i].push((s, t));
+                        }
                     } else {
                         offline.push(i);
                         built.engine.set_alive(i, false);
+                        went_off.insert(i, t);
                     }
                 }
             }
@@ -1306,6 +1313,13 @@ fn run_dynamics(nodes: usize, area_km2: f64, stations: usize, channels: usize, f
         }
     }
     let mut catch_h: Vec<f64> = Vec::new();
+    // The same, counting only the time the newcomer was switched on: one that was switched off
+    // a few minutes after joining otherwise counted the hour it spent in a pocket.
+    let mut catch_on_h: Vec<f64> = Vec::new();
+    let end = eng.now;
+    for (i, s) in &went_off {
+        switched_off[*i].push((*s, end));
+    }
     for (i, t_join, at_join) in &newcomers {
         if at_join.is_empty() {
             continue;
@@ -1315,6 +1329,12 @@ fn run_dynamics(nodes: usize, area_km2: f64, stations: usize, channels: usize, f
             caught += 1;
             if let Some(mx) = times.iter().max() {
                 catch_h.push(mx.saturating_sub(*t_join) as f64 / 3.6e6);
+                let off: Millis = switched_off[*i].iter().map(|(a, b)| (*b).min(*mx).saturating_sub((*a).max(*t_join))).sum();
+                catch_on_h.push(mx.saturating_sub(*t_join).saturating_sub(off) as f64 / 3.6e6);
+                if std::env::var("MESHCAST_TRACE_NEWCOMERS").is_ok() {
+                    let last = at_join.iter().zip(&times).max_by_key(|(_, t)| **t).map(|(id, _)| *id);
+                    eprintln!("NEWCOMER node {} joined {:.2} h caught up after {:.1} min, last {:?}", i, *t_join as f64 / 3.6e6, mx.saturating_sub(*t_join) as f64 / 60_000.0, last);
+                }
             }
         }
     }
@@ -1451,6 +1471,9 @@ fn run_dynamics(nodes: usize, area_km2: f64, stations: usize, channels: usize, f
         let mean = if catch_h.is_empty() { 0.0 } else { catch_h.iter().sum::<f64>() / catch_h.len() as f64 };
         let worst = catch_h.iter().cloned().fold(0.0f64, f64::max);
         println!("newcomers: {} joined, {} fetched the whole catalogue that existed when they joined, mean {:.2} h, worst {:.2} h", newcomers.len(), caught, mean, worst);
+        let on_mean = if catch_on_h.is_empty() { 0.0 } else { catch_on_h.iter().sum::<f64>() / catch_on_h.len() as f64 };
+        let on_worst = catch_on_h.iter().cloned().fold(0.0f64, f64::max);
+        println!("newcomers counting only the time they were switched on: mean {:.2} h, worst {:.2} h", on_mean, on_worst);
     }
     println!("of the {} follower nodes on at the end, {} hold the current window of every channel they follow ({:.1} %)", online, up_to_date, if online > 0 { 100.0 * up_to_date as f64 / online as f64 } else { 0.0 });
     if !offline.is_empty() {

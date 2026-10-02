@@ -83,13 +83,14 @@ new episode of it.
   is not the same world as `--seed 6`: the ensemble keeps the positions of its first seed.
 - `MESHCAST_TRACE_GRANTS=1` writes one line per event to stderr: `GA` open ask, `GT` grant, `GH`
   grant heard by its holder, `OF` offer, `UP` upload frame sent, `UO` upload frame received by
-  its announcer, `UC` upload frame collided there, `BO` other symbol of an object an announcer
-  wants, `MA` manifest announcement, `OC` object completed, `OX` an offer reaching (`ok`) or not reaching
-  (`col` collided, with the interferer; `hd` the announcer was sending) an announcer that wants
-  what it offers, and at the end `MISSING` for every
-  object a follower lacks (with the announcers it hears and who listed the object, to tell
-  whether an excursion or a named repair was possible) and `NOLEN` for every want whose length
-  the wanter does not know.
+  its announcer, `UC` upload frame collided there (with the other frame and its sender; the line
+  does not name the object), `UH` upload frame lost because its announcer was sending, `BO`
+  other symbol of an object an announcer wants, `MA` manifest announcement, `OC` object
+  completed, `OX` an offer reaching (`ok`) or not reaching (`col` collided, with the interferer;
+  `hd` the announcer was sending) an announcer that wants what it offers, and at the end
+  `MISSING` for every object a follower lacks (with the announcers it hears and who listed the
+  object, to tell whether an excursion or a named repair was possible) and `NOLEN` for every
+  want whose length the wanter does not know.
 - `MESHCAST_DEBUG_WANTS=1` traces each announcer's want list.
 - `MESHCAST_TRACE_ROLES=1` prints every role change as `ROLE t node carrier role announcer`.
 - `MESHCAST_TRACE_BEACONS=1` prints every beacon with its score, channel and colour, and every
@@ -103,6 +104,13 @@ new episode of it.
   time it wanted to send, with the first and last minute; the cell report prints it as
   `busy blame`. It found an announcer whose carousel chained frames without a gap
   (`docs/FEASIBILITY.md` §14).
+- `MESHCAST_TRACE_RX=38` prints every symbol node index 38 receives (`RX`), with what it held of
+  the object before. Silence in it means the node heard nothing at all, not that it was off.
+- `MESHCAST_TRACE_NEWCOMERS=1` prints, in `dynamics`, each newcomer's node, when it joined, how
+  long it took to hold everything that existed then, and the object that came last. The report
+  gives that time twice: as it was, and counting only the time the newcomer was switched on.
+- In tests, `Engine::lose_symbol(node, object, esi)` loses one chosen symbol at one node once: a
+  fault on purpose, to test a repair.
 - The grant trace reads sets as their sender means them, so `GA`, `GT` and `OF` lines name
   pieces, not sets.
 

@@ -898,6 +898,11 @@ impl Node {
         (known, complete, short)
     }
 
+    /// Diagnostic: when a wanted object last brought a symbol and when we last asked for it.
+    pub fn want_times(&self, id: &ShortId) -> Option<(Millis, Millis)> {
+        self.progress.get(id).map(|p| (p.last_progress, p.last_want))
+    }
+
     /// Diagnostic: what the next round of asking names, its sets read by our piece lists. It is
     /// built as for a GOSSIP and counts as asked.
     pub fn ask_now(&mut self) -> Vec<ShortId> {
@@ -2217,6 +2222,35 @@ impl Node {
         e
     }
 
+    /// Whether a wanted object belongs in our next ask: it is not arriving (no symbol for
+    /// `T_nack_stall`), and if someone is responsible for it, it is not nearly complete either.
+    fn askable(&self, id: &ShortId, new_only: bool) -> bool {
+        let p = self.progress.get(id).copied().unwrap_or_default();
+        if !(self.now >= p.last_progress + self.cfg.params.t_nack_stall_ms || p.last_progress == 0) || (new_only && p.last_want != 0) {
+            return false;
+        }
+        // An object that is nearly complete is repaired by NACK rather than re-asked in full, but
+        // only once someone is responsible for it. The want list is where responsibility is
+        // assigned, and an object we collected by overhearing a neighbouring cell has no uploader
+        // at all: however complete it is, it belongs on the list until it has one.
+        !self.left_to_repair(id)
+    }
+
+    /// Granted and nearly complete: the rest comes by NACK, not by asking again.
+    fn left_to_repair(&self, id: &ShortId) -> bool {
+        self.grants.contains_key(id) && matches!(self.store.entry(id).map(|e| e.progress()), Some((have, Some(total))) if self.nearly_complete(have, total))
+    }
+
+    /// Whether what is missing of an object is repaired by NACK rather than asked for again: at
+    /// least `nack_threshold` of it, or all of it but one symbol. A NACK for one symbol is the
+    /// smallest repair there is; under the fraction alone an object of two to four symbols, a
+    /// collection manifest, could never be repaired, and one that had lost one of its two symbols
+    /// waited minutes for the next round of asking (PROTOCOL.md §4, FEASIBILITY.md §20).
+    fn nearly_complete(&self, have: u32, total: u32) -> bool {
+        let thr = self.cfg.params.nack_threshold_permille as u64;
+        have > 0 && ((have as u64) * 1000 >= thr * total as u64 || have + 1 >= total)
+    }
+
     /// What we want and should ask for now, most listeners per byte first. Lapses grants that
     /// stopped bringing symbols on the way.
     fn wants_to_ask(&mut self, new_only: bool) -> Vec<ShortId> {
@@ -2258,30 +2292,7 @@ impl Node {
         self.stats.grant_rssi_lapsed += lapsed_rssi;
         self.stats.grants_lapsed_foreign += foreign;
         self.stats.grants_lapsed_unstarted += unstarted;
-        let thr = self.cfg.params.nack_threshold_permille as u64;
-        let ids: Vec<ShortId> = self
-            .wants
-            .iter()
-            .filter(|id| {
-                let p = self.progress.get(id).copied().unwrap_or_default();
-                if !(now >= p.last_progress + stall || p.last_progress == 0) || (new_only && p.last_want != 0) {
-                    return false;
-                }
-                // An object that is nearly complete is repaired by NACK rather than re-asked
-                // in full, but only once someone is responsible for it. The want list is where
-                // responsibility is assigned, and an object we collected by overhearing a
-                // neighbouring cell has no uploader at all: however complete it is, it belongs
-                // on the list until it has one.
-                if !self.grants.contains_key(id) {
-                    return true;
-                }
-                match self.store.entry(id).map(|e| e.progress()) {
-                    Some((have, Some(total))) => (have as u64) * 1000 < thr * total as u64,
-                    _ => true,
-                }
-            })
-            .copied()
-            .collect();
+        let ids: Vec<ShortId> = self.wants.iter().filter(|id| self.askable(id, new_only)).copied().collect();
         if ids.is_empty() {
             return Vec::new();
         }
@@ -2397,14 +2408,13 @@ impl Node {
             return;
         }
         let now = self.now;
-        let thr = self.cfg.params.nack_threshold_permille as u64;
         let stall = self.cfg.params.t_nack_stall_ms;
         let mut to_send: Option<(ShortId, u16, Vec<(u16, u16)>)> = None;
         for id in self.wants.iter() {
             let Some(e) = self.store.entry(id) else { continue };
             let (have, total) = e.progress();
             let Some(total) = total else { continue };
-            if (have as u64) * 1000 < thr * total as u64 {
+            if !self.nearly_complete(have, total) {
                 continue;
             }
             let p = self.progress.get(id).copied().unwrap_or_default();
@@ -3593,8 +3603,11 @@ impl Node {
                 None => m.whole || m.entries.windows(2).any(|w| channel_between(&w[0].channel, &c, &w[1].channel)),
             };
             // An announcer that is asking for our manifest knows of it: it announces only what it
-            // holds, and is fetching it.
-            let asking = self.ann_asks.get(&short).map(|t| now < *t + self.cfg.params.want_ttl_ms).unwrap_or(false);
+            // holds, and is fetching it. While it fetches it asks again every round, so an ask
+            // counts for `T_want_min`, not for `want_ttl`: one that asked once and then took an
+            // older announcement for the channel's newest was left uncorrected for an hour, and a
+            // newcomer in its cell with it (FEASIBILITY.md §20).
+            let asking = self.ann_asks.get(&short).map(|t| now < *t + retry).unwrap_or(false);
             if behind && !asking && self.corrected.get(&c).map(|t| now >= t + retry).unwrap_or(true) {
                 self.corrections.insert(c);
                 if self.correction_at.is_none() {

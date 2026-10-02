@@ -102,6 +102,10 @@ pub struct Engine {
     pub metrics: Metrics,
     pub verbose: bool,
     trace_grants: bool,
+    /// Symbols to lose on purpose, once each: (receiver, object, symbol), for tests.
+    lose: Vec<(usize, meshcast_core::ids::ShortId, u16)>,
+    /// MESHCAST_TRACE_RX=<node>: every symbol that node receives.
+    trace_rx: Option<usize>,
     /// Diagnostic (MESHCAST_TRACE_BUSY=<node index>): who keeps that node's channel busy when it
     /// wants to send, per transmitter, with the minute of the first and last time.
     trace_busy: Option<usize>,
@@ -160,7 +164,7 @@ impl Engine {
         }
         let mut metrics = Metrics::default();
         metrics.per_node_bulk = vec![(0, 0); n];
-        let mut e = Engine { attackers: Vec::new(), attack_ids: Vec::new(), rendition_ids: Default::default(), nodes, phys, heap: BinaryHeap::new(), seq: 0, tx_seq: 0, loss, reach, recent: HashMap::new(), txs: HashMap::new(), now: 0, metrics, verbose: false, trace_grants: std::env::var("MESHCAST_TRACE_GRANTS").is_ok(), trace_busy: std::env::var("MESHCAST_TRACE_BUSY").ok().and_then(|v| v.parse().ok()), busy_from: VecDeque::new(), busy_blame: Default::default(), next_sample: 0 };
+        let mut e = Engine { attackers: Vec::new(), attack_ids: Vec::new(), rendition_ids: Default::default(), nodes, phys, heap: BinaryHeap::new(), seq: 0, tx_seq: 0, loss, reach, recent: HashMap::new(), txs: HashMap::new(), now: 0, metrics, verbose: false, trace_grants: std::env::var("MESHCAST_TRACE_GRANTS").is_ok(), trace_busy: std::env::var("MESHCAST_TRACE_BUSY").ok().and_then(|v| v.parse().ok()), busy_from: VecDeque::new(), busy_blame: Default::default(), next_sample: 0, lose: Vec::new(), trace_rx: std::env::var("MESHCAST_TRACE_RX").ok().and_then(|v| v.parse().ok()) };
         for i in 0..n {
             e.schedule_wake(i, 1);
         }
@@ -257,6 +261,11 @@ impl Engine {
     }
 
     /// Switch a node off or on right now (battery dead, taken indoors, switched on again).
+    /// Lose the next reception of symbol `esi` of `object` at `node`, once: a fault on purpose.
+    pub fn lose_symbol(&mut self, node: usize, object: meshcast_core::ids::ShortId, esi: u16) {
+        self.lose.push((node, object, esi));
+    }
+
     pub fn set_alive(&mut self, node: usize, alive: bool) {
         if alive == self.nodes[node].alive {
             return;
@@ -656,12 +665,26 @@ impl Engine {
             if !self.nodes[j].alive {
                 continue;
             }
+            if let Some(Frame::Bulk(b)) = &decoded {
+                if let Some(k) = self.lose.iter().position(|(n, o, e)| *n == j && *o == b.object && *e == b.esi) {
+                    self.lose.remove(k);
+                    continue;
+                }
+                if self.trace_rx == Some(j) {
+                    eprintln!("RX {} {} from {} {:?} esi={} before={:?}", now, j, tx.from, b.object, b.esi, self.nodes[j].node.object_progress(&b.object));
+                }
+            }
             // Half-duplex: receiver was transmitting on this carrier during the frame.
             let hd = self.nodes[j].own_tx[tx.carrier].iter().any(|&(s, e)| s < tx.end && e > tx.start);
             if hd {
                 self.metrics.frames_half_duplex += 1;
                 if tx.upload_to == Some(j) {
                     self.metrics.upload_outcome[2] += 1;
+                    if self.trace_grants {
+                        if let Some(Frame::Bulk(b)) = &decoded {
+                            eprintln!("UH {} {} {} {:?} esi={}", now, tx.from, j, b.object, b.esi);
+                        }
+                    }
                 }
                 self.trace_offer(&tx, &offered, j, "hd", usize::MAX);
                 continue;

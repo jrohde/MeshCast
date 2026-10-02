@@ -911,3 +911,41 @@ fn an_announcer_asks_for_every_collection_s_first_pieces() {
         }
     }
 }
+
+#[test]
+fn a_small_object_short_of_one_symbol_is_repaired() {
+    // A node repairs by NACK what it holds at least 80 % of, or all of but one symbol. Under the
+    // fraction alone an object of two to four symbols, a collection manifest, could never be
+    // repaired, and one that had lost one of its two symbols waited for the next round of asking
+    // (FEASIBILITY.md §20). Here a follower fetching its channel again loses the second symbol of
+    // the collection manifest, and repairs it from its announcer.
+    let mut s = spec(BulkPreset::GfskO, vec![(0.0, 0.0), (1000.0, 0.0), (500.0, 0.0)], vec![0], vec![2], 3.0);
+    s.tracks = 4;
+    s.track_kb = 20;
+    let mut b = build(&s, Params::default());
+    let chan = b.sources[0].channel;
+    let manifest = b.sources[0].collections[0].as_object().0;
+    let id = manifest.id.short();
+    let k = manifest.len.div_ceil(meshcast_core::frame::SYMBOL_SIZE as u32);
+    assert!((2..=4).contains(&k), "the collection manifest should be two to four symbols, is {k}");
+    b.engine.run(3_600_000, 600_000);
+    b.engine.nodes[1].node.unfollow(chan);
+    b.engine.run(3_600_000 + 600_000, 600_000);
+    assert!(!b.engine.nodes[1].node.holds(&id), "unfollowing should evict the collection manifest");
+    b.engine.lose_symbol(1, id, (k - 1) as u16);
+    let t = b.engine.now;
+    b.engine.nodes[1].node.follow(chan);
+    b.engine.poke(1);
+    let mut at = None;
+    let mut u = t;
+    while u < t + 20 * 60_000 {
+        u += 5_000;
+        b.engine.run(u, 600_000);
+        if b.engine.nodes[1].node.holds(&id) {
+            at = Some(u - t);
+            break;
+        }
+    }
+    let at = at.expect("the follower should hold the collection manifest within 20 minutes");
+    assert!(at <= 4 * 60_000, "the follower held the collection manifest after {:.1} min", at as f64 / 60_000.0);
+}
