@@ -79,6 +79,9 @@ sufficiently large subset of symbols.
 unused airtime budget, library size, internet uplink. Only comparable between nodes in the same
 role; see Capability.
 
+**Set.** A HAVE, WANT or grant for many pieces of one manifest at once: the manifest's short id
+and a bitmap over its list. Used where a round of asking is dear (PROTOCOL.md §3.3, §4).
+
 **Short id.** The first 8 bytes of an object's BLAKE3 hash, used on the air.
 
 **SNAC.** The neural audio codec MeshCast uses: the 24 kHz model for speech, the 32 kHz model for
