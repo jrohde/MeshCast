@@ -2162,3 +2162,148 @@ had one album each in 15.1 minutes instead of 18.3 and four albums in 16.9 inste
 with its cover 28.4 instead of 26.9 with 10 % fewer. The living network held every window in both
 bands with the same newcomers, band O with 5 % fewer uploads, no role changed without nodes coming
 and going, and the false announcers delivered as before.
+
+## 19. Earlier pieces first
+
+A listener plays a collection from its first piece. In the 15 km² band L network with an hour of
+music per source in 14 kB pieces (one minute each), the first piece of a source's programme
+took the median listener 31 minutes to get (the mean over eight worlds); in one world half the
+listeners of one source got it only after 78 minutes, while that source's own cell had it after 17.
+Following that piece through the world showed two causes, neither of them radio.
+
+- *The order of asking.* In band L an announcer asks in sets, four to a frame (PROTOCOL.md §3.3),
+  and the sets went in the order of manifest ids. One announcer had heard the source offer the
+  piece at 10 minutes and wanted it, yet between 17 and 43 minutes its frames named that source's
+  pieces in 3 open asks, against 41 and 130 for the other two sources: the sets of the lower ids
+  and the grants made on them filled every frame.
+- *The order of uploading.* A holder granted the piece at 42 minutes uploaded it at 58, after 33
+  later pieces of the same programme that earlier grants had brought: a holder sorted what one
+  grant brought, smallest first, and lined it up behind everything before it.
+
+Offers lost in the rendezvous, where many hidden holders answer one announcer at once, were the
+first suspect; counted at the announcers that wanted what was offered, 1,113 of 15,204 offers
+collided in the meeting dwell (7 %), too few to matter.
+
+To measure what a listener waits for, the ensemble report now also gives, per listener and
+collection, when the first piece arrived and the **playback start**: the earliest moment it could
+start the collection at its first piece and play it through without waiting, given how long each
+piece plays (sim/README.md).
+
+### 19.1 The earlier place first
+
+A piece's place is its position in the collection manifest, 0 for every piece of singles and for
+anything that is not a piece, and the earlier place goes first wherever a node chooses
+(PROTOCOL.md §2, §4): asking by name, the earlier place first and among equal places the most
+listeners per byte; a holder uploads the earlier place first, whatever grant brought it, and
+among equal places the smallest first; asking in sets, the sets went by the earliest place each
+names, and among equals the one asked for longest ago. In the 15 km² band L network with 14 kB
+pieces playback could start after 31.9 minutes instead of 48.8 (37.5 with the order of asking
+alone), and in the nine scenarios of §9.3 sooner in every one.
+
+### 19.2 Side by side or one after another
+
+With three sources publishing four albums each (20 pieces of 42 kB music and 22 kB speech per
+source, §16.6), the same rule made band L worse: listeners following every album could play one
+through after 49.4 minutes instead of 38.9, those following one album per source after 50.1
+instead of 43.8, with up to 11 % more frames. Twelve albums asked for side by side shared the
+network's uploads, and none arrived fast enough to be played as it came; asked for in the order
+of manifest ids, the first ones were complete early and could be played while the others came.
+Which is better depends on whether what is in flight keeps up with playback, and no node knows
+the capacity of its network.
+
+It does not have to. What is flowing is not asked for (PROTOCOL.md §4), so a collection whose
+uploads run gives up its place among the sets by itself. The rule became: every collection gets a
+set before any gets a second; collections in progress, a piece of which arrived in the last
+`T_want_min` or is granted, go before the others; within that the earliest place first, then the
+set asked for longest ago. As many collections are in flight as arrive, and one that stopped
+arriving, because nobody in reach holds the rest, takes turns with the others again. (Counting a
+collection as begun as soon as a piece of it was held, without the time limit, gave about the
+same numbers where it was measured, four albums after 39.1 minutes, but let four begun
+collections that nobody could serve fill every frame for good.)
+
+| Band L, 15 km², 3 sources × 20 pieces | Playback start, median: main → side by side → in progress first | First piece | Frames |
+|---|---|---|---|
+| One programme per source | 36.9 → 24.1 → **24.4** min | 33.5 → 21.4 | 0 % |
+| Four albums, all followed | 38.9 → 49.4 → **38.5** | 36.7 → 26.0 | +6 % |
+| Four albums, one followed per source | 43.8 → 50.1 → **38.3** | 42.3 → 31.6 | +6 % |
+| Four albums with covers | 45.6 → 52.7 → **44.8** | 43.8 → 34.6 | +6 % |
+| Four albums with covers, one followed per source | 53.0 → 59.0 → **47.5** | 51.1 → 41.9 | +5 % |
+
+All of what a listener follows arrived about as before: one programme per source 49.4 → 51.4
+minutes at the median, four albums 57.4 → 56.5, one album per source 47.5 → 45.0. The frames
+are the cost. In band O and in the neighbourhoods every one of the five could start sooner,
+or within 0.3 minutes: in the 15 km² band O network one programme per source after 8.3 minutes
+instead of 21.9 with 10 % fewer frames, four albums after 18.0 instead of 22.7; in the band O
+neighbourhood after 5.2 instead of 11.2 and 6.2 instead of 10.4; in the band L neighbourhood
+10.2 instead of 12.2 and 10.4 instead of 12.0.
+
+### 19.3 The nine scenarios
+
+In the nine scenarios of §9.3 (eight worlds each, 42 kB music and 22 kB speech alternating in
+one programme per source, 8 pieces), playback could start sooner in every one:
+
+| Scenario | Playback start, median | 90th percentile | First piece | All of it, median | Frames |
+|---|---|---|---|---|---|
+| Band O neighbourhood | 7.7 → **5.2** min | 7.7 → 5.2 | 7.7 → 5.2 | 10.6 → 10.5 | 0 % |
+| Band L neighbourhood | 10.2 → 9.5 | 16.7 → 14.2 | 10.2 → 9.5 | 12.0 → 12.1 | +1 % |
+| Band O, 15 km² | 9.4 → **6.1** | 16.1 → 13.5 | 9.3 → 5.7 | 13.4 → 13.3 | 0 % |
+| Band L, 15 km² | 22.6 → 19.6 | 34.0 → 31.6 | 21.8 → 18.7 | 26.5 → 27.6 | +2 % |
+| ESP-NOW | 13.0 → 12.5 | 17.8 → 15.3 | 12.8 → 11.5 | 14.7 → 15.6 | −1 % |
+| Two clusters, band L | 18.0 → 16.6 | 20.5 → 19.8 | 18.0 → 16.6 | 18.9 → 18.7 | 0 % |
+| LoRa across 5 km | 70.8 → 69.3 | 70.8 → 69.3 | 48.0 → **33.6** | 89.2 → 89.2 | 0 % |
+| Band O town | 23.8 → **15.9** | 40.1 → 33.4 | 21.1 → **8.0** | 29.3 → 30.2 | −2 % |
+| Band L town | 32.0 → **26.7** | 45.0 → 36.4 | 30.6 → 22.2 | 37.4 → 39.7 | +1 % |
+
+What it costs. Most listeners per byte first had put a source's speech before the music it plays
+between; now the programme comes in its order, so speech on its own arrives later (band O town:
+music 21.7 → 16.6 minutes, speech 8.0 → 17.2, the median of each). And in band L the median
+listener held all of a programme up to 2.3 minutes later (town 37.4 → 39.7); at the 90th
+percentile within a minute of before (15 km² 37.1 → 37.8, town 48.9 → 47.6).
+
+### 19.4 Piece sizes
+
+With an hour of music per source in pieces of every size of §13, playback could start sooner
+wherever there was an order to keep, by far most with small pieces under a duty cycle, where
+most listeners per byte first had put the pieces of a programme in any order:
+
+| Playback start, median (min) | Band O neighbourhood | Band L neighbourhood | Band O, 15 km² | Band L, 15 km² |
+|---|---|---|---|---|
+| 7 kB pieces (30 s) | 28.0 → **4.7** | 11.8 → 11.9 | 37.4 → **8.4** | 69.3 → **46.4** |
+| 14 kB (1 min) | 17.6 → **4.8** | 11.4 → 10.6 | 36.7 → **8.8** | 48.8 → **30.5** |
+| 42 kB (3 min) | 14.9 → **5.2** | 10.7 → 10.4 | 34.2 → **12.5** | 35.2 → 27.7 |
+| 141 kB (10 min) | 11.1 → 7.1 | 11.2 → 11.5 | 23.3 → 12.9 | 33.9 → 28.8 |
+| 423 kB (30 min) | 12.5 → 12.5 | 15.1 → 15.6 | 22.4 → 21.4 | 44.7 → 43.8 |
+
+In the band L neighbourhood the median moved by at most 0.8 minutes either way and the 90th
+percentile came sooner at every size up to 423 kB (7 kB pieces 46.8 → 22.3 minutes). The last
+piece arrived about as before, within 4.1 minutes either way, and the frames changed by −7 to
++8 % (band L neighbourhood with 7 kB pieces −7 %, band O neighbourhood with 7 kB pieces +8 %).
+
+### 19.5 The living network and the attacks
+
+The living network of §7.6 (daily 22 kB bulletins, with nodes that come and go as in §7.7.2)
+held every window in both bands with the same medians (band L 5.4 minutes, band O 1.8),
+newcomers caught up in 9.4 minutes in band L instead of 9.1 and in 8.1 instead of 7.9 in band O,
+and the false announcers changed nothing beyond noise (midL with one lure 99.6 % delivered
+instead of 99.5, with five maximum-claiming lures 96.2 % instead of 96.4). One bulletin in one
+band O world under a WANT flood reached its listeners after 7.2 minutes instead of 1.8: the
+collection manifest that named it, two symbols uploaded with its root, lost one symbol while the
+station was itself sending (no other sender collided with it), and with one symbol of two a node
+is below the 80 % at which it repairs by NACK (PROTOCOL.md §4), so it waited until the grant
+lapsed and the manifest was offered again. That is not the order of pieces, which the same world
+kept, but it is open: a small object that loses one symbol waits for its grant to lapse.
+
+### 19.6 Tried and not taken
+
+- *Smallest first across a holder's whole queue* instead of the earlier place: the same where all
+  pieces are of one size; in the nine scenarios the 15 km² band L network started after 21.8
+  minutes instead of 20.2 and the band L town after 30.1 instead of 27.3 (both against the
+  earlier place first with sets side by side). §14.2 had found a whole queue smallest first worse
+  for speech in the band O town; the earlier place first is not that rule.
+- *The earlier place only between objects that serve as many listeners per byte*, when asking by
+  name: about half the gain (band O town 20.1 minutes, neighbourhood 6.9).
+- *The carousel by the earlier place first too*, whatever the size: band L up to a minute sooner
+  (two clusters 15.6 instead of 16.6 minutes, LoRa's first piece after 19 instead of 34), the band
+  O town 7 % more frames than with the carousel as it is, from twice the repeated passes in two of
+  eight worlds. The carousel keeps the most listeners per byte first, the earlier place between
+  equals (PROTOCOL.md §4).
