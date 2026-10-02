@@ -17,8 +17,9 @@ of yours can spend. Anything above one is a lever.
   names it by its full hash, so a node reads one only once the adopted, signed root names it,
   and a collection manifest that no adopted root names is an unknown object like any other.
 - **You cannot poison content.** Objects are named by their hash. A symbol that does not fit is
-  discarded when the object completes, the object is dropped and collected again. You can waste
-  airtime this way but you cannot change what people hear.
+  discarded when the object completes, the object is dropped and collected again. You cannot
+  change what people hear this way, but you can keep it from arriving (Someone else's firmware,
+  below).
 - **You cannot make the audience relay for you.** Followers never transmit unless they hold
   something an announcer asked for, so there is no reflection through the crowd.
 - **You cannot replay.** Manifest sequence numbers only go up, and only a signed manifest moves a
@@ -115,6 +116,114 @@ notices the limit exists.
   false announcement now costs a follower a want that nobody answers, until the next real
   announcement replaces it. This was found by reading, not by an attack in the simulator.
 
+## Someone else's firmware
+
+The code is public, so anyone can build a node that speaks MeshCast and keeps none of its rules:
+it can send any frame, under any id, at any time and power, and lie in every field. The requests
+above already assume such a node. This section takes the rest of what it can do, class by class,
+and states what the design must do about it. These are requirements, not results: none of them
+is simulated (the simulator's attackers stay the request floods and false announcers of
+FEASIBILITY.md §11 and §12), and each is to be designed and measured like the rest of the
+protocol before it becomes a rule.
+
+**1. Poisoned symbols.** A node checks an object only when it is complete, and a mismatch drops
+all of it (PROTOCOL.md §1). So a foreign node that sends one wrong symbol of an object on a cell's
+channel, during each pass or under the id of a granted uploader, keeps that object from ever
+completing at the nodes that hear it, for one frame per pass: about 200 times its own airtime for
+a 42 kB track in 200-byte symbols. What people hear stays authentic; whether they hear it does
+not.
+
+*Requirement: verify an object in pieces as they arrive, against what its id already
+authenticates, and discard only the piece that fails.* The object id is the BLAKE3 hash of the
+object, and BLAKE3 hashes a tree over 1024-byte chunks whose parent nodes hold the chaining
+values of their children
+([BLAKE3 specification](https://github.com/BLAKE3-team/BLAKE3-specs/blob/master/blake3.pdf);
+the [Bao](https://github.com/oconnor663/bao/blob/master/docs/spec.md) outboard encoding is that
+tree without the chunks). A node that holds an object's parent nodes can check each chunk on
+arrival against the id it already has; the parent nodes are themselves checked against the id.
+They would travel as an object of their own, named in the `integrity` slot of the piece's entry
+in its collection manifest (PROTOCOL.md §2), which the signed root authenticates. A binary tree
+over n chunks has n − 1 parent nodes of two 32-byte chaining values each: for a 42 kB track,
+41 parents, 2.6 kB, about 6 % of the track. Open and to be measured: that cost against what it
+saves, whether a symbol should divide a chunk (200 bytes do not divide 1024), or a tag per symbol
+instead, which must then be at least 64 bits: the 4-byte tag PROTOCOL.md §1 first drafted is
+matched by trying about 2^32 candidate symbols.
+
+**2. Names that are not checked.** A node id is 4 bytes and nothing binds it to the node that
+sends it. Under an announcer's id a foreign node can grant uploads it never asked for, tell every
+holder that the announcer follows someone else (holders then stop uploading to it and forget its
+grants, PROTOCOL.md §4), send NACKs that make holders answer (the NACK row above), or beacon with
+another score or colour. Under a holder's id it can offer and fall silent (the grant hijack row),
+and under anyone's id what it sends counts as that node's: the evidence rules of PROTOCOL.md
+§5.2 hold a node's frames, offers and lists against the id they came under.
+
+*Requirement: a frame that makes others act, or that counts as evidence against its sender, must
+be attributable to that sender.* An Ed25519 signature is 64 bytes, more than a quarter of the
+largest gossip frame (234 bytes, PROTOCOL.md §3.3), on every grant. The candidate is TESLA
+([RFC 4082](https://www.rfc-editor.org/rfc/rfc4082),
+2005): a sender commits once, in a signed frame, to a one-way chain of keys, attaches to each
+frame a MAC under the key of the current time interval, and discloses that key some intervals
+later; a receiver accepts a frame only once the key has arrived, and only if by its own clock the
+key could not yet have been disclosed when the frame came in, which requires an upper bound on how
+far its clock lags the sender's. Asking, granting and repair are delay-tolerant and can wait an
+interval; carrier sensing cannot, and stays unauthenticated. Open and to be measured: bytes per
+frame, the disclosure delay against `T_grant` and the meeting-dwell cycle, verification time on
+an ESP32-S3, and the clock bound (next item). Until then, every rule that acts on evidence per id
+must leave a wrongly accused honest node a way back, as the hour-long shun does.
+
+**3. Time.** Beacons carry UTC, followers without GPS or a phone take their announcer's, renditions
+are served only in a window around their slot (PROTOCOL.md §1.2), and TESLA needs a bound on clock
+lag. A foreign beacon can claim any time.
+
+*Requirement: time from the air is a hint within a bound.* A node with a trusted source (GPS, a
+phone over BLE, NTP over IP) never moves its clock for a beacon; one without accepts beacon time
+only from its own announcer, authenticated once item 2 exists, and only within the drift its own
+clock can have accumulated since it last had trusted time. The drift bound comes from the
+oscillator of the board, to be taken from its datasheet in Phase 1.
+
+**4. Ignoring the regulations.** A foreign node can send at any power, any duty cycle, on any
+channel. EtherDiscipline binds only our own transmitters (ETHERDISCIPLINE.md); stopping anyone
+else is the regulator's business and the operator's liability, and no protocol can.
+
+*Requirement: the protocol does not reward it.* A node already measures the channel occupancy
+others cause (ETHERFATSOEN.md). An announcer whose own measured airtime exceeds its region's
+limit, over a window as long as the limit's own (an hour for a duty cycle), is not followed and
+not counted in scores, like an announcer that serves nothing. A node hears only part of what
+another sends and two senders under one id add up, so the measurement under-counts and over-
+counts in turn; it is acted on only for an announcer the node would otherwise follow, and only
+with a margin, to be set by measurement.
+
+**5. Malformed frames, and tables that grow.** Every frame is untrusted input. Rust rules out
+memory corruption, not a panic, a large allocation or a table that never stops growing. Today the
+parsers check lengths, and what a node keeps per neighbour is capped (512 offered ids, 16 sets it
+could not read yet), but how many neighbours, announced channels, relay asks, askers in a
+carousel and known objects it keeps is bounded only by expiry: a foreign node that uses a new id
+in every frame makes every node in range keep an hour of names (`neighbor_ttl`).
+
+*Requirements:* (a) decoding never panics and never allocates more than a frame's own size, for
+every frame type and every CBOR object (root and collection manifests, rendition tables),
+checked by fuzzing in CI; (b) every table filled from the air has a size cap and an eviction rule
+that keeps what has evidence first (a name heard twice before one heard once, the announcer a
+node follows before one it only hears), so that a node's memory is bounded whatever arrives.
+
+**6. Firmware images.** An object can be a firmware image (PROTOCOL.md §1), and updates over the
+carousel are planned (ROADMAP.md).
+
+*Requirement: a node installs only an image signed by a key it was built to trust,* never one
+because it arrived in a followed channel, and never treats content as code.
+
+**7. What a listener gives away.** A node that only listens sends nothing. A follower whose cell
+lacks something asks, and every ask carries its node id and what it wants, readable by anyone in
+range; an id that stays the same for days lets anyone with a receiver follow one listener's
+interests and movements.
+
+*Requirements:* (a) node ids are random and replaced regularly, at least at every start; what is
+counted per id (neighbours, evidence) must then relearn, and what that costs is measured before
+the period is chosen; (b) a follower asks for no more than its cell does not carry, as now, and
+for a collection in sets rather than piece by piece; (c) encrypted channels keep content from
+strangers (PROTOCOL.md §7), but the short ids in asks still link the listeners of one
+object; whether an encrypted channel's objects need names only its listeners can link is open.
+
 ## What is not fixed yet, in the order it should be
 
 1. **Per-neighbour request budgets.** The rule above, as a token bucket per peer, on WANT, NACK
@@ -135,7 +244,11 @@ notices the limit exists.
    the request budget of item 1 with a limit that follows from what renditions are for.
 4. **Bounded generosity.** An announcer serves at most so many channels and collections, chosen
    by how many distinct followers asked and for how long, rather than everything it hears of.
-5. **Known peers, optionally.** A cell may require that requests come from a node whose key it
+5. **Someone else's firmware.** The seven requirements above, cheapest first: bounded tables and
+   fuzzed parsers (no change on the air), signed firmware images, verification in chunks, ids
+   that change, airtime as evidence, and authenticated announcer frames with the bound on time
+   they need.
+6. **Known peers, optionally.** A cell may require that requests come from a node whose key it
    has seen before, which makes the attacks above cost an identity rather than nothing. This is
    a deployment choice, not a default: MeshCast is meant to work with strangers.
 
