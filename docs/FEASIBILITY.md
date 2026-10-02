@@ -2287,11 +2287,11 @@ newcomers caught up in 9.4 minutes in band L instead of 9.1 and in 8.1 instead o
 and the false announcers changed nothing beyond noise (midL with one lure 99.6 % delivered
 instead of 99.5, with five maximum-claiming lures 96.2 % instead of 96.4). One bulletin in one
 band O world under a WANT flood reached its listeners after 7.2 minutes instead of 1.8: the
-collection manifest that named it, two symbols uploaded with its root, lost one symbol while the
-station was itself sending (no other sender collided with it), and with one symbol of two a node
-is below the 80 % at which it repairs by NACK (PROTOCOL.md §4), so it waited until the grant
-lapsed and the manifest was offered again. That is not the order of pieces, which the same world
-kept, but it is open: a small object that loses one symbol waits for its grant to lapse.
+collection manifest that named it, two symbols uploaded with its root, lost one symbol in a
+collision with another node's gossip frame at the station, and with one symbol of two a node is
+below the 80 % at which it repairs by NACK (PROTOCOL.md §4), so it waited for the station's
+next regular round of asking, five minutes later. That was not the order of pieces; §20 traces
+it and fixes it. (This paragraph first blamed a grant that lapsed; no grant in these runs did.)
 
 ### 19.6 Tried and not taken
 
@@ -2307,3 +2307,62 @@ kept, but it is open: a small object that loses one symbol waits for its grant t
   O town 7 % more frames than with the carousel as it is, from twice the repeated passes in two of
   eight worlds. The carousel keeps the most listeners per byte first, the earlier place between
   equals (PROTOCOL.md §4).
+
+## 20. A small object short of one symbol, and an announcer left behind
+
+### 20.1 Repairing what is short of one symbol
+
+The slowest bulletin of §19.5 (one band O world under a WANT flood, 7.2 minutes instead of 1.8)
+was traced with the simulator's upload traces (sim/README.md). Its collection manifest, two
+symbols, was uploaded to the station with the root that named it, and the second symbol collided
+at the station with another node's gossip frame. With one symbol of two the station was below the
+80 % at which a node repairs by NACK, so the manifest had to be asked for again; a station leaves
+out of its ask whatever brought a symbol in the last `T_nack_stall`, and its next round of asking
+came at its regular cadence, `T_gossip`, five minutes later. No grant lapsed: in the 80 runs of the
+living network not one grant lapsed after its upload had begun.
+
+Asking as soon as an upload stops, `T_nack_stall` after its last symbol and once per stop, on
+carriers that do not hop, brought that bulletin after 4.2 minutes, but cost the band O town 12.6 %
+more frames, and listeners there could start playing 1.1 minutes later: under a duty cycle an
+upload that pauses for a minute has seldom stopped, its holder is waiting for its budget, and
+asking again brought in a second holder. Not taken.
+
+The rule taken is narrower. A node repairs by NACK what it holds at least 80 % of, **or all of but
+one symbol** (PROTOCOL.md §4). Under the fraction alone an object of two to four symbols, a
+collection manifest or a root, could not be repaired at all: four symbols of five are already
+80 %, but one of two is 50 %. A NACK for one symbol is the smallest repair there is, and it reopens
+no ask. The slow bulletin came after 2.4 minutes, and under the WANT flood the slowest bulletin
+of any world came after 3.0 minutes instead of 7.2. A follower that fetches its channel again and
+loses one of the collection manifest's two symbols holds the manifest after 2.3 minutes instead
+of 10.1, the `T_want_min` it waited before asking again (smoke test
+`a_small_object_short_of_one_symbol_is_repaired`). In the nine scenarios, the collection variants
+and the size sweep nothing moved beyond the spread of the worlds, the band O town over sixteen
+worlds included (playback start 17.4 → 17.7 minutes, frames +2 %); the false announcers delivered
+as before (99.5, 97.1 and 96.3 % against 99.6, 97.4 and 96.2).
+
+### 20.2 An announcer that falls behind, and stays behind
+
+Validating that, one newcomer in a band O world took 67 minutes to hold the channels it followed,
+where every other newcomer took at most 20. The traces showed a chain. Churn took the cell's
+announcer, and the node elected in its place had never followed one of the newcomer's channels.
+On hearing its followers' corrections (PROTOCOL.md §2) it asked for the channel's current root;
+then it heard another cell's announcer, itself behind, announce an older root, and since an
+announcement is a hint and the latest heard replaces one still pending, it fetched that one and
+adopted it. Its followers had heard it ask for the current root, took it to be fetching it, and
+held back their corrections for `want_ttl`, an hour. The newcomer knew nothing better.
+
+What an announcer asked for now counts for `T_want_min` when a follower decides whether to correct
+it, since an announcer that is fetching asks again every round; the same world's newcomers caught
+up within 20 minutes. The rule that the latest announcement replaces a pending one stays: keeping
+the higher one would let a false announcement of the highest seq hold a channel for good
+(ABUSE.md), and with corrections renewed every `T_want_min` an announcer that took an old root is
+put right within that.
+
+Over sixteen worlds per band, a newcomer held everything it followed after 8.0 minutes on average
+in band O (7.9 on main) and 9.1 in band L (9.1). One band L world had a newcomer at 62 minutes,
+where main had none: its cell's announcer asked for a new root every five minutes for an hour
+and no holder of it could hear the ask; the newcomer had it only by an excursion (§12.3). Main
+elected another announcer in that world, and the limit is the known one of a cell that no holder
+can reach. The report of the living network now also gives the newcomers' time counting only the
+time they were switched on, which ruled out the first suspicion, a newcomer switched off for an
+hour.
