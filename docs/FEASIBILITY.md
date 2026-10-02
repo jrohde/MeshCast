@@ -2124,3 +2124,41 @@ caught up as before (band L 9.1 minutes, the slowest 24.0 instead of 22.2), no r
 without nodes coming and going, and the false announcers were within a point of §16. The size
 sweep of §13 ran byte for byte as before except across 15 km² of band L, where every size took
 as long or up to 3 minutes less.
+
+## 18. Two uploaders under a duty cycle
+
+In the band O neighbourhood of the size sweep a world either had all of an hour's music after
+about 20 minutes or 10 to 25 minutes later, on main as in §16.7. In a late world one of the two
+sources uploaded at a third of its rate for 25 minutes and deferred to a busy channel 4,576 times,
+where in the same world before collections it had deferred 41 times. A holder that finds the channel
+busy waits a random time from a window that doubles with each attempt, up to 12.8 seconds; the
+other holder, sending back to back, always finds it clear and never waits. That is the classic
+capture of carrier sensing with exponential backoff, between two holders that hear each other.
+
+The announcer already divides its listening time into phases under polite access and where no
+regulator caps the sender (§15.1). Under a duty cycle phases had been left out: with a phase per
+grant a lone upload was held to one phase in K and took K times as long (§9.6), and after phases
+went to holders (§13.2), which gives a lone holder the whole cycle, they were left out as no
+longer needed (§14.3). They are needed: with phases under the duty cycle too (PROTOCOL.md §4),
+every world of the band O neighbourhood had the hour in 20.4 to 22.7 minutes at every size from
+14 kB up, the first piece came sooner at large sizes (423 kB pieces: 15.7 to 12.5 minutes), and the
+15 km² band O network gained at every size:
+
+| One hour of music | Band O neighbourhood: all of it | Band O, 15 km²: all of it, frames |
+|---|---|---|
+| 7 kB pieces | 31.8 → 31.5 min | 55.6 → **45.4** min, −24 % |
+| 14 kB | 26.8 → **20.9** | 49.3 → 46.3, −14 % |
+| 70 kB | 28.1 → **20.6** | 44.1 → 40.8, −1 % |
+| 141 kB | 29.1 → **20.8** | 43.4 → 40.2, −1 % |
+| 423 kB | 24.8 → **20.5** | 38.9 → 32.6, −3 % |
+| One piece | 20.6 → 20.4 | 40.2 → **30.0**, −2 % |
+
+In the nine scenarios the band O neighbourhood went from 7.5 to 7.3 minutes, the 15 km² band O
+network from 8.7 to 8.4 with 4 % fewer frames, and the band O town held at 14.9 minutes instead
+of 14.8 with 11 % fewer frames; every other scenario, band L, ESP-NOW and LoRa, ran byte for byte
+as before, since there phases were already used. With collections (§16.6), the band O neighbourhood
+had one album each in 15.1 minutes instead of 18.3 and four albums in 16.9 instead of 22.4; across
+15 km² of band O four albums took 32.5 minutes instead of 35.9 with 9 % fewer frames, and one album
+with its cover 28.4 instead of 26.9 with 10 % fewer. The living network held every window in both
+bands with the same newcomers, band O with 5 % fewer uploads, no role changed without nodes coming
+and going, and the false announcers delivered as before.

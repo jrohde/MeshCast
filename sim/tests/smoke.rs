@@ -792,3 +792,26 @@ fn listeners_of_one_album_are_relayed_to() {
     }
     assert_eq!(missing, 0, "{missing} of {pairs} listener-piece pairs never completed");
 }
+
+#[test]
+fn two_uploaders_under_a_duty_cycle_take_turns() {
+    // Band O, 50 nodes on 1 km², two sources of an hour of music in 70 kB pieces. A holder that
+    // finds the channel busy backs off over a window that doubles each time, and one that sends
+    // back to back never finds it busy: in this world one source uploaded at a third of its rate
+    // for 25 minutes, deferring 4,576 times, and the hour took 37 minutes instead of 20. The
+    // announcer now divides its listening time in phases under a duty cycle too (PROTOCOL.md §4).
+    let mut s = cell(BulkPreset::GfskO, 50, 1.0, 5);
+    s.sources = 2;
+    s.tracks = 12;
+    s.mix = meshcast_sim::scenario::parse_mix("snac-music:70").unwrap();
+    let mut b = build(&s, Params::default());
+    b.engine.run(3_600_000, 600_000);
+    let m = &b.engine.metrics;
+    let mut last = 0;
+    for (id, t) in &b.tracks {
+        for &f in &t.followers {
+            last = last.max(m.completions.get(&(f, *id)).copied().unwrap_or(u64::MAX));
+        }
+    }
+    assert!(last < 25 * 60_000, "the last listener had the hour after {:.1} min", last as f64 / 60_000.0);
+}

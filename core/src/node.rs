@@ -1730,20 +1730,17 @@ impl Node {
         }
     }
 
-    /// Whether an announcer on `carrier` divides its listening time into upload phases. Under
-    /// polite access every transmission is short and followed by a pause, so an upload is spread
-    /// over minutes and hidden uploaders overlap. On a radio carrier no regulator caps, the
-    /// receiver is the only limit, so dividing its time costs nothing in total, and on a hopping
-    /// one uploads to an announcer all wait for the end of the meeting dwell and start together:
+    /// Whether an announcer on `carrier` divides its listening time into upload phases: on every
+    /// radio carrier. Under polite access every transmission is short and followed by a pause, so
+    /// an upload is spread over minutes and hidden uploaders overlap. Where no regulator caps the
+    /// sender, uploads to an announcer wait for the end of the meeting dwell and start together:
     /// 45 % of ESP-NOW's upload frames collided at their announcer (FEASIBILITY.md §15). Under a
-    /// duty cycle budgeted per hour an upload is a burst of seconds at the full rate that rarely
-    /// meets another, and holding it to one phase in K made it K times slower.
+    /// duty cycle a holder that sends back to back never finds the channel busy, while one that
+    /// does backs off over a window that doubles each time: one source uploaded at a third of its
+    /// rate for 25 minutes (FEASIBILITY.md §18). A lone holder has the whole cycle, so dividing
+    /// costs it nothing.
     fn divides_listening_time(&self, carrier: usize) -> bool {
-        let c = &self.carriers[carrier];
-        match c.p.band {
-            Some(b) => matches!(self.discipline.rule(b), Access::Polite { .. }),
-            None => c.p.kind != CarrierKind::Ip,
-        }
+        self.carriers[carrier].p.kind != CarrierKind::Ip
     }
 
     /// The receiver divides its listening time among those it asked to speak: each grant carries
