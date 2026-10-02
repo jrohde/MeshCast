@@ -2067,3 +2067,60 @@ which way (at 70 kB, five of eight late instead of one). In a late world one of 
 uploaded at a third of its rate for 25 minutes, deferring to a busy channel 4,576 times (41 times on
 main): the other source's frames, sent back to back, left it no gap. That is the chaining of §14.2
 between two holders rather than an announcer and a holder, and it is open.
+
+## 17. Relaying for another cell's listeners
+
+§16.6 left one question open: across 15 km² of band L, with every listener following one album of
+four, two of eight worlds left 9 to 14 % of an album's listeners without it. The trace of the worst
+world: the album's source was the announcer of its own cell, which does not upload; its carousel
+passed the album once, for the few listeners there, only three followers caught it, and it never
+left that cell. Twelve announcers elsewhere asked for it 1,873 times in twelve hours, and no node
+in their reach held it. Content crosses cells only through nodes that carry it
+(PROTOCOL.md §4), and with each listener carrying one album of four the chain of carriers broke.
+
+Five variants were measured, on single-album follows across 15 km² of band L and band O. Medians
+of all of what each follower follows, minutes; frames; what a follower holds; the worst world's
+share of listener-piece pairs that completed in twelve hours:
+
+| Variant | Band L | Band O |
+|---|---|---|
+| None (§16) | 52.0, 245,597, 473 kB, 86.1 % | 23.1, 90,992, 482 kB, 100 % |
+| A follower keeps what it overhears of a channel it follows | 42.6, 237,768, 1,585 kB, 86.9 % | |
+| ... and asks for every collection manifest of it | 42.4, 239,034, 1,610 kB, 86.9 % | |
+| ... and an announcer passes what another asks for and holds | 42.3, 240,130, 1,611 kB, 86.9 % | |
+| The first two, and a follower takes on every ask it hears from another announcer | 42.7, 292,452, 1,895 kB, 100 % | 27.1, 107,867, 1,914 kB, 100 % |
+| Instead of keeping what it overhears, it fetches only what another announcer asks for | 44.6, 304,638, 1,578 kB, 100 % | 27.9, 125,246, 1,528 kB, 100 % |
+| ... only what it asks for its own listeners | 44.3, 302,497, 1,480 kB, 100 % | 26.8, 111,935, 1,304 kB, 100 % |
+| ... and only once nobody has met that ask for `T_want_min` | **47.5, 292,287, 1,000 kB, 99.6 %** | **24.9, 96,225, 664 kB, 100 %** |
+
+Keeping what a follower overhears did not help: the followers in reach of other cells were at the
+edge of the source's cell and had caught the one pass only in part, and what a node does not want
+it does not repair. Nor did an announcer passing what a neighbour asked for: the source's
+announcer heard none of the asks. What worked was a follower taking on the want itself: it asks
+its own announcer, completes the piece and offers it to the cell that asked. Taking on every ask
+cost what following the whole channel costs, in storage and in band O frames, because an
+announcer asks for everything it serves, listened to or not. So an announcer now marks in its asks
+what its own followers asked for (bit 7 of the phase byte, PROTOCOL.md §3.3), and a follower
+relays only those, and only once nobody has met the ask for `T_want_min`, since most are answered
+by a holder within a round. The remaining 0.4 % of band L were two nodes that were the announcers
+of cells of their own and heard no other announcer at all: between announcers alone there is no
+way across (PROTOCOL.md §9, question 11).
+
+What relaying costs where nothing was missing, single-album follows again, all of it in minutes,
+frames, what a follower holds:
+
+| | Without | With |
+|---|---|---|
+| Band O neighbourhood | 18.3, 13,200, 322 kB | 18.3, 13,200, 324 kB |
+| Band L neighbourhood | 14.5, 28,666, 322 kB | 14.1, 29,282, 358 kB |
+| Band O, 15 km² | 23.1, 90,992, 482 kB | 24.9, 96,225 (+6 %), 664 kB |
+| Band L, 15 km² | 52.0, 245,597, 473 kB | 47.5, 292,287 (+19 %), 1,000 kB |
+
+With covers the band L network went from 86.3 to 99.2 % in its worst world. Where every listener
+follows whole channels nothing changes: six of the nine scenarios ran byte for byte as before and
+the other three within a tenth of a minute (band L 15 km² 22.2 to 22.1 minutes, with ESP-NOW and
+the band L town 0.1 to 1.2 % fewer frames); the living network held every window, newcomers
+caught up as before (band L 9.1 minutes, the slowest 24.0 instead of 22.2), no role changed
+without nodes coming and going, and the false announcers were within a point of §16. The size
+sweep of §13 ran byte for byte as before except across 15 km² of band L, where every size took
+as long or up to 3 minutes less.

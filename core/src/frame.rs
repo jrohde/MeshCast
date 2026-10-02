@@ -59,6 +59,13 @@ impl PieceSet {
     }
 }
 
+/// The phase byte of a WANT entry or want set: the upload phase in its low four bits (§4), and in
+/// bit 7 an announcer's mark that one of its own followers asked for the object (PROTOCOL.md
+/// §3.3): an ask for listeners, which another cell's follower may relay, rather than one to fill
+/// the announcer's library.
+pub const PHASE_MASK: u8 = 0x0f;
+pub const ASK_LISTENED: u8 = 0x80;
+
 /// Pieces wanted, as a WANT entry is for one object: open (`grant` NONE) or granted to one
 /// uploader, in the phase of the announcer's listening time it names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -575,7 +582,7 @@ mod tests {
                 heard: vec![(NodeId(7), 0, 3), (NodeId(8), 1, 3), (NodeId(9), 2, 3)],
                 have: vec![ShortId([3; 8]); 1],
                 have_sets: vec![PieceSet { manifest: ShortId([6; 8]), first: 0, bits: u64::MAX }; 4],
-                want: vec![(ShortId([4; 8]), NodeId::NONE, 0); 1],
+                want: vec![(ShortId([4; 8]), NodeId::NONE, ASK_LISTENED | 3); 1],
                 sets: vec![WantSet { set: PieceSet { manifest: ShortId([5; 8]), first: 64, bits: 0x8000_0000_0000_0001 }, grant: NodeId(9), phase: 3 }; 3],
             }),
             Frame::ManifestAnnounce(ManifestAnnounce {

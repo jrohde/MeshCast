@@ -8,8 +8,8 @@ every node runs the same protocol and any node can become announcer. See PROTOCO
 and when the next beacon comes. Its absence triggers an election.
 
 **Bridge node.** A node that hears into a neighbouring cell and so lets content cross: it offers
-what that cell's announcer asks for, goes on an excursion to it, or repairs from a holder there
-whose uploads it overheard (PROTOCOL.md §4).
+what that cell's announcer asks for, relays what that cell's listeners lack, goes on an excursion
+to it, or repairs from a holder there whose uploads it overheard (PROTOCOL.md §4).
 
 **Capability.** What a node is, as opposed to what it experiences in its role: mains power and an
 internet uplink, carried in every beacon. Elections compare it before the score; a follower

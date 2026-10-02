@@ -9,7 +9,7 @@ use crate::carousel::{Carousel, CarouselParams, Item};
 use crate::discipline::{Accounting, Verdict};
 use crate::election::{step_up_order, Election, Transition};
 use crate::fatsoen::Fatsoen;
-use crate::frame::{AnnounceEntry, Beacon, Bulk, CarrierKind, CAP_IP, CAP_MAINS, Class, Frame, FrameType, Gossip, ManifestAnnounce, Nack, PieceSet, WantSet, HAVE_BUDGET, HAVE_SET_BYTES, MAX_ANNOUNCE_ENTRIES, MAX_GOSSIP_IDS, MAX_NACK_RANGES, MAX_WANT, SYMBOL_SIZE, WANT_BUDGET, WANT_SET_BYTES};
+use crate::frame::{AnnounceEntry, Beacon, Bulk, CarrierKind, CAP_IP, CAP_MAINS, Class, Frame, FrameType, Gossip, ManifestAnnounce, Nack, PieceSet, WantSet, ASK_LISTENED, HAVE_BUDGET, HAVE_SET_BYTES, MAX_ANNOUNCE_ENTRIES, MAX_GOSSIP_IDS, MAX_NACK_RANGES, MAX_WANT, PHASE_MASK, SYMBOL_SIZE, WANT_BUDGET, WANT_SET_BYTES};
 use crate::ids::{ChannelId, NodeId, ShortId};
 use crate::manifest::{Collection, CollectionRef, Manifest, ObjectRef};
 use crate::rendition::RenditionTable;
@@ -120,6 +120,8 @@ pub struct Stats {
     pub follow_ups_sent: u64,
     /// Follower asks for what a manifest just adopted named, sooner than `T_want_min`.
     pub wants_rest: u64,
+    /// Pieces and covers fetched to relay for another cell's listeners (PROTOCOL.md §4).
+    pub relay_wants: u64,
     /// How well we heard the holder, summed over grants that ended in completion and over grants
     /// that lapsed (dBm; divide by the counts).
     pub grant_rssi_completed: i64,
@@ -422,6 +424,11 @@ pub struct Node {
     /// Holder: the collection manifests we last listed in a HAVE with each root manifest, which
     /// we upload after it when granted it (PROTOCOL.md §4).
     offered_with: BTreeMap<ShortId, Vec<ShortId>>,
+    /// Pieces and covers of collections we do not listen to that another cell's announcer asked
+    /// for: we fetch and keep them to hand on.
+    relayed: BTreeSet<ShortId>,
+    /// When we first heard another cell's announcer ask, for listeners, for an object we lack.
+    relay_asks: BTreeMap<ShortId, Millis>,
     /// Announcer: for each root manifest granted on an offer, the holder and what it listed with
     /// it: the collection manifests new in it among those come with it.
     root_follow_ups: BTreeMap<ShortId, (NodeId, Vec<ShortId>)>,
@@ -511,6 +518,8 @@ impl Node {
             ask_rest_at: None,
             pieces: BTreeMap::new(),
             offered_with: BTreeMap::new(),
+            relayed: BTreeSet::new(),
+            relay_asks: BTreeMap::new(),
             root_follow_ups: BTreeMap::new(),
             stats,
             cfg,
@@ -983,15 +992,21 @@ impl Node {
             if let Some(t) = root.renditions {
                 set.insert(t.id.short());
             }
-            for c in root.collections.iter().filter(|c| self.carries(chan, c.cid)) {
+            // Every collection manifest of a channel we follow at all; the pieces and cover of what
+            // we carry, and of the rest what another cell asked us to relay.
+            for c in &root.collections {
                 set.insert(c.manifest.id.short());
+                let carried = self.carries(chan, c.cid);
                 if let Some(v) = c.cover {
-                    set.insert(v.id.short());
+                    if carried || self.relayed.contains(&v.id.short()) {
+                        set.insert(v.id.short());
+                    }
                 }
                 // The collection manifest held, which may be older than the one the root names.
                 if let Some(held) = self.collections.get(&(*chan, c.cid)) {
                     set.insert(*held);
-                    set.extend(self.pieces.get(held).into_iter().flatten().copied());
+                    let pieces = self.pieces.get(held).into_iter().flatten();
+                    set.extend(pieces.filter(|p| carried || self.relayed.contains(p)).copied());
                 }
             }
         }
@@ -1169,6 +1184,10 @@ impl Node {
             return;
         }
         let keep = self.interesting_objects();
+        self.relayed.retain(|id| keep.contains(id));
+        let ttl = self.cfg.params.want_ttl_ms;
+        let now = self.now;
+        self.relay_asks.retain(|_, t| now < *t + ttl);
         let gone: Vec<ShortId> = self.store.ids().filter(|id| !keep.contains(id) && !self.own_objects.contains(id) && !self.own_manifests.iter().any(|(_, s, _, _)| s == *id)).copied().collect();
         for id in gone {
             self.store.remove(&id);
@@ -1256,6 +1275,7 @@ impl Node {
         self.manifests.clear();
         self.roots.clear();
         self.collections.clear();
+        self.relayed.clear();
         self.pieces.clear();
         self.own_manifests.clear();
         self.renditions.clear();
@@ -1983,6 +2003,10 @@ impl Node {
         let mut groups: BTreeMap<(ShortId, NodeId, u8), Vec<u16>> = BTreeMap::new();
         for id in ids {
             let (grant, phase) = self.grants.get(&id).map(|(h, _, p)| (*h, *p)).unwrap_or((NodeId::NONE, 0));
+            // An announcer marks what its own followers asked for: an ask for listeners, which a
+            // follower of another cell may relay, rather than one to fill its library (§3.3).
+            let listened = self.is_announcing() && self.carriers.iter().filter_map(|c| c.carousel.as_ref()).any(|k| k.wanted_by(&id) > 0);
+            let phase = phase | if listened { ASK_LISTENED } else { 0 };
             match index.get(&id) {
                 Some((m, k)) => groups.entry((*m, grant, phase)).or_default().push(*k),
                 None => singles.push((id, grant, phase)),
@@ -2938,8 +2962,11 @@ impl Node {
                     to_want.push(t.id.short());
                 }
             }
-            let carried: Vec<&CollectionRef> = m.collections.iter().filter(|c| self.carries(&chan, c.cid)).collect();
-            for c in carried {
+            // Every collection manifest of a channel we follow at all, and of every channel we
+            // serve: they are small, and they are how we know what another cell asks for when it
+            // asks us to relay (§4). Covers only of what we carry.
+            let all: Vec<(CollectionRef, bool)> = m.collections.iter().map(|c| (c.clone(), self.carries(&chan, c.cid))).collect();
+            for (c, carried) in &all {
                 let id = c.manifest.id.short();
                 if self.store.ensure(ObjectMeta { id: c.manifest.id, len: c.manifest.len, kind: ContentType::Collection }) {
                     self.quiet_complete.push(id);
@@ -2950,7 +2977,7 @@ impl Node {
                 } else {
                     to_want.push(id);
                 }
-                if let Some(v) = c.cover {
+                if let (Some(v), true) = (c.cover, *carried) {
                     if self.store.ensure(ObjectMeta { id: v.id, len: v.len, kind: ContentType::Image }) {
                         self.quiet_complete.push(v.id.short());
                     }
@@ -3095,6 +3122,19 @@ impl Node {
         let held_there = |s: &ShortId| self.neighbors.get(&ann).map(|n| n.haves.contains(s)).unwrap_or(false);
         let sending = |s: &ShortId| c.upload.iter().chain(c.upload_queue.iter()).any(|u| u.object == *s && u.to == ann);
         listed.iter().filter(|s| self.store.has_complete(s) && !held_there(s) && !sending(s)).copied().collect()
+    }
+
+    /// What we know of `id` as a piece or a cover of a collection of a channel we follow, if it
+    /// is one: what we need to fetch it on another cell's behalf.
+    fn relay_meta(&self, id: &ShortId) -> Option<ObjectMeta> {
+        for ((chan, _), held) in &self.collections {
+            if !self.follows_channel(chan) || !self.pieces.get(held).map(|l| l.contains(id)).unwrap_or(false) {
+                continue;
+            }
+            let col = self.store.bytes(held).and_then(|b| Collection::decode(b).ok())?;
+            return col.pieces.iter().find(|o| o.id.short() == *id).map(|o| o.meta());
+        }
+        self.named_collections().filter(|(chan, _)| self.follows_channel(chan)).find_map(|(_, c)| c.cover.filter(|v| v.id.short() == *id).map(|v| ObjectMeta { id: v.id, len: v.len, kind: ContentType::Image }))
     }
 
     /// A collection manifest no collection uses any more: its pieces are no longer read by it,
@@ -3260,6 +3300,28 @@ impl Node {
             } else if !from_announcer {
                 continue;
             }
+            // Relaying for another cell (PROTOCOL.md §4): its announcer asks, for its listeners, for
+            // a piece or cover of a channel we follow that we lack, and nobody has met the ask for
+            // `T_want_min`: we fetch it from our own cell and keep it, to hand it on.
+            if from_announcer && !own {
+                let asked: Vec<ShortId> = g.want.iter().filter(|(w, grant, phase)| grant.is_none() && phase & ASK_LISTENED != 0 && !self.store.has_complete(w) && !self.wants.contains(w)).map(|(w, _, _)| *w).collect();
+                // Only an ask the neighbourhood has not met for `T_want_min`: most are answered by
+                // a holder within a round, and relaying those only duplicated the work.
+                let wait = self.cfg.params.t_want_min_ms;
+                for w in asked {
+                    let first = *self.relay_asks.entry(w).or_insert(now);
+                    if now < first + wait {
+                        continue;
+                    }
+                    let Some(meta) = self.relay_meta(&w) else { continue };
+                    self.relayed.insert(w);
+                    if self.store.ensure(meta) {
+                        self.quiet_complete.push(w);
+                    }
+                    self.stats.relay_wants += 1;
+                    self.add_want(w);
+                }
+            }
             let mut granted: Vec<Upload> = Vec::new();
             for (w, grant, phase) in g.want.iter() {
                 // A rendition we can make counts as held; it is made only when we are granted it,
@@ -3279,14 +3341,14 @@ impl Node {
                     // The grant names our phase; a running upload follows it if it changed.
                     for u in c.upload.iter_mut().chain(c.upload_queue.iter_mut()) {
                         if u.object == *w && u.to == g.node {
-                            u.phase = *phase;
+                            u.phase = *phase & PHASE_MASK;
                         }
                     }
                     let active = c.upload.as_ref().map(|u| u.object == *w && u.to == g.node).unwrap_or(false);
                     let queued = c.upload_queue.iter().any(|u| u.object == *w && u.to == g.node);
                     if !active && !queued && !granted.iter().any(|u| u.object == *w) {
                         let manifest = self.store.entry(w).map(|e| e.kind().is_manifest()).unwrap_or(false);
-                        granted.push(Upload { object: *w, to: g.node, start_at: now, started: false, block: 0, esi: 0, list: None, phase: *phase, manifest });
+                        granted.push(Upload { object: *w, to: g.node, start_at: now, started: false, block: 0, esi: 0, list: None, phase: *phase & PHASE_MASK, manifest });
                     }
                 } else if grant.is_none() {
                     // Open ask: offer, unless we are already uploading it to this announcer.
