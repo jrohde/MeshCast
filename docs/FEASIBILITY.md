@@ -2366,3 +2366,56 @@ elected another announcer in that world, and the limit is the known one of a cel
 can reach. The report of the living network now also gives the newcomers' time counting only the
 time they were switched on, which ruled out the first suspicion, a newcomer switched off for an
 hour.
+
+## 21. Sparse interests across small cells: an open problem
+
+Every scenario so far had each cell follow nearly every channel. The living network of §7.6 was
+spread over 15 km² with 100 nodes and 2 stations, 24 channels, each node following 2 (four worlds,
+48 hours, daily 22 kB bulletins), to see what a cell does with content nobody in it follows.
+
+| Spread over 15 km², 24 channels, 2 followed | Band O | Band L |
+|---|---|---|
+| Cells | 3 to 4 | 13 to 16 |
+| Bulletins delivered within one publication period | 99.6 to 99.8 % | 69.7 to 85.8 % |
+| Uploads | 812 to 1,064 | 4,121 to 6,635 |
+| Excursions | 0 to 9 | 300 to 328 |
+| Role changes after the first hour | 0 to 8 | 688 to 1,865 |
+
+Band O, with its few large cells, delivers. Band L, with many small ones, delivers late or not at
+all: in one world the median listener had a bulletin after 1 to 11 hours, and one bulletin reached
+nobody in its period. Traced in one world, the chain is this. A channel has about eight followers
+in the whole network, so most cells between its source and a listener have none. Every announcer
+fetches every channel it hears of, but announcers do not upload (PROTOCOL.md §4) and followers
+relay only for channels they follow (§17), so content crosses a cell without followers of its
+channel only when a listener beyond it goes on an excursion to an announcer that has it, after
+`T_excursion` (40 minutes) and one cell at a time. A follower that waits that long without one
+symbol of what it wants also takes its honest announcer for one that serves nothing (§12.4),
+ignores it for `want_ttl` and leads its own cell for that hour: one node cycled follower, candidate,
+announcer, follower every two hours for a whole day, and most of the role changes above are
+excursions and such cycles.
+
+Tried so far:
+
+- *An announcer carries only what its cell asked for* (ABUSE.md item 4, bounded generosity): band L
+  delivered less (66.2 to 79.9 %) and band O needed 37 % more uploads. The announcer's generosity is
+  what lets an excursion find content in a cell that does not follow it; without it there was
+  nothing to visit. Not taken.
+- *Shorter excursions*: with `T_excursion` at 20 minutes band L delivered 79.5 to 92.5 %, at 10
+  minutes 83.7 to 88.5 %, with up to 36 % more uploads. Better, and still far from band O.
+
+Not tried yet, in the order they look worth trying:
+
+1. **Announcers that upload to neighbouring announcers**: a station carries every channel it
+   hears of already; answering another announcer's ask for its listeners (the marked asks of
+   §17), in the rendezvous where both listen, would make the stations a backbone, one hop per
+   ask instead of one excursion per listener per hop. Announcers were stopped from uploading in
+   §9.6 because a granted announcer never sent and its carousel HAVE silenced the followers that
+   would have offered; an explicit offer, made last, after any follower's, would avoid both.
+2. **Relaying for channels a node does not follow**: a follower near a cell border that hears
+   another cell's marked ask could fetch the collection manifest the ask's set names from its
+   own announcer, which carries it, and relay as for a followed channel (§17), at the cost of
+   battery-powered nodes carrying what they do not listen to.
+3. **No shun for an announcer that is asking**: an announcer that lacks what its follower wants
+   but asks for it, or for the manifest that names it, is honest and unable, not false; the
+   follower should go on an excursion, not leave its cell leaderless for an hour. This needs care,
+   because a false announcer could ask forever (ABUSE.md, election capture).
