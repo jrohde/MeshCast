@@ -11,7 +11,7 @@ use crate::election::{step_up_order, Election, Transition};
 use crate::fatsoen::Fatsoen;
 use crate::frame::{AnnounceEntry, Beacon, Bulk, CarrierKind, CAP_IP, CAP_MAINS, Class, Frame, FrameType, Gossip, ManifestAnnounce, Nack, PieceSet, WantSet, HAVE_BUDGET, HAVE_SET_BYTES, MAX_ANNOUNCE_ENTRIES, MAX_GOSSIP_IDS, MAX_NACK_RANGES, MAX_WANT, SYMBOL_SIZE, WANT_BUDGET, WANT_SET_BYTES};
 use crate::ids::{ChannelId, NodeId, ShortId};
-use crate::manifest::Manifest;
+use crate::manifest::{Collection, CollectionRef, Manifest, ObjectRef};
 use crate::rendition::RenditionTable;
 use crate::object::{ContentType, ObjectMeta};
 use crate::params::{Params, SCORE_MAX};
@@ -114,6 +114,10 @@ pub struct Stats {
     /// Announcer side: offers granted, and grants that lapsed without progress.
     pub grants_given: u64,
     pub grants_lapsed: u64,
+    /// Collection manifests that came with a root manifest (§4): granted with it on the
+    /// announcer side, uploaded after it on the holder side.
+    pub follow_ups_granted: u64,
+    pub follow_ups_sent: u64,
     /// Follower asks for what a manifest just adopted named, sooner than `T_want_min`.
     pub wants_rest: u64,
     /// How well we heard the holder, summed over grants that ended in completion and over grants
@@ -202,6 +206,14 @@ impl ManifestInfo {
     }
 }
 
+/// What a root manifest we adopted names, read once when it is adopted: its signature is checked
+/// then and not each time we look.
+#[derive(Clone, Debug)]
+struct RootIndex {
+    collections: Vec<CollectionRef>,
+    renditions: Option<ObjectRef>,
+}
+
 /// A source transmitting an object to the announcer: either a full pass or a NACKed list.
 #[derive(Clone, Debug)]
 struct Upload {
@@ -219,6 +231,8 @@ struct Upload {
     /// The phase of the announcer's listening time this upload uses, named by its grant or by
     /// the NACK it answers.
     phase: u8,
+    /// A manifest, root or collection: it goes before the objects it names (PROTOCOL.md §4).
+    manifest: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -246,11 +260,13 @@ impl CarrierRt {
         match (&self.upload, urgent) {
             (None, _) => self.upload = Some(u),
             (Some(_), true) => self.upload_queue.push_front(u),
-            (Some(_), false) if u.to == own => {
-                let at = self.upload_queue.iter().position(|q| q.to != own && q.list.is_none()).unwrap_or(self.upload_queue.len());
+            (Some(_), false) => {
+                // Repairs, then manifests, then our own announcer's grants, then other cells'.
+                let rank = |q: &Upload| if q.list.is_some() { 0 } else if q.manifest { 1 } else if q.to == own { 2 } else { 3 };
+                let r = rank(&u);
+                let at = self.upload_queue.iter().position(|q| rank(q) > r).unwrap_or(self.upload_queue.len());
                 self.upload_queue.insert(at, u);
             }
-            (Some(_), false) => self.upload_queue.push_back(u),
         }
     }
 
@@ -315,8 +331,18 @@ pub struct Node {
     cfg: NodeConfig,
     now: Millis,
     pub store: MemStore,
+    /// Channels followed whole: every collection, now and later.
     follows: BTreeSet<ChannelId>,
+    /// Collections followed one by one, as (channel, cid).
+    follows_collections: BTreeSet<(ChannelId, u32)>,
+    /// The root manifest of each channel (PROTOCOL.md §2).
     manifests: BTreeMap<ChannelId, ManifestInfo>,
+    /// What each root manifest we adopted and hold names, by its short id.
+    roots: BTreeMap<ShortId, RootIndex>,
+    /// The collection manifest we adopted and hold for each collection. It stays, with its pieces,
+    /// until the one a newer root names is held: a new root alone must not cost a follower the
+    /// pieces it holds.
+    collections: BTreeMap<(ChannelId, u32), ShortId>,
     own_manifests: Vec<(ChannelId, ShortId, u32, u32)>,
     own_objects: BTreeSet<ShortId>,
     /// Our own objects and manifests that nobody else has been seen to carry yet, and since when:
@@ -390,9 +416,15 @@ pub struct Node {
     ask_rest_at: Option<Millis>,
     /// When we last asked our announcer for one symbol as proof that it serves (§5.2).
     last_probe: Millis,
-    /// The pieces of every manifest we adopted, in the order it lists them: what a want set's
-    /// bitmap refers to (PROTOCOL.md §3.3).
+    /// The pieces of every collection manifest we adopted, in the order it lists them: what a
+    /// set's bitmap refers to (PROTOCOL.md §3.3).
     pieces: BTreeMap<ShortId, Vec<ShortId>>,
+    /// Holder: the collection manifests we last listed in a HAVE with each root manifest, which
+    /// we upload after it when granted it (PROTOCOL.md §4).
+    offered_with: BTreeMap<ShortId, Vec<ShortId>>,
+    /// Announcer: for each root manifest granted on an offer, the holder and what it listed with
+    /// it: the collection manifests new in it among those come with it.
+    root_follow_ups: BTreeMap<ShortId, (NodeId, Vec<ShortId>)>,
     pub stats: Stats,
 }
 
@@ -431,7 +463,10 @@ impl Node {
         Node {
             store: MemStore::new(cfg.keep_bytes_below),
             follows: BTreeSet::new(),
+            follows_collections: BTreeSet::new(),
             manifests: BTreeMap::new(),
+            roots: BTreeMap::new(),
+            collections: BTreeMap::new(),
             own_manifests: Vec::new(),
             own_objects: BTreeSet::new(),
             pending_ack: BTreeMap::new(),
@@ -475,6 +510,8 @@ impl Node {
             last_probe: 0,
             ask_rest_at: None,
             pieces: BTreeMap::new(),
+            offered_with: BTreeMap::new(),
+            root_follow_ups: BTreeMap::new(),
             stats,
             cfg,
             now,
@@ -791,6 +828,7 @@ impl Node {
         &self.wants
     }
 
+    /// The channels followed whole.
     pub fn follows(&self) -> &BTreeSet<ChannelId> {
         &self.follows
     }
@@ -836,6 +874,16 @@ impl Node {
         (known, complete, short)
     }
 
+    /// Diagnostic: whether we take our announcer to be asking for `id` itself (PROTOCOL.md §2).
+    pub fn announcer_asked_for(&self, id: &ShortId) -> bool {
+        self.ann_asks.get(id).map(|t| self.now < *t + self.cfg.params.want_ttl_ms).unwrap_or(false)
+    }
+
+    /// Diagnostic: bytes of the objects we hold complete.
+    pub fn held_bytes(&self) -> u64 {
+        self.store.complete_ids().filter_map(|id| self.store.entry(id).and_then(|e| e.len())).map(|l| l as u64).sum()
+    }
+
     /// Our colour and the size of our conflict set (ourselves included).
     pub fn colouring(&self) -> (u8, u8) {
         (self.my_colour(), self.colours())
@@ -846,8 +894,21 @@ impl Node {
         self.conflicts.iter().map(|(id, (_, c, _))| (id.0, *c)).collect()
     }
 
+    /// Follow a whole channel: every collection it has, now and later.
     pub fn follow(&mut self, chan: ChannelId) {
         self.follows.insert(chan);
+        self.readopt(chan);
+    }
+
+    /// Follow one collection of a channel.
+    pub fn follow_collection(&mut self, chan: ChannelId, cid: u32) {
+        self.follows_collections.insert((chan, cid));
+        self.readopt(chan);
+    }
+
+    /// Something of `chan` is followed that was not: adopt its root manifest again, so that what
+    /// it names for us is registered and wanted.
+    fn readopt(&mut self, chan: ChannelId) {
         if let Some(a) = self.manifests.get(&chan).and_then(|i| i.adopted) {
             if let Some(bytes) = self.store.bytes(&a.short).map(|b| b.to_vec()) {
                 if let Ok(m) = Manifest::decode(&bytes) {
@@ -869,34 +930,68 @@ impl Node {
         self.want_refresh = true;
     }
 
-    /// Stop following a channel: its objects are no longer wanted (unless another followed or
-    /// served manifest references them) and its manifest is no longer announced by us.
+    /// Stop following a channel, whole or any of its collections: its objects are no longer
+    /// wanted (unless another followed or served manifest references them) and its manifest is
+    /// no longer announced by us.
     pub fn unfollow(&mut self, chan: ChannelId) {
         self.follows.remove(&chan);
+        self.follows_collections.retain(|(c, _)| *c != chan);
         self.prune_wants();
     }
 
-    /// Objects referenced by the latest manifest of a channel we are interested in.
+    /// Stop following one collection.
+    pub fn unfollow_collection(&mut self, chan: ChannelId, cid: u32) {
+        self.follows_collections.remove(&(chan, cid));
+        self.prune_wants();
+    }
+
+    /// Whether we follow `chan`, whole or any of its collections: we then keep its root manifest.
+    fn follows_channel(&self, chan: &ChannelId) -> bool {
+        self.follows.contains(chan) || self.follows_collections.range((*chan, 0)..=(*chan, u32::MAX)).next().is_some()
+    }
+
+    /// Whether we listen to collection `cid` of `chan`.
+    fn listens(&self, chan: &ChannelId, cid: u32) -> bool {
+        self.follows.contains(chan) || self.follows_collections.contains(&(*chan, cid))
+    }
+
+    /// Whether we want collection `cid` of `chan`: we listen to it, or serve it as announcer.
+    fn carries(&self, chan: &ChannelId, cid: u32) -> bool {
+        self.is_announcing() || self.listens(chan, cid)
+    }
+
+    /// The collections the adopted root manifests we hold name, as (channel, collection).
+    fn named_collections(&self) -> impl Iterator<Item = (ChannelId, &CollectionRef)> + '_ {
+        self.manifests.iter().filter_map(|(c, i)| i.adopted.and_then(|a| self.roots.get(&a.short)).map(|r| (*c, r))).flat_map(|(c, r)| r.collections.iter().map(move |x| (c, x)))
+    }
+
+    /// Objects referenced by the latest manifests of the channels and collections we are
+    /// interested in.
     fn interesting_objects(&self) -> BTreeSet<ShortId> {
         let mut set = BTreeSet::new();
         let announcing = self.is_announcing();
         for (chan, info) in &self.manifests {
-            if !(announcing || self.follows.contains(chan)) {
+            if !(announcing || self.follows_channel(chan)) {
                 continue;
             }
             // The adopted manifest's objects stay until its successor is held: an announcement
             // alone must not cost a follower its window.
             for r in [info.adopted, info.announced].into_iter().flatten() {
                 set.insert(r.short);
-                if let Some(bytes) = self.store.bytes(&r.short) {
-                    if let Ok(m) = Manifest::decode(bytes) {
-                        for o in &m.objects {
-                            set.insert(o.id.short());
-                        }
-                        if let Some(t) = m.renditions {
-                            set.insert(t.id.short());
-                        }
-                    }
+            }
+            let Some(root) = info.adopted.and_then(|a| self.roots.get(&a.short)) else { continue };
+            if let Some(t) = root.renditions {
+                set.insert(t.id.short());
+            }
+            for c in root.collections.iter().filter(|c| self.carries(chan, c.cid)) {
+                set.insert(c.manifest.id.short());
+                if let Some(v) = c.cover {
+                    set.insert(v.id.short());
+                }
+                // The collection manifest held, which may be older than the one the root names.
+                if let Some(held) = self.collections.get(&(*chan, c.cid)) {
+                    set.insert(*held);
+                    set.extend(self.pieces.get(held).into_iter().flatten().copied());
                 }
             }
         }
@@ -939,9 +1034,9 @@ impl Node {
         let now = self.now;
         let ahead = 2 * self.cfg.params.t_render_ahead_ms;
         let mut scheduled = false;
-        for i in self.manifests.values().filter_map(|i| i.adopted) {
-            let Some(m) = self.store.bytes(&i.short).and_then(|b| Manifest::decode(b).ok()) else { continue };
-            let Some(o) = m.objects.iter().find(|o| o.id.short() == parent) else { continue };
+        for held in self.collections.values() {
+            let Some(m) = self.store.bytes(held).and_then(|b| Collection::decode(b).ok()) else { continue };
+            let Some(o) = m.pieces.iter().find(|o| o.id.short() == parent) else { continue };
             let plays_ms = o.kind.codec().map(|c| o.len as u64 * 8 * 1000 / c.bits_per_second().max(1) as u64).unwrap_or(0) as Millis;
             for e in m.schedule.iter().filter(|e| e.object == parent) {
                 scheduled = true;
@@ -993,13 +1088,12 @@ impl Node {
     fn plan_renditions(&mut self) {
         let mut want = Vec::new();
         let mut due = Vec::new();
-        for (chan, info) in &self.manifests {
-            if !self.follows.contains(chan) {
+        for ((chan, cid), held) in &self.collections {
+            if !self.listens(chan, *cid) {
                 continue;
             }
-            let Some(a) = info.adopted else { continue };
-            let Some(m) = self.store.bytes(&a.short).and_then(|b| Manifest::decode(b).ok()) else { continue };
-            for o in m.objects.iter().filter(|o| o.kind.codec().is_some()) {
+            let Some(m) = self.store.bytes(held).and_then(|b| Collection::decode(b).ok()) else { continue };
+            for o in m.pieces.iter().filter(|o| o.kind.codec().is_some()) {
                 let parent = o.id.short();
                 let Some((&r, &(_, meta))) = self.renditions.iter().find(|(_, (p, _))| *p == parent) else { continue };
                 if self.store.has_complete(&r) || self.wants.contains(&r) || self.renditions_due.iter().any(|(_, id)| *id == r) {
@@ -1049,7 +1143,9 @@ impl Node {
     }
 
     /// Drop wants for objects that no manifest of interest references any more (unfollowed
-    /// channels, or objects that left a channel's manifest).
+    /// channels, or objects that left a channel's manifest), and offers and uploads of them.
+    /// Our own objects we go on offering and uploading: a source need not follow its own
+    /// channel, and dropped them from its queue whenever it adopted another channel's manifest.
     fn prune_wants(&mut self) {
         let mut keep = self.interesting_objects();
         let stale: Vec<ShortId> = self.wants.iter().filter(|id| !keep.contains(id)).copied().collect();
@@ -1066,8 +1162,8 @@ impl Node {
         }
     }
 
-    /// Forget objects no manifest of interest references any more (a channel we unfollowed, or
-    /// an object that left its channel's window). Own objects are kept.
+    /// Forget objects no manifest of interest references any more (a channel or collection we
+    /// unfollowed, or an object that left its collection's window). Own objects are kept.
     fn evict_orphans(&mut self) {
         if self.now < self.keep_until {
             return;
@@ -1078,44 +1174,49 @@ impl Node {
             self.store.remove(&id);
             self.wants.remove(&id);
             self.progress.remove(&id);
+            // What we no longer hold we no longer read: a root's index, a collection's pieces.
+            self.roots.remove(&id);
+            if self.pieces.remove(&id).is_some() {
+                self.collections.retain(|_, s| *s != id);
+            }
         }
     }
 
     /// Objects we hold complete that are not referenced by any manifest we know.
     pub fn orphaned_objects(&self) -> Vec<ShortId> {
         let mut keep = BTreeSet::new();
-        for info in self.manifests.values().flat_map(|i| [i.adopted, i.announced]).flatten() {
-            keep.insert(info.short);
-            if let Some(bytes) = self.store.bytes(&info.short) {
-                if let Ok(m) = Manifest::decode(bytes) {
-                    for o in &m.objects {
-                        keep.insert(o.id.short());
-                    }
-                }
+        for r in self.manifests.values().flat_map(|i| [i.adopted, i.announced]).flatten() {
+            keep.insert(r.short);
+        }
+        for (chan, c) in self.named_collections() {
+            keep.insert(c.manifest.id.short());
+            if let Some(held) = self.collections.get(&(chan, c.cid)) {
+                keep.insert(*held);
+                keep.extend(self.pieces.get(held).into_iter().flatten().copied());
             }
         }
         self.store.complete_ids().filter(|id| !keep.contains(id)).copied().collect()
     }
 
-    /// Publish a channel manifest and the objects it references (we own them, complete).
-    pub fn publish(&mut self, manifest: &Manifest, objects: &[(ObjectMeta, Option<&[u8]>)]) {
-        let (meta, bytes) = manifest.as_object();
+    /// Publish a channel: its root manifest, the collection manifests it names and the objects
+    /// they list (we own them, complete). A collection manifest already published need not be
+    /// passed again.
+    pub fn publish(&mut self, root: &Manifest, collections: &[Collection], objects: &[(ObjectMeta, Option<&[u8]>)]) {
+        let now = self.now;
+        let (meta, bytes) = root.as_object();
         self.store.insert_complete(meta, Some(&bytes));
         let short = meta.id.short();
-        let chan = manifest.channel_id();
-        let old = self.manifests.get(&chan).and_then(|i| i.adopted);
-        self.manifests.insert(chan, ManifestInfo { adopted: Some(ManifestRef { seq: manifest.seq, short, len: meta.len }), announced: None });
-        if let Some(o) = old.filter(|o| o.short != short) {
-            self.pieces.remove(&o.short);
+        let chan = root.channel_id();
+        for c in collections {
+            let (m, b) = c.as_object();
+            let id = m.id.short();
+            if !self.store.has_complete(&id) {
+                self.store.insert_complete(m, Some(&b));
+            }
+            if self.own_objects.insert(id) {
+                self.pending_ack.insert(id, now);
+            }
         }
-        self.pieces.insert(short, manifest.objects.iter().map(|o| o.id.short()).collect());
-        self.own_manifests.retain(|(c, _, _, _)| *c != chan);
-        self.own_manifests.push((chan, short, manifest.seq, meta.len));
-        if let Some(o) = old {
-            self.pending_ack.remove(&o.short);
-        }
-        let now = self.now;
-        self.pending_ack.insert(short, now);
         for (m, b) in objects {
             if !self.store.has_complete(&m.id.short()) {
                 self.store.insert_complete(*m, *b);
@@ -1123,18 +1224,23 @@ impl Node {
             self.own_objects.insert(m.id.short());
             self.pending_ack.insert(m.id.short(), now);
         }
-        for c in self.carriers.iter_mut() {
-            if let Some(car) = c.carousel.as_mut() {
-                if let Some(o) = old {
-                    if o.short != short {
-                        car.remove_manifest(&o.short);
-                    }
-                }
-                car.add_manifest(short);
-                for (k, o) in manifest.objects.iter().enumerate() {
-                    car.set_rank(o.id.short(), k as u16);
-                }
-            }
+        let old = self.set_root(chan, root, short, meta.len, None);
+        self.own_manifests.retain(|(c, _, _, _)| *c != chan);
+        self.own_manifests.push((chan, short, root.seq, meta.len));
+        if let Some(o) = old {
+            self.pending_ack.remove(&o.short);
+        }
+        self.pending_ack.insert(short, now);
+        for c in &root.collections {
+            let id = c.manifest.id.short();
+            let new = self.collections.get(&(chan, c.cid)) != Some(&id);
+            self.adopt_collection(chan, c, new);
+        }
+        // A collection manifest no root of ours names any more is not worth offering.
+        let named: BTreeSet<ShortId> = root.collections.iter().map(|c| c.manifest.id.short()).collect();
+        let stale: Vec<ShortId> = self.pending_ack.keys().filter(|id| self.store.entry(id).map(|e| e.kind() == ContentType::Collection).unwrap_or(false) && !named.contains(id)).copied().collect();
+        for id in stale {
+            self.pending_ack.remove(&id);
         }
         self.prune_wants();
         self.gossip_soon();
@@ -1146,7 +1252,10 @@ impl Node {
         self.reboot(now);
         self.store = MemStore::new(self.cfg.keep_bytes_below);
         self.follows.clear();
+        self.follows_collections.clear();
         self.manifests.clear();
+        self.roots.clear();
+        self.collections.clear();
         self.pieces.clear();
         self.own_manifests.clear();
         self.renditions.clear();
@@ -1405,7 +1514,7 @@ impl Node {
             Transition::BecameAnnouncer => {
                 let mut car = Carousel::new(self.carousel_params());
                 for a in self.manifests.values().filter_map(|i| i.adopted) {
-                    car.add_manifest(a.short);
+                    car.add_manifest(a.short, true);
                 }
                 self.carriers[carrier].carousel = Some(car);
                 self.carriers[carrier].upload = None;
@@ -1435,6 +1544,9 @@ impl Node {
             Transition::BecameFollower(to) | Transition::AnnouncerChanged(to) => {
                 self.keep_until = self.keep_until.max(self.now + self.cfg.params.want_ttl_ms);
                 self.following_since = self.now;
+                // What our announcer asked for and granted is about that announcer.
+                self.ann_asks.clear();
+                self.ann_grants.clear();
                 self.carriers[carrier].carousel = Some(Carousel::new(self.carousel_params()));
                 self.carriers[carrier].upload = None;
                 self.drop_grants_unless_announcing();
@@ -1712,6 +1824,8 @@ impl Node {
         self.repair_phases.clear();
         self.phase_heard = [0; MAX_UPLOAD_PHASES as usize];
         self.granted_to_us.clear();
+        self.offered_with.clear();
+        self.root_follow_ups.clear();
         self.ask_rest_at = None;
         self.offers.clear();
         self.corrections.clear();
@@ -1788,8 +1902,7 @@ impl Node {
             (have, sets)
         } else {
             let ids: Vec<ShortId> = self.pending_ack.keys().filter(|id| self.store.has_complete(id)).copied().collect();
-            let (have, sets, _) = self.pack_have(&ids, 0);
-            (have, sets)
+            self.pack_offer(&ids)
         };
         let (want, sets) = self.take_ask(false);
         if !have.is_empty() || !have_sets.is_empty() || !want.is_empty() || !sets.is_empty() {
@@ -1914,10 +2027,42 @@ impl Node {
     /// pieces of a manifest we hold go as sets, everything else by name. Returns how many of the
     /// rotation's entries were taken.
     fn pack_have(&self, ids: &[ShortId], skip: usize) -> (Vec<ShortId>, Vec<PieceSet>, usize) {
+        self.pack_have_after(&[], ids, skip)
+    }
+
+    /// A holder's HAVE: each root manifest among `ids` first, each followed by the collection
+    /// manifests new in it that we hold, then the rest. What we list with a root we upload after
+    /// it if we are granted it, and an announcer that grants it on this list expects them
+    /// (PROTOCOL.md §4).
+    fn pack_offer(&mut self, ids: &[ShortId]) -> (Vec<ShortId>, Vec<PieceSet>) {
+        let mut lead: Vec<ShortId> = Vec::new();
+        let mut with: Vec<(ShortId, Vec<ShortId>)> = Vec::new();
+        for id in ids {
+            let Some(r) = self.roots.get(id) else { continue };
+            if lead.len() >= MAX_GOSSIP_IDS {
+                break;
+            }
+            lead.push(*id);
+            let mut listed = Vec::new();
+            for s in r.collections.iter().filter(|c| c.changed).map(|c| c.manifest.id.short()) {
+                if lead.len() < MAX_GOSSIP_IDS && self.store.has_complete(&s) && !lead.contains(&s) {
+                    lead.push(s);
+                    listed.push(s);
+                }
+            }
+            with.push((*id, listed));
+        }
+        let (have, sets, _) = self.pack_have_after(&lead, ids, 0);
+        self.offered_with.extend(with);
+        (have, sets)
+    }
+
+    /// `pack_have` behind `lead`, which goes first and by name.
+    fn pack_have_after(&self, lead: &[ShortId], ids: &[ShortId], skip: usize) -> (Vec<ShortId>, Vec<PieceSet>, usize) {
         let index = if self.rounds_are_dear() { self.piece_index() } else { BTreeMap::new() };
         let mut groups: BTreeMap<ShortId, Vec<u16>> = BTreeMap::new();
         let mut singles = Vec::new();
-        for id in ids {
+        for id in ids.iter().filter(|id| !lead.contains(id)) {
             match index.get(id) {
                 Some((m, k)) => groups.entry(*m).or_default().push(*k),
                 None => singles.push(*id),
@@ -1928,7 +2073,7 @@ impl Node {
             entries.extend(PieceSet::cover(m, &mut ks).into_iter().map(Ok));
         }
         entries.extend(singles.into_iter().map(Err));
-        let (mut have, mut sets, mut budget, mut taken) = (Vec::new(), Vec::new(), HAVE_BUDGET, 0);
+        let (mut have, mut sets, mut budget, mut taken) = (lead.to_vec(), Vec::new(), HAVE_BUDGET - 8 * lead.len(), 0);
         let n = entries.len();
         for j in 0..n {
             let e = &entries[(skip + j) % n];
@@ -2006,6 +2151,8 @@ impl Node {
             let p = progress.get(id).copied().unwrap_or_default();
             wants.contains(id) && now < (*t).max(p.last_progress) + t_grant
         });
+        let grants = &self.grants;
+        self.root_follow_ups.retain(|r, _| grants.contains_key(r));
         self.stats.grants_lapsed += lapsed;
         self.stats.grant_rssi_lapsed += lapsed_rssi;
         self.stats.grants_lapsed_foreign += foreign;
@@ -2089,7 +2236,7 @@ impl Node {
         let full = (self.want_refresh || stalled) && now >= self.next_want_at;
         // What a manifest we just adopted names is the rest of an ask already made, not a new
         // one: asked for soon, at most every `T_gossip_min`, and only what was never asked for.
-        // `T_want_min` spaces asking again for what has not come (PROTOCOL.md §3.3).
+        // `T_want_min` spaces asking again for what has not come (PROTOCOL.md §4).
         let rest = !full && self.ask_rest_at.map(|t| now >= t).unwrap_or(false) && now >= self.last_want_tx + self.cfg.params.t_gossip_min_ms;
         if full || rest {
             let (want, sets) = self.take_ask(rest);
@@ -2111,12 +2258,20 @@ impl Node {
         }
     }
 
-    /// A manifest we follow brought new wants while we are on an excursion: ask for them soon,
-    /// after a random wait of up to `T_offer`. At home our announcer passes new manifests
-    /// unasked and we ask on our usual cadence; on a visit only we ask, and every `T_want_min`
-    /// spent waiting to ask for what the manifest just fetched names keeps the visit longer.
+    /// A manifest we follow brought new wants while we are on an excursion: ask for them soon.
+    /// At home our announcer passes new manifests unasked and we ask on our usual cadence; on a
+    /// visit only we ask, and every `T_want_min` spent waiting to ask for what the manifest
+    /// just fetched names keeps the visit longer.
     fn ask_rest_soon(&mut self) {
-        if self.ask_rest_at.is_none() && !self.is_announcing() && self.excursion.is_some() {
+        if self.excursion.is_some() {
+            self.ask_rest();
+        }
+    }
+
+    /// Ask for the rest soon: after a random wait of up to `T_offer`, in which an announcer
+    /// passing it unasked makes the ask unneeded.
+    fn ask_rest(&mut self) {
+        if self.ask_rest_at.is_none() && !self.is_announcing() {
             self.ask_rest_at = Some(self.now + self.rng.below(self.cfg.params.t_offer_ms.max(1)));
         }
     }
@@ -2703,9 +2858,12 @@ impl Node {
     fn on_complete(&mut self, id: ShortId, out: &mut Vec<Action>) {
         out.push(Action::ObjectComplete { id, now: self.now });
         self.wants.remove(&id);
+        // A manifest we asked for: what it names is the rest of that ask (PROTOCOL.md §4).
+        let asked = self.progress.get(&id).map(|p| p.last_want != 0).unwrap_or(false);
         self.progress.remove(&id);
         // A grant ends when its object arrives.
         self.repair_phases.remove(&id);
+        let granted = self.grants.get(&id).copied();
         if let Some((h, _, _)) = self.grants.remove(&id) {
             self.stats.grants_completed += 1;
             self.stats.grant_rssi_completed += self.neighbors.get(&h).map(|n| n.rssi as i64).unwrap_or(-140);
@@ -2713,13 +2871,29 @@ impl Node {
         if self.store.entry(&id).map(|e| e.kind() == ContentType::Renditions).unwrap_or(false) {
             self.load_table(&id);
         }
-        let is_manifest = self.store.entry(&id).map(|e| e.kind() == ContentType::Manifest).unwrap_or(false);
-        if is_manifest {
-            if let Some(bytes) = self.store.bytes(&id).map(|b| b.to_vec()) {
-                if let Ok(m) = Manifest::decode(&bytes) {
-                    self.adopt_manifest(&m, id);
+        match self.store.entry(&id).map(|e| e.kind()) {
+            Some(ContentType::Manifest) => {
+                if let Some(bytes) = self.store.bytes(&id).map(|b| b.to_vec()) {
+                    if let Ok(m) = Manifest::decode(&bytes) {
+                        self.adopt_manifest(&m, id);
+                    }
+                }
+                if let (Some((h, _, phase)), true) = (granted, self.is_announcing()) {
+                    self.extend_root_grant(id, h, phase);
                 }
             }
+            Some(ContentType::Collection) => {
+                // Read only as the adopted root we hold names it: that root is what makes it
+                // authentic (PROTOCOL.md §2).
+                let named: Vec<(ChannelId, CollectionRef)> = self.named_collections().filter(|(_, c)| c.manifest.id.short() == id).map(|(chan, c)| (chan, c.clone())).collect();
+                for (chan, c) in named {
+                    self.adopt_collection(chan, &c, true);
+                }
+            }
+            _ => {}
+        }
+        if asked && self.store.entry(&id).map(|e| e.kind().is_manifest()).unwrap_or(false) {
+            self.ask_rest();
         }
         if self.is_announcing() {
             // Tell sources we have it, and ask for what we still lack, soon.
@@ -2736,16 +2910,111 @@ impl Node {
             }
         }
         let len = self.store.entry(&short).and_then(|e| e.len()).unwrap_or(0);
-        let old = info.adopted;
         // A newer announcement still pending stays wanted; one this manifest answers is done.
         let announced = info.announced.filter(|n| n.seq > m.seq);
+        let old = self.set_root(chan, m, short, len, announced);
+        // Adopted again (followed after the fact, or as a new announcer): as the root, so each
+        // collection manifest is passed once more where there is a carousel.
+        let again = old.map(|o| o.short == short).unwrap_or(false);
+        if !again {
+            self.stats.manifests_adopted += 1;
+        }
+        // You carry what you listen to: objects are registered (and thus collected from the air)
+        // only for channels and collections we follow or, as announcer, serve.
+        let interested = self.follows_channel(&chan) || self.is_announcing();
+        let mut to_want = Vec::new();
+        let mut to_adopt = Vec::new();
+        if interested {
+            // The rendition table: fetched by those who need renditions, known by name to all.
+            if let Some(t) = m.renditions {
+                let meta = ObjectMeta { id: t.id, len: t.len, kind: ContentType::Renditions };
+                if self.store.ensure(meta) {
+                    self.quiet_complete.push(t.id.short());
+                }
+                let needs = (!self.cfg.decodes && self.follows_channel(&chan)) || self.cfg.renders;
+                if self.store.has_complete(&t.id.short()) {
+                    self.load_table(&t.id.short());
+                } else if needs {
+                    to_want.push(t.id.short());
+                }
+            }
+            let carried: Vec<&CollectionRef> = m.collections.iter().filter(|c| self.carries(&chan, c.cid)).collect();
+            for c in carried {
+                let id = c.manifest.id.short();
+                if self.store.ensure(ObjectMeta { id: c.manifest.id, len: c.manifest.len, kind: ContentType::Collection }) {
+                    self.quiet_complete.push(id);
+                }
+                if self.store.has_complete(&id) {
+                    let new = again || self.collections.get(&(chan, c.cid)) != Some(&id);
+                    to_adopt.push((c.clone(), new));
+                } else {
+                    to_want.push(id);
+                }
+                if let Some(v) = c.cover {
+                    if self.store.ensure(ObjectMeta { id: v.id, len: v.len, kind: ContentType::Image }) {
+                        self.quiet_complete.push(v.id.short());
+                    }
+                    if !self.store.has_complete(&v.id.short()) {
+                        to_want.push(v.id.short());
+                    }
+                }
+            }
+        }
+        for (c, new) in to_adopt {
+            self.adopt_collection(chan, &c, new);
+        }
+        if self.follows_channel(&chan) && !to_want.is_empty() {
+            self.ask_rest_soon();
+        }
+        for id in to_want {
+            self.add_want(id);
+        }
+        if old.map(|o| o.short != short).unwrap_or(false) || info.announced != announced {
+            self.prune_wants();
+        }
+        if self.follows_channel(&chan) {
+            self.want_refresh = true;
+        }
+    }
+
+    /// Make `m` the adopted root manifest of `chan`: index what it names, and on every carousel
+    /// put it in place of the old root. Collections it no longer names have left the channel.
+    /// Returns the root it replaces.
+    fn set_root(&mut self, chan: ChannelId, m: &Manifest, short: ShortId, len: u32, announced: Option<ManifestRef>) -> Option<ManifestRef> {
+        let old = self.manifests.get(&chan).and_then(|i| i.adopted);
         self.manifests.insert(chan, ManifestInfo { adopted: Some(ManifestRef { seq: m.seq, short, len }), announced });
         if let Some(o) = old.filter(|o| o.short != short) {
-            self.pieces.remove(&o.short);
+            self.roots.remove(&o.short);
+            for c in self.carriers.iter_mut() {
+                if let Some(car) = c.carousel.as_mut() {
+                    car.remove_manifest(&o.short);
+                }
+            }
         }
-        self.pieces.insert(short, m.objects.iter().map(|o| o.id.short()).collect());
-        // What neighbours said they have of this manifest before we could read it.
-        let list: Vec<ShortId> = m.objects.iter().map(|o| o.id.short()).collect();
+        self.roots.insert(short, RootIndex { collections: m.collections.clone(), renditions: m.renditions });
+        let left: Vec<(ChannelId, u32)> = self.collections.keys().filter(|(c, cid)| *c == chan && !m.collections.iter().any(|x| x.cid == *cid)).copied().collect();
+        for k in left {
+            if let Some(s) = self.collections.remove(&k) {
+                self.drop_collection_manifest(s);
+            }
+        }
+        for c in self.carriers.iter_mut() {
+            if let Some(car) = c.carousel.as_mut() {
+                car.add_manifest(short, true);
+            }
+        }
+        old
+    }
+
+    /// Adopt collection manifest `c` of `chan`, which the adopted root we hold names: learn its
+    /// pieces, serve it, and want them if we listen to it or serve it. It takes the place of the
+    /// collection's older manifest, whose pieces leave unless it lists them too. `new`: passed
+    /// once unasked where there is a carousel.
+    fn adopt_collection(&mut self, chan: ChannelId, c: &CollectionRef, new: bool) {
+        let short = c.manifest.id.short();
+        let Some(col) = self.store.bytes(&short).and_then(|b| Collection::decode(b).ok()) else { return };
+        let list: Vec<ShortId> = col.pieces.iter().map(|o| o.id.short()).collect();
+        // What neighbours said they have of this collection before we could read it.
         for nb in self.neighbors.values_mut() {
             for p in nb.unread_sets.iter().filter(|p| p.manifest == short) {
                 for k in p.pieces() {
@@ -2756,45 +3025,23 @@ impl Node {
             }
             nb.unread_sets.retain(|p| p.manifest != short);
         }
-        if old.map(|o| o.short == short).unwrap_or(false) {
-            // Re-adoption (e.g. follow() after the fact): only the wants below matter.
-        } else {
-            self.stats.manifests_adopted += 1;
-        }
-        for c in self.carriers.iter_mut() {
-            if let Some(car) = c.carousel.as_mut() {
-                if let Some(o) = old {
-                    if o.short != short {
-                        car.remove_manifest(&o.short);
-                    }
-                }
-                car.add_manifest(short);
-                for (k, o) in m.objects.iter().enumerate() {
-                    car.set_rank(o.id.short(), k as u16);
-                }
+        for car in self.carriers.iter_mut().filter_map(|c| c.carousel.as_mut()) {
+            car.add_manifest(short, new);
+            for (k, id) in list.iter().enumerate() {
+                car.set_rank(*id, k as u16);
             }
         }
-        // You carry what you listen to: objects are registered (and thus collected from the air)
-        // only for channels we follow or, as announcer, serve.
-        let interested = self.follows.contains(&chan) || self.is_announcing();
-        let mut to_want = Vec::new();
-        if interested {
-            // The rendition table: fetched by those who need renditions, known by name to all.
-            if let Some(t) = m.renditions {
-                let meta = ObjectMeta { id: t.id, len: t.len, kind: ContentType::Renditions };
-                if self.store.ensure(meta) {
-                    self.quiet_complete.push(t.id.short());
-                }
-                let needs = (!self.cfg.decodes && self.follows.contains(&chan)) || self.cfg.renders;
-                if self.store.has_complete(&t.id.short()) {
-                    self.load_table(&t.id.short());
-                } else if needs {
-                    to_want.push(t.id.short());
-                }
-            }
-            // A device that cannot decode has no use for the codes of a channel it listens to.
-            let skip_codes = !self.cfg.decodes && self.follows.contains(&chan) && !self.is_announcing();
-            for o in &m.objects {
+        self.pieces.insert(short, list);
+        let replaced = self.collections.insert((chan, c.cid), short).filter(|o| *o != short);
+        if let Some(o) = replaced {
+            self.drop_collection_manifest(o);
+        }
+        let listens = self.listens(&chan, c.cid);
+        if self.carries(&chan, c.cid) {
+            // A device that cannot decode has no use for the codes of what it listens to.
+            let skip_codes = !self.cfg.decodes && listens && !self.is_announcing();
+            let mut to_want = Vec::new();
+            for o in &col.pieces {
                 if skip_codes && o.kind.codec().is_some() {
                     continue;
                 }
@@ -2805,18 +3052,62 @@ impl Node {
                     to_want.push(o.id.short());
                 }
             }
+            if listens && !to_want.is_empty() {
+                self.ask_rest_soon();
+            }
+            for id in to_want {
+                self.add_want(id);
+            }
+            if skip_codes && !self.renditions.is_empty() {
+                self.plan_renditions();
+            }
         }
-        if self.follows.contains(&chan) && !to_want.is_empty() {
-            self.ask_rest_soon();
-        }
-        for id in to_want {
-            self.add_want(id);
-        }
-        if old.map(|o| o.short != short).unwrap_or(false) || info.announced != announced {
+        if replaced.is_some() {
             self.prune_wants();
         }
-        if self.follows.contains(&chan) {
+        if listens {
             self.want_refresh = true;
+        }
+    }
+
+    /// A grant of root manifest `root` covers the collection manifests new in it that its holder
+    /// `h` listed with it: it uploads them right after the root, in the same phase, so a root and
+    /// what changed in it cost one round of asking rather than two (PROTOCOL.md §4). We take
+    /// those we lack as granted to it.
+    fn extend_root_grant(&mut self, root: ShortId, h: NodeId, phase: u8) {
+        let Some((from, listed)) = self.root_follow_ups.remove(&root) else { return };
+        let Some(r) = self.roots.get(&root).filter(|_| from == h) else { return };
+        let ids: Vec<ShortId> = r.collections.iter().filter(|c| c.changed).map(|c| c.manifest.id.short()).filter(|s| listed.contains(s) && self.wants.contains(s) && !self.grants.contains_key(s)).collect();
+        let now = self.now;
+        for s in ids {
+            self.grants.insert(s, (h, now, phase));
+            self.stats.grants_given += 1;
+            self.stats.follow_ups_granted += 1;
+        }
+    }
+
+    /// What we upload after root manifest `root` when announcer `ann` grants it to us on carrier
+    /// `i`: the collection manifests we listed with it, unless `ann` has said it holds one or it
+    /// is on its way to it already.
+    fn root_follow_ups(&self, root: &ShortId, ann: NodeId, i: usize) -> Vec<ShortId> {
+        let Some(listed) = self.offered_with.get(root) else { return Vec::new() };
+        let c = &self.carriers[i];
+        let held_there = |s: &ShortId| self.neighbors.get(&ann).map(|n| n.haves.contains(s)).unwrap_or(false);
+        let sending = |s: &ShortId| c.upload.iter().chain(c.upload_queue.iter()).any(|u| u.object == *s && u.to == ann);
+        listed.iter().filter(|s| self.store.has_complete(s) && !held_there(s) && !sending(s)).copied().collect()
+    }
+
+    /// A collection manifest no collection uses any more: its pieces are no longer read by it,
+    /// and carousels no longer serve it as a manifest.
+    fn drop_collection_manifest(&mut self, s: ShortId) {
+        if self.collections.values().any(|v| *v == s) {
+            return;
+        }
+        self.pieces.remove(&s);
+        for c in self.carriers.iter_mut() {
+            if let Some(car) = c.carousel.as_mut() {
+                car.remove_manifest(&s);
+            }
         }
     }
 
@@ -2928,6 +3219,10 @@ impl Node {
                 let phase = self.phase_for(g.node);
                 if let (true, true, false, Some(phase)) = (offering, self.wants.contains(h), self.grants.contains_key(h), phase) {
                     self.grants.insert(*h, (g.node, now, phase));
+                    // A root manifest comes with what its holder listed with it (§4).
+                    if self.store.entry(h).map(|e| e.kind() == ContentType::Manifest).unwrap_or(false) {
+                        self.root_follow_ups.insert(*h, (g.node, g.have.clone()));
+                    }
                     self.stats.grants_given += 1;
                     self.gossip_soon();
                 }
@@ -2990,7 +3285,8 @@ impl Node {
                     let active = c.upload.as_ref().map(|u| u.object == *w && u.to == g.node).unwrap_or(false);
                     let queued = c.upload_queue.iter().any(|u| u.object == *w && u.to == g.node);
                     if !active && !queued && !granted.iter().any(|u| u.object == *w) {
-                        granted.push(Upload { object: *w, to: g.node, start_at: now, started: false, block: 0, esi: 0, list: None, phase: *phase });
+                        let manifest = self.store.entry(w).map(|e| e.kind().is_manifest()).unwrap_or(false);
+                        granted.push(Upload { object: *w, to: g.node, start_at: now, started: false, block: 0, esi: 0, list: None, phase: *phase, manifest });
                     }
                 } else if grant.is_none() {
                     // Open ask: offer, unless we are already uploading it to this announcer.
@@ -3021,8 +3317,21 @@ impl Node {
                 let key = |u: &Upload| (self.store.entry(&u.object).and_then(|e| e.len()).unwrap_or(u32::MAX), index.get(&u.object).map(|(_, k)| *k).unwrap_or(u16::MAX));
                 granted.sort_by_key(key);
                 let own = self.announcer_of(i);
+                // A root manifest brings the collection manifests new in it, right after it: the
+                // announcer reads them only once it holds the root.
+                let mut all = Vec::with_capacity(granted.len());
+                for u in granted.iter() {
+                    all.push(u.clone());
+                    for s in self.root_follow_ups(&u.object, u.to, i) {
+                        if !granted.iter().any(|x| x.object == s) && !all.iter().any(|x: &Upload| x.object == s) {
+                            self.granted_to_us.insert((s, u.to), now);
+                            self.stats.follow_ups_sent += 1;
+                            all.push(Upload { object: s, to: u.to, start_at: now, started: false, block: 0, esi: 0, list: None, phase: u.phase, manifest: true });
+                        }
+                    }
+                }
                 let c = &mut self.carriers[i];
-                for u in granted {
+                for u in all {
                     c.add_upload(u, false, own);
                 }
             }
@@ -3045,7 +3354,7 @@ impl Node {
         }
         self.offers.retain(|(_, a, at)| !sendable(a, at));
         let ids: Vec<ShortId> = due.iter().map(|(o, _)| *o).collect();
-        let (have, have_sets, _) = self.pack_have(&ids, 0);
+        let (have, have_sets) = self.pack_offer(&ids);
         let g = Gossip { node: self.cfg.id, announcer: self.gossip_announcer_field(), announcer_colour: self.announcer_colouring_field().0, announcer_colours: self.announcer_colouring_field().1, heard: self.heard_field(), have, have_sets, want: Vec::new(), sets: Vec::new() };
         let cell = self.cell_carrier();
         self.enqueue(cell, Frame::Gossip(g));
@@ -3058,7 +3367,7 @@ impl Node {
         self.touch(m.node, rssi);
         let announcing = self.is_announcing();
         for e in &m.entries {
-            let interested = self.follows.contains(&e.channel) || announcing;
+            let interested = self.follows_channel(&e.channel) || announcing;
             if !interested {
                 continue;
             }
@@ -3114,7 +3423,7 @@ impl Node {
         let held: Vec<(ChannelId, u32, ShortId)> = self
             .manifests
             .iter()
-            .filter(|(c, _)| self.follows.contains(c) || self.own_manifests.iter().any(|(o, _, _, _)| o == *c))
+            .filter(|(c, _)| self.follows_channel(c) || self.own_manifests.iter().any(|(o, _, _, _)| o == *c))
             .filter_map(|(c, i)| i.adopted.filter(|a| self.store.has_complete(&a.short)).map(|a| (*c, a.seq, a.short)))
             .collect();
         for (c, seq, short) in held {
@@ -3258,7 +3567,7 @@ impl Node {
                     }
                     _ if c.upload_queue.iter().any(|u| u.object == n.object && u.to == n.node) => {}
                     _ => {
-                        c.add_upload(Upload { object: n.object, to: n.node, start_at, started: false, block: n.block, esi: 0, list: Some(list), phase }, true, NodeId::NONE);
+                        c.add_upload(Upload { object: n.object, to: n.node, start_at, started: false, block: n.block, esi: 0, list: Some(list), phase, manifest: false }, true, NodeId::NONE);
                         self.stats.repairs_queued += 1;
                     }
                 }

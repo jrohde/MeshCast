@@ -8,6 +8,7 @@ use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::vec::Vec;
 
 use crate::ids::{NodeId, ShortId};
+use crate::object::ContentType;
 use crate::store::MemStore;
 use crate::Millis;
 
@@ -122,10 +123,13 @@ impl Carousel {
         }
     }
 
-    /// A manifest this carousel serves, new to it: passed once soon, then when asked for.
-    pub fn add_manifest(&mut self, id: ShortId) {
+    /// A manifest this carousel serves: passed when asked for, before anything else, and once
+    /// soon unasked if it is `new`.
+    pub fn add_manifest(&mut self, id: ShortId, new: bool) {
         self.manifests.insert(id);
-        self.fresh.insert(id);
+        if new {
+            self.fresh.insert(id);
+        }
     }
 
     /// `id` is piece `k` of a manifest this carousel serves.
@@ -230,10 +234,13 @@ impl Carousel {
         // any object. Repeating every manifest on a timer and in every round cost up to 29 % of all
         // frames, more where channels list many objects, and delivered nothing sooner: a node that
         // lacks a manifest learns its id from MANIFEST_ANNOUNCE and asks (FEASIBILITY.md §13).
+        // Root manifests before collection manifests: a node reads a collection manifest only
+        // once it holds the root that names it, so the other way round it would miss it.
+        let level = |id: &ShortId| if store.entry(id).map(|e| e.kind() == ContentType::Collection).unwrap_or(false) { 2 } else { 1 };
         let fresh = core::mem::take(&mut self.fresh);
         for id in &fresh {
             if store.has_complete(id) {
-                scored.push((u64::MAX, 1, *id));
+                scored.push((u64::MAX, level(id), *id));
             }
         }
         for id in wanted {
@@ -242,7 +249,7 @@ impl Carousel {
                 let bytes = store.entry(&id).and_then(|e| e.len()).unwrap_or(1).max(1) as u64;
                 scored.push((listeners, bytes, id));
             } else if !fresh.contains(&id) {
-                scored.push((u64::MAX, 1, id));
+                scored.push((u64::MAX, level(&id), id));
             }
         }
         // a before b when a.listeners / a.bytes > b.listeners / b.bytes, compared without division.
@@ -250,7 +257,7 @@ impl Carousel {
         scored.sort_by(|a, b| {
             let (l, r) = (a.0 as u128 * b.1 as u128, b.0 as u128 * a.1 as u128);
             if a.0 == u64::MAX || b.0 == u64::MAX {
-                b.0.cmp(&a.0).then(a.2.cmp(&b.2))
+                b.0.cmp(&a.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2))
             } else {
                 r.cmp(&l).then(rank(&a.2).cmp(&rank(&b.2))).then(a.2.cmp(&b.2))
             }

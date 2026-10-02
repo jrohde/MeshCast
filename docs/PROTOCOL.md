@@ -47,10 +47,12 @@ object already has the manifest that says what it is.
 
 | Code | Name | MIME | Content |
 |---|---|---|---|
-| 1 | manifest | `application/meshcast-manifest` | a channel manifest (§2) |
+| 1 | manifest | `application/meshcast-manifest` | a channel's root manifest (§2) |
 | 2 | text | `text/plain; charset=utf-8` | text pages |
 | 3 | firmware | `application/octet-stream` | firmware images |
 | 4 | renditions | `application/meshcast-renditions` | a channel's rendition table (§1.2) |
+| 5 | collection | `application/meshcast-collection` | a collection manifest (§2) |
+| 6 | image | `image/jpeg` | a collection's cover; JPEG because every device with a screen can decode it, microcontrollers included (for example ChaN's TJpgDec, elm-chan.org/fsw/tjpgd) |
 | 16 | speech | `audio/x-snac; model=snac_24khz` | spoken programmes: news, talk, bulletins |
 | 17 | music | `audio/x-snac; model=snac_32khz` | music |
 | 18 | opus | `audio/ogg; codecs=opus` | a rendition (§1.2): audio for a device that cannot run the neural decoder, made on demand from a SNAC object and sent only where someone asks for it |
@@ -155,37 +157,72 @@ rounding is bit-exact by construction, and libopus built in fixed point without 
 intrinsics is a deterministic function of its input and settings. If a platform cannot
 reproduce a profile, it does not serve that profile.
 
-## 2. Channels and manifests
+## 2. Channels, collections and manifests
 
-A **channel** is an Ed25519 public key. Its **channel id** is the first 8 bytes of BLAKE3(pubkey).
+A **channel** is an Ed25519 public key: one per provider (a newsroom, a band, a radio maker). Its
+**channel id** is the first 8 bytes of BLAKE3(pubkey).
 
-A **manifest** is an object of MIME `application/meshcast-manifest` containing, CBOR-encoded:
+A provider publishes **collections**: an *album* (pieces in a fixed order), a *series* (episodes
+that come and go, such as a podcast or a daily bulletin; a series with a schedule is a radio
+station), or *singles* (pieces without an order). Two kinds of manifest describe them.
+
+The **root manifest** of a channel (content type 1, `application/meshcast-manifest`) is its signed
+index, CBOR-encoded:
 
 | Field | Type | Meaning |
 |---|---|---|
 | `chan` | 32 B | channel public key |
 | `seq` | u32 | monotonically increasing; a node keeps only the highest valid seq per channel |
-| `title`, `desc` | text | channel metadata |
-| `objects` | list of {`id` 32 B, `len` u32, `kind` u8 content type (§1.1), `title`, `blocks` u16, `enc` bool} | the channel's catalogue (or a window of it) |
-| `schedule` | list of {`id` 8 B, `start` u64 UTC seconds, `repeat` optional} | when to play what |
-| `prev` | 32 B optional | id of the previous manifest, for history |
+| `title` | text | channel name |
+| `collections` | list of {`cid` u32, `kind` u8, `title`, `manifest` {`id` 32 B, `len` u32}, `cover` {`id` 32 B, `len` u32} or null, `changed` bool} | the channel's collections; `cid` is chosen by the provider and stays the same across versions, `kind` is 1 album, 2 series, 3 singles, and `changed` says the collection manifest is new in this root (a new collection, or a new version of its manifest): a holder brings those with the root (§4) |
+| `prev` | 32 B optional | id of the previous root manifest, for history |
 | `renditions` | {`id` 32 B, `len` u32} optional | the channel's rendition table (§1.2) |
 | `sig` | 64 B | Ed25519 signature over everything above |
 
+A **collection manifest** (content type 5, `application/meshcast-collection`) lists one
+collection's pieces, CBOR-encoded:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `cid`, `kind`, `title` | u32, u8, text | as in the root |
+| `pieces` | list of {`id` 32 B, `len` u32, `kind` u8 content type (§1.1), `title`, `integrity` {`id` 32 B, `len` u32} or null} | the collection's pieces in order, or the window of a series; `integrity` is reserved for the integrity data of §1 and is null until that is specified |
+| `schedule` | list of {`id` 8 B, `start` u64 UTC seconds, `repeat` u32} | when to play what, for a station; usually empty |
+
+A collection manifest is not signed: the root names it by its full hash, so it is exactly as
+authentic as the root, and a node reads one only once it holds a valid root that names it. A
+cover is an object of content type 6 (§1.1).
+
+The two levels keep what changes small and what a listener fetches to what it follows. A new
+episode changes one collection manifest and the root, not the catalogue; a follower of one
+podcast of a provider with fifty collections fetches the root and that one collection manifest.
+Playback is on demand by default: a schedule is optional, and following it as radio is one way a
+player can play a series, not a different kind of content.
+
 Rules:
-- A manifest is valid only if the signature verifies against `chan`. Invalid manifests are dropped.
-- **Subscribing** is storing a channel id in the follow list. The node then wants that channel's
-  manifests and the objects they reference.
+- A root manifest is valid only if the signature verifies against `chan`. Invalid manifests are
+  dropped.
+- **Subscribing** is storing in the follow list either a channel id, meaning every collection of
+  that channel now and later, or a channel id and a `cid`, meaning that collection. The node then
+  wants the channel's root manifest, the collection manifests of what it follows, and their
+  pieces and covers; it registers, collects and keeps nothing of the collections it does not
+  follow. An announcer serves every collection of every channel it serves, as it serves every
+  channel.
+- **A new root alone does not cost a collection its pieces.** A node keeps, per collection, the
+  collection manifest it adopted, and with it its pieces, until it holds the one a newer root
+  names; a collection that a newer root no longer names has left the channel. This is the rule
+  for announcements one level down: a follower that has adopted a new root and not yet its
+  collection manifest would otherwise evict the window it holds.
 - **Encrypted channels**: object payloads are encrypted with XChaCha20-Poly1305 under a key derived
   from the channel secret and the object id; titles in the manifest may be encrypted too. The
   channel secret is shared out of band (QR code from the phone app). Non-subscribers can still
   relay the objects, which is intended: relaying costs them nothing and helps subscribers.
-- Manifests are ordinary objects: they travel through the same carousel and gossip as tracks.
-  The special-casing: a `MANIFEST_ANNOUNCE` control frame names the newest manifest id per
-  channel so that nodes know what to want; a carousel passes a manifest once unasked when it is
-  new, and passes manifests before anything else (§4); and a node keeps a manifest's bytes
-  whatever its size, because it reads them. There is no limit on how many objects a manifest
-  lists or how large an object is (FEASIBILITY.md §13).
+- Manifests, root and collection, are ordinary objects: they travel through the same carousel
+  and gossip as pieces. The special-casing: a `MANIFEST_ANNOUNCE` control frame names the newest
+  root manifest id per channel so that nodes know what to want; a carousel passes a manifest once
+  unasked when it is new, and passes manifests before anything else (§4); and a node keeps a
+  manifest's bytes whatever its size, because it reads them. There is no limit on how many
+  collections a channel has, how many pieces a collection has, or how large a piece is
+  (FEASIBILITY.md §13). Sets (§3.3) refer to collection manifests.
 - **An announcement is a hint, not a fact.** `MANIFEST_ANNOUNCE` is not signed, so a node keeps
   apart, per channel, the manifest it *adopted* (its signature checked) and a newer one
   *announced* and not yet held. The announced one is fetched, never believed: the adopted one
@@ -203,13 +240,15 @@ Rules:
   publishes, and hears its own announcer announce an older seq of it or leave it out (absent from
   a whole list, or between two neighbours), announces its own: after a random wait of up to
   `T_offer`, not if it hears anyone announce that seq or a newer one first, not while its
-  announcer is asking for that manifest (it knows of it and is fetching it), and at most once per
-  channel every `T_want_min`. The announcer then wants it like any announced manifest, and a
-  holder uploads it. Like an offer, it answers something the announcer said. Without it, an
-  announcer whose library is older than its cell's (a station back from a power cut, a follower
-  that just stepped up) never learned the newer manifests, because a source announces its own
-  only until its announcer has them: in a living band O network with nodes coming and going, up
-  to 41 % of the followers that were on at the end lacked a current window (FEASIBILITY.md §13).
+  announcer is asking for that manifest (it knows of it and is fetching it; what a follower's
+  announcer asked for counts only since it followed that announcer, FEASIBILITY.md §16), and at
+  most once per channel every `T_want_min`. The announcer then wants it like any announced
+  manifest, and a holder uploads it. Like an offer, it answers something the announcer said.
+  Without it, an announcer whose library is older than its cell's (a station back from a power
+  cut, a follower that just stepped up) never learned the newer manifests, because a source
+  announces its own only until its announcer has them: in a living band O network with nodes
+  coming and going, up to 41 % of the followers that were on at the end lacked a current window
+  (FEASIBILITY.md §13).
 
 ## 3. Frames
 
@@ -300,8 +339,9 @@ it, and a want for such an object was granted and answered over and over; FEASIB
 | … | 23 × n_sets | want sets: manifest short id (8), first piece (2), bitmap (8), granted holder (4; 0 = open ask), upload phase (1) |
 | … | 2 | CRC-16 |
 
-**Sets** name pieces by their place in a manifest: bit *i* of the bitmap is piece *first + i*, the
-(*first + i*)-th object the manifest lists, so one entry covers up to 64 pieces of one collection.
+**Sets** name pieces by their place in a collection manifest (§2): bit *i* of the bitmap is piece
+*first + i*, the (*first + i*)-th piece the collection manifest lists, so one entry covers up to 64
+pieces of one collection; the manifest short id in a set is the collection manifest's.
 A want set is to a WANT entry what it is to one object: open, or granted to one holder in one
 phase. A node sends the pieces of a manifest it holds as sets and everything else (manifests,
 renditions, objects of no manifest it holds) by name, where sets are used at all (§4). A receiver
@@ -367,14 +407,16 @@ The announcer maintains a **carousel set**: every object (including manifests) t
 the cell wants, as learned from GOSSIP and MANIFEST_ANNOUNCE, that the announcer has. A round is:
 
 1. `BEACON` on the bulk carrier.
-2. For each object in the set, manifests first and then **the most listeners served per byte**:
-   emit its symbols, one `BULK` frame each, subject to EtherFatsoen and EtherDiscipline gating
-   between frames. The listeners of an object are the followers asking for it; ordering by
-   listeners divided by size is Smith's rule, which minimises the total time listeners wait on
-   one shared transmitter. Among objects of one size it is simply most-wanted first; a small
-   object no longer waits behind a large one; and every wanted object is still sent every round,
-   so nothing starves. Between objects that serve as many listeners per byte, the earlier piece
-   of its collection goes first, because it plays first.
+2. For each object in the set, manifests first (root manifests before collection manifests: a
+   node reads a collection manifest only once it holds the root that names it, so the other way
+   round it would miss it) and then **the most listeners served per byte**: emit its symbols,
+   one `BULK` frame each, subject to EtherFatsoen and EtherDiscipline gating between frames. The
+   listeners of an object are the followers asking for it; ordering by listeners divided by size
+   is Smith's rule, which minimises the total time listeners wait on one shared transmitter.
+   Among objects of one size it is simply most-wanted first; a small object no longer waits
+   behind a large one; and every wanted object is still sent every round, so nothing starves.
+   Between objects that serve as many listeners per byte, the earlier piece of its collection
+   goes first, because it plays first.
 3. Merge NACKs received during the round; symbols named in NACKs are queued at the front of the
    next round.
 4. Objects that every heard follower reports complete leave the set.
@@ -413,6 +455,16 @@ of all frames in the nine scenarios of FEASIBILITY.md §9.3 at the same delivery
 carousel with nothing to send is silent; the announcer then only beacons. (The first simulator
 runs looped manifests forever at the full duty cycle, which wasted the budget and caused
 half-duplex losses during uploads.)
+
+**An ask is answered in full.** A follower asks at most every `T_want_min`, but what a manifest it
+asked for names is the rest of that ask, not a new one: once it has a manifest it asked for, it
+asks for what the manifest names soon, after a random wait of up to `T_offer` (in which a pass
+can make the ask unneeded), at most every `T_gossip_min`, and only for what it never asked for.
+A manifest it got unasked, from a pass, changes nothing: it asks on its cadence. Two levels of
+manifest make this matter: a follower that has to ask, a newcomer or one that missed the pass of
+a new root, asks for the root, then the collection manifest, then the pieces, and waited
+`T_want_min` before each (FEASIBILITY.md §16). Asking soon after every manifest, asked for or not,
+was tried and cost the band O networks more frames than it saved (FEASIBILITY.md §15.3).
 
 **A want is served by the announcer it names.** A follower's WANT names the announcer it
 follows (§3.3). Other announcers that overhear it do not serve it: two announcers answering the
@@ -530,11 +582,25 @@ granted upload is flowing is then not asked for a second object until it is done
 **A holder uploads what it was granted at once smallest first**, and among equal sizes in the
 order of the collection: Smith's rule as far as a holder can know it, since the pieces of one
 collection have about the same listeners. Granted in the collection's order, a 42 kB track went
-before every 22 kB bulletin of the same source. **Its own announcer comes first**: what its own
-announcer granted a holder uploads before what another cell's announcer granted it (a repair it
-was named for still goes first of all). Its own cell is where it is heard best, and every follower
-there that gets the object becomes a holder for the neighbouring cells; in the order the grants
-arrived, a source served another cell for ten minutes while its own waited (FEASIBILITY.md §15).
+before every 22 kB bulletin of the same source. **Manifests come first**: a manifest a holder is
+granted goes before the pieces it already lined up, after any repair it was named for. Nothing of
+a collection can be read without its manifest, and a manifest is a few symbols; lined up behind
+pieces, a collection manifest granted to a holder in a 15 km² band L network waited almost six
+minutes (FEASIBILITY.md §16). **Its own announcer comes first** after that: what its own
+announcer granted a holder uploads before what another cell's announcer granted it. Its own cell
+is where it is heard best, and every follower there that gets the object becomes a holder for the
+neighbouring cells; in the order the grants arrived, a source served another cell for ten minutes
+while its own waited (FEASIBILITY.md §15).
+
+**A root brings what changed in it.** A holder that lists a root manifest in a HAVE lists with it,
+in the same frame, the collection manifests the root flags as changed (§2) that it holds. An
+announcer that grants the root on that HAVE takes those as granted to the same holder, in the
+same phase, once it holds the root and wants them; the holder uploads them right after the root,
+which the announcer must hold before it can read them. A root and the collection manifests new in
+it then cost one round of asking, not two: asked for separately, a collection manifest reached a
+band L station 200 seconds after its root, a meeting dwell or two (FEASIBILITY.md §16). The holder
+uploads exactly what it listed with the root and the announcer counts exactly that, so both agree
+whose phase the uploads use.
 **Ask first for the most listeners per byte**, the carousel's rule applied one step earlier: a
 holder uploads one object at a time, so the order of asking is the order of arriving, and a
 3-minute track must not wait behind a 540 kB object from the same source. (Asking in object-id
@@ -886,7 +952,7 @@ arrives a few minutes later than it otherwise would. That is the entire user-vis
 | `max_passes` | 1 | carousel passes per object unless re-wanted |
 | repetition spacing | 0, then `T_want_min` × 1, 2, 4, 8 | wait before an object is passed again; the level climbs with each repetition and resets after a rest of twice the wait |
 | `T_nack_stall` | 60 s | no progress on an ≥ 80 % object before a NACK |
-| `T_want_min` | 10 min | minimum interval between a follower's WANT frames, except, on an excursion, an ask for what a manifest fetched there names (§4) |
+| `T_want_min` | 10 min | minimum interval between a follower's WANT frames, except an ask for what a manifest the follower asked for, or fetched on an excursion, names (§4) |
 | `T_gossip`, `T_gossip_min` | 5 min, 30 s | announcer/source gossip cadence and its floor |
 | `control_reserve` | 10 % | share of the band budget kept free for control frames |
 | own share | `min(regulatory, occ_high_own / (announcers heard + 1))` | content pacing ceiling; derived, not configured |
@@ -957,24 +1023,18 @@ arrives a few minutes later than it otherwise would. That is the entire user-vis
     codes. A device that needs it asks for the rendition of what it is about to play; a node in
     its cell that can decode makes it, checked against the id the source signed, and the cell's
     carousel carries it once to whoever asked (FEASIBILITY.md §10).
-13. **Collections: albums, series, episodes.** A channel is a key, so an artist can publish an
-    album as a channel and its authenticity follows from the signature. But a manifest lists
-    loose objects with a title, and an album is more: a title, an order, a cover. Those are
-    claims only the source may make, so they belong in the signed manifest: a `collections` list
-    of {title, objects in order, cover object}. A cover is an image object, for which no content
-    type exists yet. Open: the fields, the image content type and its size limit, and whether a
-    series (a podcast) is a collection whose new episodes the player recognises as objects in the
-    new manifest that were not in the previous one. Retention stays the channel owner's choice:
-    what leaves the window leaves the mesh in time, so an album that should stay available stays
-    in the window. How a player uses collections (follow the schedule like radio, newest first,
-    in order, shuffled, move on to a new episode automatically) is the app's business.
-    Size needs no rule (FEASIBILITY.md §13): no limit on an object or on a catalogue is needed,
-    because the carousel serves the most listeners per byte first, so a large object only
-    arrives later, and abuse through size is the channel flood and store exhaustion of ABUSE.md,
-    to be bounded there. Asking per collection, by manifest and bitmap, is in place (§3.3, §4) and
-    turned out to be needed by announcers more than by followers: where rounds are dear, an
-    announcer that asked for eight objects a round took two and a half hours to gather an hour of
-    music in 1-minute pieces across a 15 km² band L network, and now takes 73 minutes
-    (FEASIBILITY.md §14). Open: the collections themselves (a root manifest per provider naming
-    collection manifests, subscribing per collection, the image type for covers), and granting the
-    earlier pieces of a collection first, so that playback can start sooner.
+13. **Collections: albums, series, episodes.** Settled in §2: a provider's channel has one signed
+    root manifest that names its collections (album, series, singles; a station is a series with
+    a schedule), each with a collection manifest that lists its pieces in order and a cover of
+    content type 6 (JPEG); a node follows a whole channel or single collections. The second level
+    is nearly free where it matters: a root brings the collection manifests new in it in the same
+    round of asking (§4), a holder uploads manifests first, and a follower that had to ask for a
+    manifest asks for what it names at once (§4). What it still costs, a few tenths of a minute
+    across networks of many cells, is in FEASIBILITY.md §16. Size needs no rule (FEASIBILITY.md
+    §13): the carousel serves the most listeners per byte first, so a large object only arrives
+    later, and abuse through size is the channel flood and store exhaustion of ABUSE.md. Retention
+    stays the provider's choice: what leaves a collection leaves the mesh in time. How a player
+    uses collections (follow the schedule like radio, newest first, in order, shuffled, move on
+    to the next episode) is the app's business. Open: the `integrity` slot of a piece (reserved,
+    §1), and granting the earlier pieces of a collection first, so that playback can start
+    sooner where everything is granted at once (FEASIBILITY.md §14).

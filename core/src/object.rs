@@ -17,6 +17,10 @@ pub enum ContentType {
     Firmware = 3,
     /// A channel's rendition table (PROTOCOL.md §1.2).
     Renditions = 4,
+    /// A collection manifest: one collection's pieces, named by a root manifest (PROTOCOL.md §2).
+    Collection = 5,
+    /// A collection's cover, as JPEG.
+    Image = 6,
     /// Spoken programmes as SNAC 24 kHz codes.
     Speech = 16,
     /// Music as SNAC 32 kHz codes.
@@ -28,10 +32,16 @@ pub enum ContentType {
 }
 
 impl ContentType {
-    /// Objects a node reads itself to know what to want and how to play: a channel's manifest
-    /// and its rendition table. Their bytes are always kept, whatever their size.
+    /// Objects a node reads itself to know what to want and how to play: a channel's root
+    /// manifest, its collection manifests and its rendition table. Their bytes are always kept,
+    /// whatever their size.
     pub fn is_read_by_nodes(self) -> bool {
-        matches!(self, ContentType::Manifest | ContentType::Renditions)
+        matches!(self, ContentType::Manifest | ContentType::Collection | ContentType::Renditions)
+    }
+
+    /// A manifest of either level: passed first, kept whatever its size (PROTOCOL.md §2, §4).
+    pub fn is_manifest(self) -> bool {
+        matches!(self, ContentType::Manifest | ContentType::Collection)
     }
 
     pub fn from_u8(v: u8) -> Self {
@@ -40,6 +50,8 @@ impl ContentType {
             2 => ContentType::Text,
             3 => ContentType::Firmware,
             4 => ContentType::Renditions,
+            5 => ContentType::Collection,
+            6 => ContentType::Image,
             16 => ContentType::Speech,
             17 => ContentType::Music,
             18 => ContentType::Opus,

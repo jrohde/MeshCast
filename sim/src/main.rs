@@ -87,6 +87,16 @@ struct Common {
     /// Lures claim the maximum score and full capability instead of nothing.
     #[arg(long, default_value_t = false)]
     attack_claim_max: bool,
+    /// Collections per source: its objects in order, split over this many (PROTOCOL.md §2).
+    #[arg(long, default_value_t = 1)]
+    collections: usize,
+    /// Each follower follows this many of a source's collections, chosen at random, instead
+    /// of the whole channel.
+    #[arg(long, default_value_t = 0)]
+    follow_collections: usize,
+    /// Give each collection a cover of this many kB.
+    #[arg(long, default_value_t = 0)]
+    cover_kb: u32,
 }
 
 impl Common {
@@ -98,6 +108,10 @@ impl Common {
 
     fn attack(&self) -> Option<scenario::AttackSpec> {
         (self.attackers > 0).then_some(scenario::AttackSpec { attackers: self.attackers, period_s: self.attack_period_s, spoof: self.attack_spoof, renditions: self.attack_renditions, lure: self.attack_lure, claim_max: self.attack_claim_max })
+    }
+
+    fn collections(&self) -> scenario::CollectionSpec {
+        scenario::CollectionSpec { per_source: self.collections, follow: self.follow_collections, cover_kb: self.cover_kb }
     }
 
     fn mix_items(&self) -> Vec<scenario::MixItem> {
@@ -222,6 +236,8 @@ struct Report {
     delivered_bytes_per_hour_per_announcer: f64,
     failover: Option<FailoverReport>,
     core_stats: Vec<(usize, String)>,
+    /// Mean bytes a follower holds complete at the end, in kB.
+    held_kb_per_follower: f64,
     /// Per node: announcer followed, bulk frames received, bulk frames lost to collisions,
     /// tracks completed.
     per_node: Vec<(usize, u32, u64, u64, usize)>,
@@ -279,6 +295,9 @@ struct Pair {
 fn whole_content(tracks: &BTreeMap<meshcast_core::ids::ShortId, scenario::TrackInfo>, completions: &BTreeMap<(usize, meshcast_core::ids::ShortId), Millis>, announcer: &[Option<usize>]) -> WholeContent {
     let mut per: BTreeMap<(usize, usize), Pair> = BTreeMap::new();
     for (id, t) in tracks {
+        if t.label == scenario::COVER {
+            continue;
+        }
         for &f in &t.followers {
             let e = per.entry((f, t.source)).or_insert(Pair { first: Millis::MAX, last: 0, complete: true, last_id: None });
             match completions.get(&(f, *id)) {
@@ -416,6 +435,7 @@ fn main() {
                 sources_at: Some(vec![0]),
                 renditions: common.renditions(),
                 attack: common.attack(),
+                collections: common.collections(),
             };
             run(spec, &common, None);
         }
@@ -440,6 +460,7 @@ fn main() {
                 sources_at: None,
                 renditions: common.renditions(),
                 attack: common.attack(),
+                collections: common.collections(),
             };
             run(spec, &common, None);
         }
@@ -475,6 +496,7 @@ fn main() {
                 sources_at: Some(vec![0]),
                 renditions: common.renditions(),
                 attack: common.attack(),
+                collections: common.collections(),
             };
             run(spec, &common, None);
         }
@@ -502,6 +524,7 @@ fn main() {
                 sources_at: None,
                 renditions: common.renditions(),
                 attack: common.attack(),
+                collections: common.collections(),
             };
             run(spec, &common, Some((kill_at_h, revive_at_h)));
         }
@@ -615,7 +638,11 @@ fn simulate(spec: ScenarioSpec, verbose: bool, failover: Option<(f64, f64)>) -> 
                     let n = &eng.nodes[f].node;
                     let ann = n.announcer_of(bulk_c);
                     let aj = (ann.0 as usize).wrapping_sub(1);
-                    eprintln!("MISSING node {} attacker {} obj {:?} alive {} progress {:?} wants {} follows {:?} ann_has {:?} view {:?}", f, eng.attackers.iter().any(|a| a.node == f), id, eng.nodes[f].alive, n.object_progress(id), n.wants_object(id), ann, eng.nodes.get(aj).map(|a| a.node.holds(id)), n.excursion_view(id));
+                    // The collection manifest that lists it, and the channel's root, at the follower and at its announcer.
+                    let src = built.sources.iter().find(|s| s.node == info.source);
+                    let cm = src.and_then(|s| s.collections.iter().find(|c| c.pieces.iter().any(|o| o.id.short() == *id))).map(|c| c.as_object().0.id.short());
+                    let root = src.map(|s| (n.manifest_state(&s.channel), eng.nodes.get(aj).and_then(|a| a.node.manifest_state(&s.channel))));
+                    eprintln!("MISSING node {} attacker {} obj {:?} alive {} progress {:?} wants {} follows {:?} ann_has {:?} view {:?} cm held {:?}/{:?} root {:?}", f, eng.attackers.iter().any(|a| a.node == f), id, eng.nodes[f].alive, n.object_progress(id), n.wants_object(id), ann, eng.nodes.get(aj).map(|a| a.node.holds(id)), n.excursion_view(id), cm.map(|c| n.holds(&c)), cm.and_then(|c| eng.nodes.get(aj).map(|a| a.node.holds(&c))), root);
                 }
             }
         }
@@ -739,6 +766,12 @@ fn simulate(spec: ScenarioSpec, verbose: bool, failover: Option<(f64, f64)>) -> 
         }
     });
 
+    // What a follower carries: the bytes it holds complete, over the nodes that follow an
+    // announcer at the end and publish nothing.
+    let bulk_i = eng.phys.iter().position(|p| p.kind != CarrierKind::LoraControl).unwrap_or(0);
+    let held: Vec<f64> = eng.nodes.iter().enumerate().filter(|(i, n)| !built.sources.iter().any(|s| s.node == *i) && n.node.role(bulk_i) == meshcast_core::node::Role::Follower).map(|(_, n)| n.node.held_bytes() as f64 / 1024.0).collect();
+    let held_kb_per_follower = if held.is_empty() { 0.0 } else { held.iter().sum::<f64>() / held.len() as f64 };
+
     let core_stats: Vec<(usize, String)> = eng
         .nodes
         .iter()
@@ -755,8 +788,8 @@ fn simulate(spec: ScenarioSpec, verbose: bool, failover: Option<(f64, f64)>) -> 
             s2.sort_unstable();
             let med = s2.get(s2.len() / 2).copied().unwrap_or(0);
             let served = s.symbols_served + s.symbols_overheard;
-            let line = line + &format!(" holds={}/{} short_median={:.1}% served={:.0}%", done, known, med as f64 / 10.0,
-                if served > 0 { 100.0 * s.symbols_served as f64 / served as f64 } else { 0.0 });
+            let line = line + &format!(" holds={}/{} short_median={:.1}% served={:.0}% follow_ups={}/{}", done, known, med as f64 / 10.0,
+                if served > 0 { 100.0 * s.symbols_served as f64 / served as f64 } else { 0.0 }, s.follow_ups_granted, s.follow_ups_sent);
             (i, line)
         })
         .collect();
@@ -810,6 +843,7 @@ fn simulate(spec: ScenarioSpec, verbose: bool, failover: Option<(f64, f64)>) -> 
         delivered_bytes_per_hour_per_announcer: dbph,
         failover: fo,
         core_stats,
+        held_kb_per_follower,
     };
     if std::env::var("MESHCAST_DEBUG_WANTS").is_ok() {
         for (i, n) in eng.nodes.iter().enumerate() {
@@ -841,6 +875,7 @@ struct SeedLine {
     excursions: u64,
     frames_sent: u64,
     whole: WholeContent,
+    held_kb_per_follower: f64,
 }
 
 /// Several seeds of one scenario: the spread is the result, not any single run.
@@ -875,7 +910,7 @@ impl Ensemble {
             spec: reports[0].spec.clone(),
             seeds: reports
                 .iter()
-                .map(|r| SeedLine { seed: r.spec.seed, delivered: delivered(r), bulk_sent: r.bulk_sent, by_kind: by_kind(&r.objects), renditions: r.renditions.clone(), attack_frames: r.attack_frames, carousel_first: r.carousel_first, carousel_repeat: r.carousel_repeat, role_events: r.role_events, challenges: r.challenges, excursions: r.excursions, frames_sent: r.frames_sent, whole: r.whole.clone() })
+                .map(|r| SeedLine { seed: r.spec.seed, delivered: delivered(r), bulk_sent: r.bulk_sent, by_kind: by_kind(&r.objects), renditions: r.renditions.clone(), attack_frames: r.attack_frames, carousel_first: r.carousel_first, carousel_repeat: r.carousel_repeat, role_events: r.role_events, challenges: r.challenges, excursions: r.excursions, frames_sent: r.frames_sent, whole: r.whole.clone(), held_kb_per_follower: r.held_kb_per_follower })
                 .collect(),
         }
     }
@@ -999,7 +1034,7 @@ struct DynamicsReport {
 
 #[allow(clippy::too_many_arguments)]
 fn run_dynamics(nodes: usize, area_km2: f64, stations: usize, channels: usize, follows: usize, publish_h: f64, bulletin_kb: u32, window: usize, churn_h: f64, node_churn_h: f64, newcomer_h: f64, common: &Common) {
-    use meshcast_core::manifest::{Manifest, ScheduleEntry};
+    use meshcast_core::manifest::{Collection, CollectionKind, Manifest, ScheduleEntry};
     use meshcast_core::rng::Rng;
     use meshcast_core::ids::ShortId;
     use scenario::{track_object, TrackInfo};
@@ -1023,6 +1058,8 @@ fn run_dynamics(nodes: usize, area_km2: f64, stations: usize, channels: usize, f
         sources_at: None,
         renditions: common.renditions(),
         attack: common.attack(),
+        // One series per channel, followed whole: a bulletin is a new episode of it.
+        collections: scenario::CollectionSpec { per_source: 1, follow: 0, cover_kb: common.cover_kb },
     };
     let params = params();
     let mut built = build(&spec, params);
@@ -1104,9 +1141,14 @@ fn run_dynamics(nodes: usize, area_km2: f64, stations: usize, channels: usize, f
                 }
                 src.seq += 1;
                 let schedule: Vec<ScheduleEntry> = src.objects.iter().enumerate().map(|(k, o)| ScheduleEntry { object: o.id.short(), start: t / 1000 + 3600 * k as u64, repeat: 0 }).collect();
-                let m = Manifest::sign(&src.key, src.seq, &format!("Channel {c}"), src.objects.clone(), schedule, None);
+                // A bulletin is a new episode of the channel's series: a new collection manifest
+                // and a new root that names it.
+                let series = Collection { cid: 1, kind: CollectionKind::Series, title: format!("Bulletins of channel {c}"), pieces: src.objects.clone(), schedule };
+                let cover = src.covers.first().copied().flatten();
+                let m = Manifest::sign(&src.key, src.seq, &format!("Channel {c}"), vec![series.reference(cover, true)], None, None);
                 let node = src.node;
-                built.engine.nodes[node].node.publish(&m, &[(o.meta(), None)]);
+                built.engine.nodes[node].node.publish(&m, std::slice::from_ref(&series), &[(o.meta(), None)]);
+                src.collections = vec![series];
                 built.engine.poke(node);
                 let followers: Vec<usize> = (0..nodes).filter(|&i| subs[i].contains(&c)).collect();
                 built.tracks.insert(o.id.short(), TrackInfo { label: "speech".into(), source: node, index: next_index[c] - 1, bytes: o.len, followers: followers.clone(), rendition: None, small: Vec::new(), slot_ms: None });

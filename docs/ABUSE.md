@@ -13,6 +13,9 @@ of yours can spend. Anything above one is a lever.
 - **You cannot forge a channel.** A manifest is signed by the channel key; without it you cannot
   add, remove or reorder anything in someone's channel, and a manifest with a lower sequence
   number than the one a node holds is ignored.
+- **You cannot forge a collection.** A collection manifest is not signed: the root manifest
+  names it by its full hash, so a node reads one only once the adopted, signed root names it,
+  and a collection manifest that no adopted root names is an unknown object like any other.
 - **You cannot poison content.** Objects are named by their hash. A symbol that does not fit is
   discarded when the object completes, the object is dropped and collected again. You can waste
   airtime this way but you cannot change what people hear.
@@ -34,6 +37,7 @@ of yours can spend. Anything above one is a lever.
 | **Excursion lure** | In the rendezvous, a beacon and a HAVE listing objects you do not have | Followers whose own cell cannot get those objects visit you for `T_excursion` and get nothing | Delay of what was missing anyway, once per follower and hour |
 | **Conflict poisoning** | A report naming announcers with a high colour count | Everyone's slot cycle grows to that count and each announcer idles all but one slot of it | Was measured at 8/9 idle by accident alone |
 | **Store exhaustion** | A huge catalogue on a channel someone follows | Followers fetch and keep it | Bounded by what they follow |
+| **Changed collections** | A root of your own channel that flags every collection manifest as changed (PROTOCOL.md §2) | Every holder of the root lists them with it and uploads them after it, up to a HAVE frame of them per root | Bounded by your own channel: the channel flood |
 
 Two of these are structural rather than incidental. An announcer is generous by design: it serves
 whatever its cell asks for, which is exactly what an attacker needs. And control frames are free
@@ -128,8 +132,8 @@ notices the limit exists.
    node that asks for renditions of more audio per hour than an hour holds is not listening.
    An announcer serves each follower renditions at most at the rate its profile plays; this is
    the request budget of item 1 with a limit that follows from what renditions are for.
-4. **Bounded generosity.** An announcer serves at most so many channels, chosen by how many
-   distinct followers asked and for how long, rather than everything it hears of.
+4. **Bounded generosity.** An announcer serves at most so many channels and collections, chosen
+   by how many distinct followers asked and for how long, rather than everything it hears of.
 5. **Known peers, optionally.** A cell may require that requests come from a node whose key it
    has seen before, which makes the attacks above cost an identity rather than nothing. This is
    a deployment choice, not a default: MeshCast is meant to work with strangers.
