@@ -56,7 +56,8 @@ impl RenditionTable {
         if n > 4096 {
             return Err(TableError);
         }
-        let mut entries = Vec::with_capacity(n as usize);
+        // Grown as entries arrive, not reserved from the claimed count (docs/ABUSE.md, item 5).
+        let mut entries = Vec::new();
         for _ in 0..n {
             if d.array().map_err(|_| TableError)? != Some(4) {
                 return Err(TableError);
