@@ -250,8 +250,11 @@ Rules:
   a whole list, or between two neighbours), announces its own: after a random wait of up to
   `T_offer`, not if it hears anyone announce that seq or a newer one first, not while its
   announcer is asking for that manifest (it knows of it and is fetching it; what a follower's
-  announcer asked for counts only since it followed that announcer, FEASIBILITY.md §16), and at
-  most once per channel every `T_want_min`. The announcer then wants it like any announced
+  announcer asked for counts only since it followed that announcer, FEASIBILITY.md §16, and only
+  for `T_want_min`, since an announcer that fetches asks again every round), and at most once
+  per channel every `T_want_min`. An ask that counted for `want_ttl` let an announcer that asked
+  once and then took an older announcement for the newest go uncorrected for an hour
+  (FEASIBILITY.md §20). The announcer then wants it like any announced
   manifest, and a holder uploads it. Like an offer, it answers something the announcer said.
   Without it, an announcer whose library is older than its cell's (a station back from a power
   cut, a follower that just stepped up) never learned the newer manifests, because a source
@@ -389,10 +392,11 @@ knows no manifest sends an empty whole list, so that its followers tell it their
 | 21 | 4 × n_ranges | missing source symbols as (first `esi` u16, count u16) runs |
 | … | 2 | CRC-16 |
 
-Draft cap 40 ranges, 183 bytes. Sent by a node that is nearly complete on an object (draft 80 %)
-and has seen no progress for `T_nack_stall`. A follower's NACK goes to its announcer, whose
-carousel puts the missing symbols at the front of the next round; but if that announcer is itself
-asking for the object (its WANT lists it) and has granted it to nobody for `T_grant`, nobody in
+Draft cap 40 ranges, 183 bytes. Sent by a node that is nearly complete on an object (draft 80 %,
+or all of it but one symbol, §4) and has seen no progress for `T_nack_stall`. A follower's NACK
+goes to its announcer, whose carousel puts the missing symbols at the front of the next round;
+but if that announcer is itself asking for the object (its WANT lists it) and has granted it to
+nobody for `T_grant`, nobody in
 the cell can repair it, and the follower names instead the holder it hears best among those that
 follow another announcer: a holder in its own cell would answer its announcer's ask anyway, and
 naming one as well only doubled the work (FEASIBILITY.md §12). That holder is usually in the next
@@ -486,11 +490,15 @@ of an object's 216 symbols in twelve hours that way (FEASIBILITY.md §9.8). An a
 hears the WANTs, offers and conflict reports of other cells; it only leaves their wants to their
 own announcers.
 
-**Repair.** Any node, follower or announcer, that holds at least 80 % of an object and has seen no
-new symbol for `T_nack_stall` (draft 60 s) sends one NACK listing the missing symbols. The
-announcer's carousel answers from its front queue; a holder whose upload the announcer is missing
-answers with exactly those symbols. Stall detection is time-based, not round-based, so it also
-works when the carousel is idle.
+**Repair.** Any node, follower or announcer, that holds at least 80 % of an object, or all of it
+but one symbol, and has seen no new symbol for `T_nack_stall` (draft 60 s) sends one NACK listing
+the missing symbols. The announcer's carousel answers from its front queue; a holder whose upload
+the announcer is missing answers with exactly those symbols. Stall detection is time-based, not
+round-based, so it also works when the carousel is idle. A NACK for one symbol is the smallest
+repair there is: under the fraction alone an object of two to four symbols, such as a collection
+manifest, could not be repaired at all, and one that had lost one of its two symbols waited for
+the next round of asking, five minutes at an announcer and `T_want_min` at a follower
+(FEASIBILITY.md §20).
 
 **A repair is an ask.** A node can reach 95 % of an object by overhearing a neighbouring cell's
 carousel and then want the rest, although nobody was ever granted to it. So a NACK is answered by
@@ -651,7 +659,7 @@ Several holders may upload different objects to one announcer at the same time: 
 own regulatory budget, and serialising them (tried in Phase 0) halves the cell's inbound rate.
 Holders on opposite sides of a cell that cannot hear each other's CCA are the known residual
 source of upload collisions (FEASIBILITY.md §7.5.0, rounds 9–10). An
-object that is at least 80 % complete is never re-asked in full: it is repaired by NACK, which
+object that is nearly complete (§4) is never re-asked in full: it is repaired by NACK, which
 the granted uploader answers for as long as the announcer keeps asking. On frequency-agile
 carriers an announcer's NACKs, like its gossip, go out in the meeting dwell, because its
 uploader may live in another cell on another sequence.
@@ -1008,7 +1016,7 @@ arrives a few minutes later than it otherwise would. That is the entire user-vis
 | `near_rssi` | sensitivity + 17 dB | beacon strength that means "same cell" for the tie-break |
 | `max_passes` | 1 | carousel passes per object unless re-wanted |
 | repetition spacing | 0, then `T_want_min` × 1, 2, 4, 8 | wait before an object is passed again; the level climbs with each repetition and resets after a rest of twice the wait |
-| `T_nack_stall` | 60 s | no progress on an ≥ 80 % object before a NACK |
+| `T_nack_stall` | 60 s | no progress on a nearly complete object (≥ 80 %, or all but one symbol) before a NACK |
 | `T_want_min` | 10 min | minimum interval between a follower's WANT frames, except an ask for what a manifest the follower asked for, or fetched on an excursion, names (§4) |
 | `T_gossip`, `T_gossip_min` | 5 min, 30 s | announcer/source gossip cadence and its floor |
 | `control_reserve` | 10 % | share of the band budget kept free for control frames |
