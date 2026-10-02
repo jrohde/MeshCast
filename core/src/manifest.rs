@@ -193,7 +193,9 @@ impl Collection {
         let kind = CollectionKind::from_u8(d.u8().map_err(|_| ManifestError::Cbor)?).ok_or(ManifestError::Cbor)?;
         let title = String::from(d.str().map_err(|_| ManifestError::Cbor)?);
         let n = get_list(&mut d)?;
-        let mut pieces = Vec::with_capacity(n as usize);
+        // Grown as entries arrive, not reserved from the count the input claims: a dozen bytes
+        // claiming 4096 pieces made room for all of them (docs/ABUSE.md, item 5).
+        let mut pieces = Vec::new();
         for _ in 0..n {
             if d.array().map_err(|_| ManifestError::Cbor)? != Some(5) {
                 return Err(ManifestError::Cbor);
@@ -207,7 +209,7 @@ impl Collection {
             pieces.push(ManifestObject { id, len, kind, title });
         }
         let ns = get_list(&mut d)?;
-        let mut schedule = Vec::with_capacity(ns as usize);
+        let mut schedule = Vec::new();
         for _ in 0..ns {
             if d.array().map_err(|_| ManifestError::Cbor)? != Some(3) {
                 return Err(ManifestError::Cbor);
@@ -309,7 +311,8 @@ impl Manifest {
         let seq = b.u32().map_err(|_| ManifestError::Cbor)?;
         let title = String::from(b.str().map_err(|_| ManifestError::Cbor)?);
         let n = get_list(&mut b)?;
-        let mut collections = Vec::with_capacity(n as usize);
+        // Grown as entries arrive, not reserved from the claimed count (docs/ABUSE.md, item 5).
+        let mut collections = Vec::new();
         for _ in 0..n {
             if b.array().map_err(|_| ManifestError::Cbor)? != Some(6) {
                 return Err(ManifestError::Cbor);
