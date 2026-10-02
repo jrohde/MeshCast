@@ -1507,6 +1507,9 @@ fn run_dynamics(nodes: usize, area_km2: f64, stations: usize, channels: usize, f
         let mean = shares.iter().sum::<f64>() / shares.len().max(1) as f64;
         println!("control carrier airtime share: mean {:.3} %, busiest node {:.3} %; symbols of roots pushed there: {}", mean * 100.0, busiest * 100.0, sum(|s| s.pushed_on_ctrl));
     }
+    if eng.oracle_transfers > 0 {
+        println!("backbone oracle: {} transfers", eng.oracle_transfers);
+    }
     println!("table peaks: {}", eng.metrics.table_peaks.iter().map(|(k, v)| format!("{k} {v}")).collect::<Vec<_>>().join(", "));
     if let Some(path) = &common.out {
         fs::write(path, serde_json::to_string_pretty(&report).unwrap()).expect("write report");
