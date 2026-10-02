@@ -1449,7 +1449,8 @@ instead of 91), in 10-minute pieces after 51 instead of 54, for 6 % more frames.
 object, not per byte, and more frames are the wrong way to pay it. The way to pay it belongs to the
 design of collections (PROTOCOL.md §9, question 13): a follower that asks for a collection by its
 manifest and a bitmap of what it lacks asks for twenty pieces in one entry. The experiment was not
-merged.
+merged. (§14 measured that proposal and found it half right: a follower's asks alone gain nothing;
+the cost sits in the announcer's rounds of asking and granting.)
 
 ### 13.6 Manifests that reach everyone
 
@@ -1670,3 +1671,146 @@ Most of the speed is §13.2's phases per holder, which every band L scenario wit
 object per source needed; most of the frames are §13.3's manifests. ESP-NOW is the exception in
 both, and within its own spread: its eight worlds range from 21,000 to 88,000 bulk frames, so a
 difference of a few thousand in the mean says nothing either way.
+
+## 14. What a piece costs, and asking per collection
+
+§13 found that pieces shorter than about three minutes still cost band L dearly and laid that at
+the follower's door: it asks for at most eight objects per `T_want_min`. The proposed answer was
+asking per collection, a manifest and a bitmap of what is missing in one entry. This section
+measured that proposal, found it half right, and found what a piece really costs. All numbers are
+eight seeds unless one world is named.
+
+### 14.1 Where the last piece waits
+
+The whole-content measure now also says where the last piece of each follower and source waited:
+when the follower's announcer held it, and how much later the follower did.
+
+| One hour of music per source | Last piece at the announcer (median) | Follower after that (median, p90) |
+|---|---|---|
+| Band L, 15 km², 1-minute pieces | 140 min | 11, 51 min |
+| Band L, 15 km², 10-minute pieces | 50 min | 2, 16 min |
+| Band L neighbourhood, 1-minute pieces | 39 min | 0, 3 min |
+| Band L neighbourhood, 10-minute pieces | 19 min | 0, 4 min |
+
+Small pieces are late *at the announcer*: a supply problem, not one of asking or of the carousel.
+That is why the first two attempts gained nothing. Letting followers ask in sets left the 15 km²
+network with 1-minute pieces at 151 minutes and cost 28 % more frames, because every follower now
+re-asked everything it missed each round and the carousels repeated more; letting an announcer
+grant a busy holder several objects at once left it at 151 too.
+
+The upload timeline at the station of one neighbourhood world showed the cost. Uploads were quick,
+a median 14 seconds from first symbol to complete, but the announcer asked for at most eight objects
+per round, and each ask needed an offer and a grant, 1.6 minutes, before the upload began: 120
+pieces in rounds of eight at about 2.5 minutes a round is the 39 minutes measured. On a hopping
+carrier an announcer asks only in the meeting dwell, so a round there is at least a hop cycle.
+Letting announcers ask for 24 objects per round, in up to three frames, took the 15 km² network with
+1-minute pieces to 137 minutes; adding follower sets to that, to 89 (−41 %, for 10 % more frames).
+Both sides of the asking mattered, which is what the experiment of §13.5 had measured without
+being able to say why.
+
+### 14.2 Sets in all three steps
+
+The principled form asks, offers and grants in sets (PROTOCOL.md §3.3): a follower asks its
+announcer for the pieces of a collection in one entry; an announcer asks holders the same way,
+open; a holder offers what it holds of it the same way; and the announcer grants each holder its
+pieces in one entry, which the holder uploads one after the other in its phase. A frame stays
+within its old 234 bytes.
+
+| One hour of music, all of it (median) | Before | Sets in all three steps | Frames |
+|---|---|---|---|
+| Band L, 15 km², 1-minute pieces | 151.5 min | 72.1 min | +11 % |
+| Band L, 15 km², 3-minute pieces | 80.4 min | 59.9 min | +11 % |
+| Band L, 15 km², 10-minute pieces | 54.9 min | 53.6 min | +2 % |
+| Band L neighbourhood, 1-minute pieces | 39.1 min | 24.2 min | +14 % |
+| Band L neighbourhood, 3-minute pieces | 25.8 min | 19.2 min | +5 % |
+
+In the nine scenarios of §9.3, however, band L and ESP-NOW gained and four others lost: the band O
+neighbourhood 7.3 to 9.1 minutes, the band O town 13.8 to 15.7, the two clusters 17.3 to 26.4 and
+LoRa across 5 km 47.1 to 51.3. Ablating each part of the change one at a time traced four causes.
+
+- *The order of a holder's uploads.* Asked by name, objects were asked most listeners per byte
+  first; a granted set arrived in the collection's order, so a 42 kB track went before every 22 kB
+  bulletin of the same source. A holder now uploads what one grant brought smallest first, and
+  among equal sizes in the collection's order (PROTOCOL.md §4). LoRa went back to 47.2 minutes.
+- *A carousel that chained its frames.* In one band O world a source took 2.5 minutes for a piece
+  that takes 0.8. Counting who made its channel busy each time it wanted to send found the
+  station, 3,298 times, once for every frame the station sent; with names, 65 times. Content frames
+  get no jitter, so a carousel with work sends them back to back, and a holder with grants queued
+  finds the channel busy whenever it wakes. Leaving a frame's airtime free after each carousel
+  frame while uploads are owed did not change that count. Dividing the announcer's listening time
+  in phases under a duty cycle too, as under polite access, did: the neighbourhood went to
+  7.2 minutes. (Phases were kept to polite access in §9.6 because they made a lone upload K times
+  slower; with phases per holder (§13.2) a lone holder has K = 1, so that objection no longer held.)
+- *The order across holders.* The band O town stayed at 15.7 minutes with phases: speech had gone
+  from 8.5 to 11.4 minutes, music from 19.1 to 20.1, and all of a source's content arrived about as
+  late as before. Asked by name, an
+  announcer asked for the most listeners per byte first, so a cell's speech, small, came in before
+  its music, at 5.0 and 12.8 minutes in one world; asked in sets, everything was asked at once, at
+  4.6 and 5.1, and the phases gave every holder an equal share of the announcer's time, so speech
+  took 1.3 minutes an upload instead of 0.5 and was complete at 14 minutes instead of 9. Keeping
+  each holder's whole queue in that order made it worse (speech 13 minutes): the order that
+  mattered was between holders, which only the announcer decides.
+- *Sets a node could not read.* The two-cluster loss was one world, 55 minutes before and 115 after.
+  A follower of the far cluster went on an excursion (§12.3) to the near cluster's announcer, whose
+  HAVE now came as sets of a manifest the follower did not yet hold. It could not read them,
+  fetched the manifest, saw nothing more listed and came home; only a second excursion an hour
+  later brought the rest. A node now keeps have sets it cannot read per neighbour and reads them
+  when it adopts the manifest (PROTOCOL.md §3.3): 55 minutes again.
+
+### 14.3 The rule: what a round costs decides how much it asks for
+
+The order across holders and the rounds pull in opposite directions. Asking in rounds of eight,
+most listeners per byte first, is Smith's rule at the announcer and gives small objects the cell's
+inbound time first; it costs a round per eight objects. Where a round is cheap, that cost is small
+and the order is worth more; where a round costs a hop cycle, the rounds dominate. So where rounds
+are dear, on a carrier that hops, followers, announcers and holders use sets; where asking is cheap
+a round asks for the eight most valuable objects by name, a busy holder is not asked for a second
+object until its first is done, and the next round comes as soon as they have arrived
+(PROTOCOL.md §4). Band O and LoRa then behave exactly as before; band L and ESP-NOW keep the gain.
+Phases under a duty cycle were then no longer needed and were left out.
+
+The size sweep of §13 with this rule (first piece and all of the hour, medians in minutes; frames
+against §13.8):
+
+| Piece | Band L, 1 km²: before | Now | Frames | Band L, 15 km²: before | Now | Frames |
+|---|---|---|---|---|---|---|
+| 30 seconds | 9.0, 69.8 | 10.4, **30.9** | +27 % | 15.5, 263.6 | 29.6, **81.9** | +4 % |
+| 1 minute | 9.1, 39.1 | 9.7, **23.9** | +15 % | 14.8, 151.5 | 16.5, **72.8** | +10 % |
+| 3 minutes | 9.7, 25.8 | 10.2, **19.4** | +5 % | 16.2, 80.4 | 19.1, **62.0** | +12 % |
+| 5 minutes | 10.3, 24.6 | 10.8, **18.8** | +5 % | 19.2, 65.5 | 19.8, **54.3** | +7 % |
+| 10 minutes | 11.6, 21.1 | 12.3, 20.9 | +1 % | 23.2, 54.9 | 25.0, 52.9 | +2 % |
+| One piece | 19.7, 19.7 | 19.7, 19.7 | 0 % | 59.7, 59.7 | 58.8, 58.8 | +1 % |
+
+In band O every size stayed within 2.2 minutes of §13.8, and its frames between 8 % fewer and 5 %
+more, as it should: there the rule asks as before. In band L the penalty for small pieces has
+mostly gone: an hour in 1-minute pieces now arrives in 73 minutes across 15 km², against 53 in
+10-minute pieces, where it was 152 against 55; so §13.8's advice of 5 to 15 minutes still holds,
+but a song as it is costs little now.
+The price is the first piece: with everything granted at once, many holders upload side by side in
+phases, each in a share of the announcer's time, and the first piece of 30-second pieces across
+15 km² came after 30 minutes instead of 16. Granting the earlier pieces of a collection to the
+holders first would buy it back; that is open.
+
+The nine scenarios of §9.3, against §13.8:
+
+| Scenario | §13.8: median, bulk frames | Now | Frames |
+|---|---|---|---|
+| Band O neighbourhood | 7.3 min, 6,596 | 7.3 min, 6,596 | 0 % |
+| Band L neighbourhood | 10.8 min, 13,872 | **10.0 min**, 13,935 | 0 % |
+| Band O, 15 km² | 8.4 min, 39,106 | 8.4 min, 39,644 | +1 % |
+| Band L, 15 km² | 24.0 min, 112,507 | **22.6 min**, 115,254 | +2 % |
+| ESP-NOW | 14.9 min, 42,934 | **13.8 min**, 36,862 | −14 % |
+| Two clusters, band L | 17.3 min, 5,855 | 17.5 min, 5,839 | 0 % |
+| LoRa only, 5 km | 47.1 min, 1,322 | 47.1 min, 1,322 | 0 % |
+| Town, band O | 13.8 min, 142,274 | 13.8 min, 144,093 | +1 % |
+| Town, band L | 33.6 min, 365,429 | **32.4 min**, 358,860 | −2 % |
+
+Every scenario delivered 100 % in every world. The attacks of §13.7 and the living network with
+nodes coming and going were run again: no role changes without an attacker or under a WANT flood,
+with or without made-up ids; every world held every current window; against one false announcer
+99.4 % (98.8 % in the worst world), five 97.0 % (92.9 %), five claiming the maximum 96.0 % (91.0 %,
+one world three points lower than §13.7, the others within a point). Under the flood the slowest
+bulletin of one band O world took 6.6 minutes instead of 3.0; all other worlds were the same.
+
+Also in this round: a store that keeps an object's bytes reserved a whole block of 1,024 symbols for
+it, so a 43 kB track took 205 kB; it now keeps exactly the object's symbols.

@@ -286,7 +286,7 @@ it, and a want for such an object was granted and answered over and over; FEASIB
 
 | Offset | Size | Field |
 |---|---|---|
-| 1 | 1 | flags: `n_heard` |
+| 1 | 1 | flags: `n_heard` (bits 0–1), `n_sets` (bits 2–4), `n_have_sets` (bits 5–7) |
 | 2 | 4 | `node_id` |
 | 6 | 4 | `announcer_id` — the announcer this node currently follows (its own id if it announces, 0 if none heard) |
 | 10 | 1 | `announcer_colour` — that announcer's colour, so holders can reach it without having heard its beacon |
@@ -295,11 +295,26 @@ it, and a want for such an object was granted and answered over and over; FEASIB
 | 13 | 1 | `n_want` |
 | 14 | 6 × n_heard | other announcers this node hears: id (4), colour (1), colours (1); the conflict report (§5) |
 | … | 8 × n_have | short ids the node has completely |
+| … | 18 × n_have_sets | have sets: manifest short id (8), first piece (2), bitmap (8) |
 | … | 13 × n_want | wants: short id (8), granted holder (4; 0 = open ask), upload phase of the grant (1; §4) |
+| … | 23 × n_sets | want sets: manifest short id (8), first piece (2), bitmap (8), granted holder (4; 0 = open ask), upload phase (1) |
 | … | 2 | CRC-16 |
 
-Draft cap: 3 heard + 12 have + 8 want per frame, 234 bytes. For larger libraries a node rotates through
-its list across gossip rounds, most recently completed and most wanted first. Followers that are
+**Sets** name pieces by their place in a manifest: bit *i* of the bitmap is piece *first + i*, the
+(*first + i*)-th object the manifest lists, so one entry covers up to 64 pieces of one collection.
+A want set is to a WANT entry what it is to one object: open, or granted to one holder in one
+phase. A node sends the pieces of a manifest it holds as sets and everything else (manifests,
+renditions, objects of no manifest it holds) by name, where sets are used at all (§4). A receiver
+reads a set by the manifest it holds of that id; a want set of a manifest it does not hold is
+ignored and asked again, and a have set of a manifest it does not hold is kept per neighbour and
+read when it adopts that manifest: a follower about to fetch from another cell often lacks the
+manifest the other cell's sets refer to, and threw away what that cell's announcer had said it
+had (FEASIBILITY.md §14).
+
+Draft cap: 3 heard; HAVE ids and have sets within 96 bytes (8 × n_have + 18 × n_have_sets); wants
+and want sets within 104 bytes (13 × n_want + 23 × n_sets); at most 234 bytes, as before sets
+existed. For larger libraries a node rotates through its list across gossip rounds, most recently
+completed and most wanted first. Followers that are
 not sources send GOSSIP only when they have something new to offer that the announcer lacks (the
 "upload" case) or, rarely, a WANT for an object the announcer has never included; the default is
 silence.
@@ -358,7 +373,8 @@ the cell wants, as learned from GOSSIP and MANIFEST_ANNOUNCE, that the announcer
    listeners divided by size is Smith's rule, which minimises the total time listeners wait on
    one shared transmitter. Among objects of one size it is simply most-wanted first; a small
    object no longer waits behind a large one; and every wanted object is still sent every round,
-   so nothing starves.
+   so nothing starves. Between objects that serve as many listeners per byte, the earlier piece
+   of its collection goes first, because it plays first.
 3. Merge NACKs received during the round; symbols named in NACKs are queued at the front of the
    next round.
 4. Objects that every heard follower reports complete leave the set.
@@ -492,8 +508,25 @@ rule, a third of all upload frames in a living band L network went to nodes that
 announcing; FEASIBILITY.md §9.6.
 
 **Ask only for what is not coming.** An announcer's WANT lists objects that have received no
-symbol for `T_nack_stall`; an object whose symbols are arriving is not asked for again, and a
-holder whose granted upload is flowing is not asked for a second object until it is done.
+symbol for `T_nack_stall`; an object whose symbols are arriving is not asked for again.
+
+**How much one round asks for depends on what a round costs.** On a hopping carrier an announcer
+asks, and a holder offers to another cell, only in the meeting dwell, once a hop cycle. Asking for
+eight objects a round then cost a round per eight pieces: in band L an hour of music in 1-minute
+pieces reached its last announcer after 140 minutes, against 50 in 10-minute pieces, while the
+uploads themselves took seconds (FEASIBILITY.md §14). So where rounds are dear, followers ask their
+announcer, announcers ask and grant, and holders offer in sets (§3.3): a whole collection in one
+round, and a holder learns every object granted to it at once and uploads them one after the
+other in its phase. Where asking is cheap, on a carrier that does not hop, a round asks for the
+most listeners per byte first and the next round comes as soon as that has arrived; there the
+order of arrival matters more than the number of rounds, and asking for everything at once put
+a cell's speech and music up side by side, so that speech arrived a third later. A holder whose
+granted upload is flowing is then not asked for a second object until it is done.
+
+**A holder uploads what it was granted at once smallest first**, and among equal sizes in the
+order of the collection: Smith's rule as far as a holder can know it, since the pieces of one
+collection have about the same listeners. Granted in the collection's order, a 42 kB track went
+before every 22 kB bulletin of the same source.
 **Ask first for the most listeners per byte**, the carousel's rule applied one step earlier: a
 holder uploads one object at a time, so the order of asking is the order of arriving, and a
 3-minute track must not wait behind a 540 kB object from the same source. (Asking in object-id
@@ -922,9 +955,10 @@ arrives a few minutes later than it otherwise would. That is the entire user-vis
     Size needs no rule (FEASIBILITY.md §13): no limit on an object or on a catalogue is needed,
     because the carousel serves the most listeners per byte first, so a large object only
     arrives later, and abuse through size is the channel flood and store exhaustion of ABUSE.md,
-    to be bounded there. What the measurement asks of collections is a cheaper way to ask: a
-    follower lists at most 8 objects per WANT and sends one per `T_want_min`, so a programme in
-    many pieces takes many rounds of asking, and letting it ask for three times as many took an
-    hour of music in 3-minute pieces across a 15 km² band L network from 79 to 64 minutes. A
-    follower that asks for a collection by its manifest and a bitmap of the pieces it lacks would
-    ask for all of them in one entry.
+    to be bounded there. Asking per collection, by manifest and bitmap, is in place (§3.3, §4) and
+    turned out to be needed by announcers more than by followers: where rounds are dear, an
+    announcer that asked for eight objects a round took two and a half hours to gather an hour of
+    music in 1-minute pieces across a 15 km² band L network, and now takes 73 minutes
+    (FEASIBILITY.md §14). Open: the collections themselves (a root manifest per provider naming
+    collection manifests, subscribing per collection, the image type for covers), and granting the
+    earlier pieces of a collection first, so that playback can start sooner.

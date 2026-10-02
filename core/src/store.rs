@@ -65,6 +65,13 @@ pub struct Entry {
     pub verified: bool,
 }
 
+/// Bytes kept for an object of `len` bytes: its source symbols, whole. Every block but the last
+/// is full, so symbol `esi` of block `block` sits at `(block * K_MAX + esi) * SYMBOL_SIZE`.
+/// Reserving whole blocks instead made a 43 kB track take 205 kB.
+fn byte_capacity(len: u32) -> usize {
+    crate::object::total_symbols(len) as usize * SYMBOL_SIZE
+}
+
 impl Entry {
     fn empty(short: ShortId, kind: ContentType) -> Self {
         Entry { short, meta: None, len_hint: None, kind_hint: kind, blocks: Vec::new(), bytes: None, complete: false, verified: false }
@@ -81,7 +88,7 @@ impl Entry {
         }
         self.blocks.resize(nb, None);
         if ((len as usize) <= keep_below || kind.is_read_by_nodes()) && self.bytes.is_none() {
-            self.bytes = Some(vec![0u8; nb * K_MAX as usize * SYMBOL_SIZE]);
+            self.bytes = Some(vec![0u8; byte_capacity(len)]);
         }
     }
     pub fn len(&self) -> Option<u32> {
@@ -202,7 +209,7 @@ impl MemStore {
         let keep = (meta.len as usize) <= self.keep_bytes_below || meta.kind.is_read_by_nodes();
         let stored = match (keep, bytes) {
             (true, Some(b)) => {
-                let mut v = vec![0u8; nb * K_MAX as usize * SYMBOL_SIZE];
+                let mut v = vec![0u8; byte_capacity(meta.len)];
                 let n = b.len().min(v.len());
                 v[..n].copy_from_slice(&b[..n]);
                 Some(v)

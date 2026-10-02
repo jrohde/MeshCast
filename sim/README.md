@@ -55,7 +55,9 @@ An ensemble (`--seeds N`) also reports **whole content**, what a listener of a p
 pieces waits for: per follower and source, how long until the follower held the first of that
 source's objects and until it held all of them (the median of each, the 90th percentile of the
 second, and the share of pairs that never held all), with the mean number of frames sent of any
-kind. `--tracks N --mix snac-music:42` splits a source's content into N pieces of 42 kB; the
+kind; and where the last piece waited, when the follower's announcer held it and how much later
+the follower did, which tells a supply problem from a delivery problem. The cell report also
+breaks down collisions between uploads to one announcer by cause. `--tracks N --mix snac-music:42` splits a source's content into N pieces of 42 kB; the
 object-size sweep of `docs/FEASIBILITY.md` §13 is built from those two options. `dynamics` also
 prints how many manifest corrections followers sent to their announcer (`docs/PROTOCOL.md` §2).
 
@@ -80,7 +82,15 @@ prints how many manifest corrections followers sent to their announcer (`docs/PR
   node that receives it above sensitivity with its own score; an `x` after a node means it was
   tuned to another channel and missed it.
 - `MESHCAST_TRACE_ANNOUNCE=1` prints every manifest announcement and who heard it.
-- `MESHCAST_T_EXCURSION_MIN=40` overrides `T_excursion` for an experiment.
+- `MESHCAST_T_EXCURSION_MIN=40` overrides `T_excursion` for an experiment, and
+  `MESHCAST_BACKOFF_MAX_ATTEMPT=4` the number of times the random backoff after a busy channel
+  doubles.
+- `MESHCAST_TRACE_BUSY=0` counts, for node index 0, which transmitter kept its channel busy each
+  time it wanted to send, with the first and last minute; the cell report prints it as
+  `busy blame`. It found an announcer whose carousel chained frames without a gap
+  (`docs/FEASIBILITY.md` §14).
+- The grant trace reads sets as their sender means them, so `GA`, `GT` and `OF` lines name
+  pieces, not sets.
 
 The reports count role changes, challenges (a follower stepping up against a less capable
 announcer) and excursions (`docs/PROTOCOL.md` §4, §5.2); `dynamics` also prints how many

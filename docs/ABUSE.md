@@ -26,7 +26,7 @@ of yours can spend. Anything above one is a lever.
 | Attack | What you send | What it costs us | Amplification |
 |---|---|---|---|
 | **Channel flood** | Many signed channels with large catalogues | An announcer serves every channel it learns of, so it tries to carry all of them | Unbounded |
-| **WANT flood** | One 50-byte gossip asking for an object | The announcer puts a 42 kB track in its carousel (540 kB before the codec change) | ~800× |
+| **WANT flood** | One 50-byte gossip asking for an object, or one 23-byte set asking for up to 64 pieces where sets are used (PROTOCOL.md §3.3) | The announcer puts a 42 kB track in its carousel (540 kB before the codec change), or every piece of a collection | ~800× per object; a set asks for more per frame, but the repetition backoff still applies per piece |
 | **Rendition flood** | WANTs, as a device that cannot decode, for the rendition of every object a channel lists | The cell's carousel carries each as Opus (PROTOCOL.md §1.2): 367 kB for a 3-minute song at 16 kbit/s | ~7 000× |
 | **NACK amplification** | One 30-byte NACK, claiming to be an announcer, or naming a holder as a follower whose announcer cannot repair | The holder named (or, unnamed, the best-placed one) sends up to 40 symbols | ~300× |
 | **Grant hijack** | An offer, then silence | The announcer waits `T_grant` (10 min) before reassigning, once per object | Stalls delivery |

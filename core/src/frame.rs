@@ -16,6 +16,57 @@ pub const MAX_ANNOUNCE_ENTRIES: usize = 8;
 pub const MAX_NACK_RANGES: usize = 40;
 pub const MAX_HEARD: usize = 3;
 pub const MAX_FRAME: usize = 250;
+/// Bytes of a GOSSIP frame shared by WANT entries (13 each) and want sets (23 each), and by HAVE
+/// ids (8 each) and have sets (18 each): what eight WANT entries and twelve HAVE ids took before
+/// sets existed, so that no frame grows (PROTOCOL.md §3.3).
+pub const WANT_BUDGET: usize = 13 * MAX_WANT;
+pub const HAVE_BUDGET: usize = 8 * MAX_GOSSIP_IDS;
+pub const WANT_SET_BYTES: usize = 23;
+pub const HAVE_SET_BYTES: usize = 18;
+/// A set covers this many consecutive pieces of one manifest.
+pub const SET_BITS: u16 = 64;
+
+/// Pieces of one manifest: bit `i` of `bits` is piece `first + i` of the manifest whose short id
+/// is `manifest`, in the order the manifest lists them (PROTOCOL.md §3.3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PieceSet {
+    pub manifest: ShortId,
+    pub first: u16,
+    pub bits: u64,
+}
+
+impl PieceSet {
+    /// The indices of the pieces in this set.
+    pub fn pieces(&self) -> impl Iterator<Item = u16> + '_ {
+        (0..SET_BITS).filter(move |i| self.bits >> i & 1 == 1).map(move |i| self.first.saturating_add(i))
+    }
+
+    /// Sets covering `indices` of `manifest`, each spanning at most `SET_BITS` pieces.
+    pub fn cover(manifest: ShortId, indices: &mut [u16]) -> Vec<PieceSet> {
+        indices.sort_unstable();
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < indices.len() {
+            let first = indices[i];
+            let mut bits = 0u64;
+            while i < indices.len() && indices[i] < first.saturating_add(SET_BITS) {
+                bits |= 1 << (indices[i] - first);
+                i += 1;
+            }
+            out.push(PieceSet { manifest, first, bits });
+        }
+        out
+    }
+}
+
+/// Pieces wanted, as a WANT entry is for one object: open (`grant` NONE) or granted to one
+/// uploader, in the phase of the announcer's listening time it names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WantSet {
+    pub set: PieceSet,
+    pub grant: NodeId,
+    pub phase: u8,
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash, PartialOrd, Ord)]
 #[repr(u8)]
@@ -128,10 +179,16 @@ pub struct Gossip {
     /// and two announcers in conflict often cannot hear each other directly.
     pub heard: Vec<(NodeId, u8, u8)>,
     pub have: Vec<ShortId>,
+    /// Pieces held, by manifest and bitmap: an offer of a whole collection, or what an announcer
+    /// serves, in one entry.
+    pub have_sets: Vec<PieceSet>,
     /// Objects wanted, each with the node granted to upload it (NONE = open ask: holders
     /// answer with a HAVE offer and the announcer grants one of them) and, for a grant, the
     /// phase of the announcer's listening time the upload uses (PROTOCOL.md §4).
     pub want: Vec<(ShortId, NodeId, u8)>,
+    /// Pieces wanted by manifest and bitmap: a whole ask, or a whole grant, for a collection in
+    /// one entry.
+    pub sets: Vec<WantSet>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -234,14 +291,16 @@ impl Frame {
             }
             Frame::Gossip(g) => {
                 let nheard = g.heard.len().min(MAX_HEARD);
+                let nw = g.want.len().min(MAX_WANT);
+                let ns = g.sets.len().min((WANT_BUDGET - 13 * nw) / WANT_SET_BYTES).min(7);
+                let nh = g.have.len().min(MAX_GOSSIP_IDS);
+                let nhs = g.have_sets.len().min((HAVE_BUDGET - 8 * nh) / HAVE_SET_BYTES).min(7);
                 out.push((VERSION << 4) | FrameType::Gossip as u8);
-                out.push(nheard as u8);
+                out.push(nheard as u8 | (ns as u8) << 2 | (nhs as u8) << 5);
                 out.extend_from_slice(&g.node.0.to_le_bytes());
                 out.extend_from_slice(&g.announcer.0.to_le_bytes());
                 out.push(g.announcer_colour);
                 out.push(g.announcer_colours);
-                let nh = g.have.len().min(MAX_GOSSIP_IDS);
-                let nw = g.want.len().min(MAX_WANT);
                 out.push(nh as u8);
                 out.push(nw as u8);
                 for (id, colour, colours) in &g.heard[..nheard] {
@@ -252,10 +311,22 @@ impl Frame {
                 for id in &g.have[..nh] {
                     out.extend_from_slice(&id.0);
                 }
+                for p in &g.have_sets[..nhs] {
+                    out.extend_from_slice(&p.manifest.0);
+                    out.extend_from_slice(&p.first.to_le_bytes());
+                    out.extend_from_slice(&p.bits.to_le_bytes());
+                }
                 for (id, grant, phase) in &g.want[..nw] {
                     out.extend_from_slice(&id.0);
                     out.extend_from_slice(&grant.0.to_le_bytes());
                     out.push(*phase);
+                }
+                for w in &g.sets[..ns] {
+                    out.extend_from_slice(&w.set.manifest.0);
+                    out.extend_from_slice(&w.set.first.to_le_bytes());
+                    out.extend_from_slice(&w.set.bits.to_le_bytes());
+                    out.extend_from_slice(&w.grant.0.to_le_bytes());
+                    out.push(w.phase);
                 }
             }
             Frame::ManifestAnnounce(m) => {
@@ -336,13 +407,15 @@ impl Frame {
             }
             3 => {
                 let nheard = (flags & 0x03) as usize;
+                let ns = ((flags >> 2) & 0x07) as usize;
+                let nhs = ((flags >> 5) & 0x07) as usize;
                 let node = NodeId(c.u32()?);
                 let announcer = NodeId(c.u32()?);
                 let announcer_colour = c.u8()?;
                 let announcer_colours = c.u8()?;
                 let nh = c.u8()? as usize;
                 let nw = c.u8()? as usize;
-                if nh > MAX_GOSSIP_IDS || nw > MAX_WANT || nheard > MAX_HEARD {
+                if nh > MAX_GOSSIP_IDS || nw > MAX_WANT || nheard > MAX_HEARD || 13 * nw + WANT_SET_BYTES * ns > WANT_BUDGET || 8 * nh + HAVE_SET_BYTES * nhs > HAVE_BUDGET {
                     return Err(DecodeError::BadLength);
                 }
                 let mut heard = Vec::with_capacity(nheard);
@@ -356,6 +429,13 @@ impl Frame {
                 for _ in 0..nh {
                     have.push(c.short()?);
                 }
+                let mut have_sets = Vec::with_capacity(nhs);
+                for _ in 0..nhs {
+                    let manifest = c.short()?;
+                    let first = c.u16()?;
+                    let bits = c.u64()?;
+                    have_sets.push(PieceSet { manifest, first, bits });
+                }
                 let mut want = Vec::with_capacity(nw);
                 for _ in 0..nw {
                     let id = c.short()?;
@@ -363,7 +443,16 @@ impl Frame {
                     let phase = c.u8()?;
                     want.push((id, grant, phase));
                 }
-                Frame::Gossip(Gossip { node, announcer, announcer_colour, announcer_colours, heard, have, want })
+                let mut sets = Vec::with_capacity(ns);
+                for _ in 0..ns {
+                    let manifest = c.short()?;
+                    let first = c.u16()?;
+                    let bits = c.u64()?;
+                    let grant = NodeId(c.u32()?);
+                    let phase = c.u8()?;
+                    sets.push(WantSet { set: PieceSet { manifest, first, bits }, grant, phase });
+                }
+                Frame::Gossip(Gossip { node, announcer, announcer_colour, announcer_colours, heard, have, have_sets, want, sets })
             }
             4 => {
                 let node = NodeId(c.u32()?);
@@ -475,7 +564,20 @@ mod tests {
                 occupancy: [10, 20, 30, 40],
             }),
             Frame::Bulk(Bulk { object: ShortId([1; 8]), block: 2, esi: 3, len: 500_000, payload: vec![9u8; SYMBOL_SIZE] }),
-            Frame::Gossip(Gossip { node: NodeId(1), announcer: NodeId(2), announcer_colour: 1, announcer_colours: 4, heard: vec![(NodeId(7), 0, 3), (NodeId(8), 1, 3), (NodeId(9), 2, 3)], have: vec![ShortId([3; 8]); 12], want: vec![(ShortId([4; 8]), NodeId(5), 2); 8] }),
+            Frame::Gossip(Gossip { node: NodeId(1), announcer: NodeId(2), announcer_colour: 1, announcer_colours: 4, heard: vec![(NodeId(7), 0, 3), (NodeId(8), 1, 3), (NodeId(9), 2, 3)], have: vec![ShortId([3; 8]); 12], have_sets: vec![], want: vec![(ShortId([4; 8]), NodeId(5), 2); 8], sets: vec![] }),
+            // Sets within both budgets: 1 HAVE id + 4 have sets (80 of 96 bytes), 1 WANT entry +
+            // 3 want sets (82 of 104).
+            Frame::Gossip(Gossip {
+                node: NodeId(1),
+                announcer: NodeId(2),
+                announcer_colour: 1,
+                announcer_colours: 4,
+                heard: vec![(NodeId(7), 0, 3), (NodeId(8), 1, 3), (NodeId(9), 2, 3)],
+                have: vec![ShortId([3; 8]); 1],
+                have_sets: vec![PieceSet { manifest: ShortId([6; 8]), first: 0, bits: u64::MAX }; 4],
+                want: vec![(ShortId([4; 8]), NodeId::NONE, 0); 1],
+                sets: vec![WantSet { set: PieceSet { manifest: ShortId([5; 8]), first: 64, bits: 0x8000_0000_0000_0001 }, grant: NodeId(9), phase: 3 }; 3],
+            }),
             Frame::ManifestAnnounce(ManifestAnnounce {
                 node: NodeId(5),
                 entries: vec![AnnounceEntry { channel: ChannelId([6; 8]), manifest: ShortId([7; 8]), seq: 9, len: 1234 }; 8],
@@ -515,7 +617,7 @@ mod tests {
 
     #[test]
     fn corrupted_crc_rejected() {
-        let f = Frame::Gossip(Gossip { node: NodeId(1), announcer: NodeId(2), announcer_colour: 0, announcer_colours: 1, heard: vec![], have: vec![], want: vec![] });
+        let f = Frame::Gossip(Gossip { node: NodeId(1), announcer: NodeId(2), announcer_colour: 0, announcer_colours: 1, heard: vec![], have: vec![], have_sets: vec![], want: vec![], sets: vec![] });
         let mut bytes = f.encode();
         bytes[3] ^= 1;
         assert_eq!(Frame::decode(&bytes), Err(DecodeError::BadCrc));

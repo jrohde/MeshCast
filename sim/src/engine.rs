@@ -102,6 +102,11 @@ pub struct Engine {
     pub metrics: Metrics,
     pub verbose: bool,
     trace_grants: bool,
+    /// Diagnostic (MESHCAST_TRACE_BUSY=<node index>): who keeps that node's channel busy when it
+    /// wants to send, per transmitter, with the minute of the first and last time.
+    trace_busy: Option<usize>,
+    busy_from: VecDeque<(Millis, Millis, usize)>,
+    pub busy_blame: std::collections::BTreeMap<usize, (u64, Millis, Millis)>,
     next_sample: Millis,
 }
 
@@ -155,7 +160,7 @@ impl Engine {
         }
         let mut metrics = Metrics::default();
         metrics.per_node_bulk = vec![(0, 0); n];
-        let mut e = Engine { attackers: Vec::new(), attack_ids: Vec::new(), rendition_ids: Default::default(), nodes, phys, heap: BinaryHeap::new(), seq: 0, tx_seq: 0, loss, reach, recent: HashMap::new(), txs: HashMap::new(), now: 0, metrics, verbose: false, trace_grants: std::env::var("MESHCAST_TRACE_GRANTS").is_ok(), next_sample: 0 };
+        let mut e = Engine { attackers: Vec::new(), attack_ids: Vec::new(), rendition_ids: Default::default(), nodes, phys, heap: BinaryHeap::new(), seq: 0, tx_seq: 0, loss, reach, recent: HashMap::new(), txs: HashMap::new(), now: 0, metrics, verbose: false, trace_grants: std::env::var("MESHCAST_TRACE_GRANTS").is_ok(), trace_busy: std::env::var("MESHCAST_TRACE_BUSY").ok().and_then(|v| v.parse().ok()), busy_from: VecDeque::new(), busy_blame: Default::default(), next_sample: 0 };
         for i in 0..n {
             e.schedule_wake(i, 1);
         }
@@ -202,7 +207,7 @@ impl Engine {
             return;
         }
         let id = if spoof { NodeId(0x8000_0000 | (self.tx_seq as u32 & 0x7fff_ffff)) } else { node.id() };
-        let g = meshcast_core::frame::Gossip { node: id, announcer, announcer_colour: 0, announcer_colours: 1, heard: Vec::new(), have: Vec::new(), want };
+        let g = meshcast_core::frame::Gossip { node: id, announcer, announcer_colour: 0, announcer_colours: 1, heard: Vec::new(), have: Vec::new(), have_sets: Vec::new(), want, sets: Vec::new() };
         let bytes = Frame::Gossip(g).encode();
         let channel = node.channel(carrier, now);
         let airtime = self.phys[carrier].to_core().airtime_ms(bytes.len());
@@ -235,7 +240,7 @@ impl Engine {
         let channel = node.channel(carrier, now);
         let kind = self.phys[carrier].kind;
         let b = meshcast_core::frame::Beacon { carrier: kind, announcer: id, score, caps, next_ms: 60_000, round: 0, utc: 0, time_quality: 0, colour: 0, colours: 1, upload_phases: 1, occupancy: [0; 4] };
-        let g = meshcast_core::frame::Gossip { node: id, announcer: id, announcer_colour: 0, announcer_colours: 1, heard: Vec::new(), have, want: Vec::new() };
+        let g = meshcast_core::frame::Gossip { node: id, announcer: id, announcer_colour: 0, announcer_colours: 1, heard: Vec::new(), have, have_sets: Vec::new(), want: Vec::new(), sets: Vec::new() };
         let (f, ft) = if beacon { (Frame::Beacon(b), FrameType::Beacon) } else { (Frame::Gossip(g), FrameType::Gossip) };
         let bytes = f.encode();
         let airtime = self.phys[carrier].to_core().airtime_ms(bytes.len());
@@ -397,6 +402,17 @@ impl Engine {
         let mut states = Vec::with_capacity(self.phys.len());
         for c in 0..self.phys.len() {
             let busy = self.busy_now(i, c, now);
+            if busy && self.trace_busy == Some(i) {
+                while self.busy_from.front().map(|x| x.1 <= now.saturating_sub(10_000)).unwrap_or(false) {
+                    self.busy_from.pop_front();
+                }
+                for &(s, e, f) in self.busy_from.iter().filter(|x| x.0 <= now && now < x.1) {
+                    let _ = (s, e);
+                    let b = self.busy_blame.entry(f).or_insert((0, now, now));
+                    b.0 += 1;
+                    b.2 = now;
+                }
+            }
             let occ = self.occupancy(i, c, now);
             states.push(CarrierState { busy, occupancy_permille: occ });
         }
@@ -499,7 +515,12 @@ impl Engine {
         let mut candidates = Vec::new();
         let reach = std::mem::take(&mut self.reach[from][carrier]);
         if self.trace_grants {
-            match Frame::decode(&bytes) {
+            // Sets are read as their sender means them, piece by piece.
+            let decoded = match Frame::decode(&bytes) {
+                Ok(Frame::Gossip(g)) => Ok(Frame::Gossip(self.nodes[from].node.unpacked(&g))),
+                other => other,
+            };
+            match decoded {
                 Ok(Frame::Gossip(g)) if g.announcer == g.node => {
                     let meet = self.nodes[from].node.in_meeting(carrier, now);
                     eprintln!("GS {} {} want={} have={} meet={} wants_len={}", now, from, g.want.len(), g.have.len(), meet, self.nodes[from].node.wants_len());
@@ -565,6 +586,9 @@ impl Engine {
             }
             if rx >= phy.cca_threshold_dbm {
                 self.nodes[j].busy[carrier].push_back((now, end));
+                if self.trace_busy == Some(j) {
+                    self.busy_from.push_back((now, end, from));
+                }
                 // Waking a node whose CCA state changed is not needed: it re-checks at its own deadline.
             }
             if rx >= phy.sensitivity_dbm {

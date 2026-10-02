@@ -230,6 +230,10 @@ struct Report {
     bulk_collision_kinds: [[u64; 2]; 2],
     bulk_sent_by: [u64; 2],
     upload_same: u64,
+    /// Same-announcer upload collisions by cause: a phase count out of date, an ungranted answer,
+    /// phases never heard, both current.
+    busy_blame: std::collections::BTreeMap<usize, (u64, Millis, Millis)>,
+    upload_cause: [u64; 4],
     upload_other: u64,
     renditions: Option<RenditionSummary>,
     attack_frames: u64,
@@ -248,27 +252,64 @@ struct WholeContent {
     all_p50_h: Option<f64>,
     all_p90_h: Option<f64>,
     incomplete: f64,
+    /// Where the last piece waited: when the follower's announcer at the end held the piece the
+    /// follower completed last (a source holds its own from the start), and how much later the
+    /// follower held it; a follower that had it first counts zero. Medians and 90th percentiles
+    /// over complete pairs whose announcer is known.
+    #[serde(default)]
+    last_at_announcer_p50_h: Option<f64>,
+    #[serde(default)]
+    last_at_announcer_p90_h: Option<f64>,
+    #[serde(default)]
+    last_after_announcer_p50_h: Option<f64>,
+    #[serde(default)]
+    last_after_announcer_p90_h: Option<f64>,
+}
+
+/// One follower and one source: when the first and the last of the source's objects arrived,
+/// whether all did, and which came last.
+struct Pair {
+    first: Millis,
+    last: Millis,
+    complete: bool,
+    last_id: Option<meshcast_core::ids::ShortId>,
 }
 
 /// Content is what a listener wants whole: a source's objects together, however it split them.
-fn whole_content(tracks: &BTreeMap<meshcast_core::ids::ShortId, scenario::TrackInfo>, completions: &BTreeMap<(usize, meshcast_core::ids::ShortId), Millis>) -> WholeContent {
-    let mut per: BTreeMap<(usize, usize), (Millis, Millis, bool)> = BTreeMap::new();
+fn whole_content(tracks: &BTreeMap<meshcast_core::ids::ShortId, scenario::TrackInfo>, completions: &BTreeMap<(usize, meshcast_core::ids::ShortId), Millis>, announcer: &[Option<usize>]) -> WholeContent {
+    let mut per: BTreeMap<(usize, usize), Pair> = BTreeMap::new();
     for (id, t) in tracks {
         for &f in &t.followers {
-            let e = per.entry((f, t.source)).or_insert((Millis::MAX, 0, true));
+            let e = per.entry((f, t.source)).or_insert(Pair { first: Millis::MAX, last: 0, complete: true, last_id: None });
             match completions.get(&(f, *id)) {
                 Some(&c) => {
-                    e.0 = e.0.min(c);
-                    e.1 = e.1.max(c);
+                    e.first = e.first.min(c);
+                    if c >= e.last {
+                        e.last = c;
+                        e.last_id = Some(*id);
+                    }
                 }
-                None => e.2 = false,
+                None => e.complete = false,
             }
         }
     }
+    let mut at_ann: Vec<f64> = Vec::new();
+    let mut after_ann: Vec<f64> = Vec::new();
+    for ((f, s), e) in &per {
+        let (true, Some(id)) = (e.complete, e.last_id) else { continue };
+        let Some(a) = announcer.get(*f).copied().flatten() else { continue };
+        let ta = if a == *s { Some(0) } else { completions.get(&(a, id)).copied() };
+        if let Some(ta) = ta {
+            at_ann.push(ta as f64 / 3.6e6);
+            after_ann.push(e.last.saturating_sub(ta) as f64 / 3.6e6);
+        }
+    }
+    at_ann.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    after_ann.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let h = |ms: Millis| ms as f64 / 3.6e6;
-    let mut first: Vec<f64> = per.values().filter(|e| e.0 != Millis::MAX).map(|e| h(e.0)).collect();
+    let mut first: Vec<f64> = per.values().filter(|e| e.first != Millis::MAX).map(|e| h(e.first)).collect();
     // A pair that never completed counts as never: it sorts after every finite time.
-    let mut all: Vec<f64> = per.values().map(|e| if e.2 { h(e.1) } else { f64::INFINITY }).collect();
+    let mut all: Vec<f64> = per.values().map(|e| if e.complete { h(e.last) } else { f64::INFINITY }).collect();
     first.sort_by(|a, b| a.partial_cmp(b).unwrap());
     all.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let fin = |x: Option<f64>| x.filter(|v| v.is_finite());
@@ -276,7 +317,11 @@ fn whole_content(tracks: &BTreeMap<meshcast_core::ids::ShortId, scenario::TrackI
         first_p50_h: percentile(&first, 0.5),
         all_p50_h: fin(percentile(&all, 0.5)),
         all_p90_h: fin(percentile(&all, 0.9)),
-        incomplete: if per.is_empty() { 0.0 } else { per.values().filter(|e| !e.2).count() as f64 / per.len() as f64 },
+        incomplete: if per.is_empty() { 0.0 } else { per.values().filter(|e| !e.complete).count() as f64 / per.len() as f64 },
+        last_at_announcer_p50_h: percentile(&at_ann, 0.5),
+        last_at_announcer_p90_h: percentile(&at_ann, 0.9),
+        last_after_announcer_p50_h: percentile(&after_ann, 0.5),
+        last_after_announcer_p90_h: percentile(&after_ann, 0.9),
     }
 }
 
@@ -733,9 +778,15 @@ fn simulate(spec: ScenarioSpec, verbose: bool, failover: Option<(f64, f64)>) -> 
         bulk_sent_by: m.bulk_sent_by,
         upload_same: m.upload_collision_same_object,
         upload_other: m.upload_collision_other_object,
+        upload_cause: m.upload_collision_cause,
+        busy_blame: eng.busy_blame.clone(),
         renditions,
         attack_frames: m.attack_frames,
-        whole: whole_content(&built.tracks, &m.completions),
+        whole: {
+            let bulk_c = eng.phys.iter().position(|p| p.kind != CarrierKind::LoraControl).unwrap_or(1);
+            let ann: Vec<Option<usize>> = eng.nodes.iter().map(|n| n.node.announcer_of(bulk_c)).map(|a| (!a.is_none()).then(|| a.0 as usize - 1)).collect();
+            whole_content(&built.tracks, &m.completions, &ann)
+        },
         carousel_first: eng.nodes.iter().map(|n| n.node.stats.carousel_frames[0]).sum(),
         carousel_repeat: eng.nodes.iter().map(|n| n.node.stats.carousel_frames[1]).sum(),
         per_node,
@@ -805,6 +856,9 @@ fn params() -> Params {
     let mut p = Params::default();
     if let Some(m) = std::env::var("MESHCAST_T_EXCURSION_MIN").ok().and_then(|v| v.parse::<u64>().ok()) {
         p.t_excursion_ms = m * 60_000;
+    }
+    if let Some(a) = std::env::var("MESHCAST_BACKOFF_MAX_ATTEMPT").ok().and_then(|v| v.parse::<u8>().ok()) {
+        p.fatsoen.backoff_max_attempt = a;
     }
     p
 }
@@ -888,7 +942,10 @@ fn print_report(r: &Report, wall: std::time::Duration) {
         r.frames_sent, r.frames_delivered, r.frames_collided, r.frames_half_duplex, r.bulk_sent, r.bulk_delivered);
     println!("announcers at end: {:?} ({} role events, {} challenges, {} excursions)", r.announcers_final, r.role_events, r.challenges, r.excursions);
     println!("collisions by frame type [beacon,bulk,gossip,announce,nack]: meeting dwell {:?}, other {:?}", &r.collided_meeting[1..], &r.collided_other[1..]);
-    println!("bulk sent by [others, announcers]: {:?}; bulk collisions [sender other/announcer][interferer other/announcer]: {:?}; upload-upload same object {} / other object {}", r.bulk_sent_by, r.bulk_collision_kinds, r.upload_same, r.upload_other);
+    if !r.busy_blame.is_empty() {
+        println!("busy blame (transmitter: wakes found busy, first min, last min): {:?}", r.busy_blame.iter().map(|(f, (n, a, b))| (f, n, a / 60_000, b / 60_000)).collect::<Vec<_>>());
+    }
+    println!("bulk sent by [others, announcers]: {:?}; bulk collisions [sender other/announcer][interferer other/announcer]: {:?}; upload-upload same object {} / other object {}; same-announcer causes [phase count out of date, ungranted answer, phases never heard, both current] {:?}", r.bulk_sent_by, r.bulk_collision_kinds, r.upload_same, r.upload_other, r.upload_cause);
     println!("bulk-channel occupancy at nodes: p50 {:.1} %, max {:.1} %", r.occupancy_p50_bulk, r.occupancy_max_bulk);
     println!("delivered to followers: {:.2} MB per hour per announcer", r.delivered_bytes_per_hour_per_announcer / 1e6);
     println!("\nairtime share per transmitting node, busiest first (control, bulk):");
