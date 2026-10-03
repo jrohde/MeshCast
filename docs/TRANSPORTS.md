@@ -76,15 +76,16 @@ among those that can deliver it.
 
 ## 5. Baseline scenario
 
-**A cell is what hears each other on the bulk carrier**; the long-range LoRa carrier only tells
-neighbouring cells which channels exist. So the distance that matters is the bulk carrier's.
+**A cell is what hears each other on the bulk carrier**; the long-range LoRa carrier tells
+every cell which channels exist and carries their manifests, which are a few symbols each
+(PROTOCOL.md §2). So the distance that matters is the bulk carrier's.
 
 Two dongles 2 km apart across farmland, no internet, no phones after initial setup:
 
 - GFSK at 500 mW in band O (10 %) moves content: a 3-minute Opus track every 10 minutes
   (simulated: 3 tracks complete after 15, 25 and 36 minutes including election and gossip).
-- Beacons, gossip and NACKs also travel on the GFSK channel; LoRa carries only the manifest
-  announcement.
+- Beacons, gossip and NACKs also travel on the GFSK channel; LoRa carries the manifest
+  announcements and the manifests themselves.
 
 Two dongles 5 km apart: GFSK does not reach (about 2.7 km at 500 mW). The nodes then use **LoRa
 as the bulk carrier** (`lora-bulk`): SF7 at 10 % duty cycle moves about 0.5 kbit/s, a track every
