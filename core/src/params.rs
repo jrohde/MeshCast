@@ -142,6 +142,18 @@ pub struct Params {
     /// sends control-carrier frames only then (PROTOCOL.md §3). A window of 0 disables them.
     pub t_ctrl_period_ms: Millis,
     pub t_ctrl_window_ms: Millis,
+    /// How long a node that knows no shared time listens on the control carrier before it may step
+    /// up as announcer by its own clock: a control period and its window (PROTOCOL.md §6).
+    pub t_acquire_ms: Millis,
+    /// How often an announcer listens on the control carrier through a whole period, to hear the
+    /// time of announcers whose window it does not share (§6). 0: never.
+    pub t_watch_ms: Millis,
+    /// How often an announcer tells its time on the control carrier, where the cell's carrier hops
+    /// (PROTOCOL.md §6). 0: never.
+    pub t_tell_ms: Millis,
+    /// How far a frame keeps from the edges of a hop dwell and of the control window: room for
+    /// clocks a little apart (PROTOCOL.md §6).
+    pub t_guard_ms: Millis,
 }
 
 impl Default for Params {
@@ -178,6 +190,10 @@ impl Default for Params {
             t_excursion_ms: 2_400_000,
             t_ctrl_period_ms: 60_000,
             t_ctrl_window_ms: 4_000,
+            t_acquire_ms: 64_000,
+            t_watch_ms: 1_800_000,
+            t_tell_ms: 60_000,
+            t_guard_ms: 50,
         }
     }
 }

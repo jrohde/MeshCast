@@ -47,6 +47,8 @@ pub struct Metrics {
     pub frames_half_duplex: u64,
     /// Frames that reached a node while its one radio listened on its other carrier.
     pub frames_not_listening: u64,
+    /// Frames a receiver lost because it retuned before they ended: a hop dwell ended (PROTOCOL.md §6).
+    pub frames_retuned: u64,
     pub frames_below_sensitivity: u64,
     pub bulk_sent: u64,
     pub bulk_delivered: u64,

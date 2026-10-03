@@ -39,9 +39,14 @@ rural cells). `--verbose` prints role changes; `--out` writes the full report as
   (20 s dwell); followers and uploaders follow it; nodes without an announcer scan.
 - **EtherDiscipline**: the core's own accounting enforces duty cycle or polite access per band;
   the engine only reports airtime.
+- **Clocks**: by default every node reads the simulator's time. `--clock-epoch-s 3600 --clock-ppm 20`
+  gives each node a clock that starts at a random time up to an hour and runs up to 20 ppm fast or
+  slow, and restarts from zero when the node is switched on again; `--clock-same` starts them all
+  at one random time. Each node then keeps its own shared time (PROTOCOL.md §6). A receiver loses
+  a frame that runs past the end of its hop dwell ("retuned" in the report).
 
 Not modelled yet: terrain, buildings, antenna patterns, GFSK versus LoRa co-channel interference
-across carriers, clock drift, packet error rate below the sensitivity cliff, multiple bulk
+across carriers, packet error rate below the sensitivity cliff, multiple bulk
 carriers per node, the few hundred microseconds a radio takes to change between LoRa and GFSK.
 A node whose bulk carrier is GFSK or LoRa hears its control carrier only in the control window
 and its bulk carrier only outside it, as one SX1262 would (PROTOCOL.md §3); an ESP-NOW or IP
@@ -105,12 +110,19 @@ chosen against (`docs/ABUSE.md`, item 5).
   `MISSING` for every object a follower lacks (with the announcers it hears and who listed the
   object, to tell whether an excursion or a named repair was possible) and `NOLEN` for every
   want whose length the wanter does not know.
-- `MESHCAST_DEBUG_WANTS=1` traces each announcer's want list.
+- `MESHCAST_DEBUG_WANTS=1` traces each announcer's want list; `MESHCAST_DEBUG_NODE=4` adds node
+  index 4's.
 - `MESHCAST_TRACE_ROLES=1` prints every role change as `ROLE t node carrier role announcer`.
 - `MESHCAST_TRACE_BEACONS=1` prints every beacon with its score, channel and colour, and every
   node that receives it above sensitivity with its own score; an `x` after a node means it was
-  tuned to another channel and missed it.
+  tuned to another channel and missed it, a `d` that it was listening on its other carrier.
 - `MESHCAST_TRACE_ANNOUNCE=1` prints every manifest announcement and who heard it.
+- `MESHCAST_TRACE_TIME=1` prints, every five minutes of a `cell` run (`MESHCAST_TRACE_TIME_STEP_S`
+  to change that), how far apart the nodes' shared times are, how many keep within a second of the
+  median, the steps taken, role changes, announcers, nodes without a time and excursions, and at
+  the end the stations' roles; `=2` also lists the nodes more than 10 ms off.
+- `MESHCAST_T_GUARD_MS`, `MESHCAST_T_WATCH_MIN`, `MESHCAST_T_TELL_S` and `MESHCAST_T_ACQUIRE_S`
+  override `T_guard`, `T_watch`, `T_tell` and `T_acquire` (0 turns the last three off).
 - `MESHCAST_T_EXCURSION_MIN=40` overrides `T_excursion` for an experiment, and
   `MESHCAST_BACKOFF_MAX_ATTEMPT=4` the number of times the random backoff after a busy channel
   doubles. `MESHCAST_CTRL_WINDOW_MS=4000 MESHCAST_CTRL_PERIOD_MS=60000` set the

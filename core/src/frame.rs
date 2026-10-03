@@ -138,7 +138,8 @@ pub struct Beacon {
     pub next_ms: u16,
     /// Carousel round counter.
     pub round: u16,
-    pub utc: u64,
+    /// The sender's shared time in ms as the frame begins (PROTOCOL.md §6).
+    pub time: u64,
     pub time_quality: u8,
     /// The announcer's colour: its rank in its conflict set. On frequency-agile carriers the
     /// colour is the offset on the shared base hop sequence, on single-channel carriers the
@@ -277,7 +278,7 @@ impl Frame {
                 out.extend_from_slice(&b.score.to_le_bytes());
                 out.extend_from_slice(&b.next_ms.to_le_bytes());
                 out.extend_from_slice(&b.round.to_le_bytes());
-                out.extend_from_slice(&b.utc.to_le_bytes());
+                out.extend_from_slice(&b.time.to_le_bytes());
                 out.push(b.time_quality);
                 out.push(b.colour);
                 out.push(b.colours);
@@ -391,7 +392,7 @@ impl Frame {
                 let score = c.u16()?;
                 let next_ms = c.u16()?;
                 let round = c.u16()?;
-                let utc = c.u64()?;
+                let time = c.u64()?;
                 let time_quality = c.u8()?;
                 let colour = c.u8()?;
                 let colours = c.u8()?;
@@ -399,7 +400,7 @@ impl Frame {
                 let occ = c.bytes(4)?;
                 let mut occupancy = [0u8; 4];
                 occupancy.copy_from_slice(occ);
-                Frame::Beacon(Beacon { carrier, announcer, score, caps, next_ms, round, utc, time_quality, colour, colours, upload_phases, occupancy })
+                Frame::Beacon(Beacon { carrier, announcer, score, caps, next_ms, round, time, time_quality, colour, colours, upload_phases, occupancy })
             }
             2 => {
                 let object = c.short()?;
@@ -563,7 +564,7 @@ mod tests {
                 caps: CAP_MAINS,
                 next_ms: 60000,
                 round: 7,
-                utc: 1_700_000_000,
+                time: 1_700_000_000_000,
                 time_quality: 2,
                 colour: 3,
                 colours: 5,
@@ -602,7 +603,7 @@ mod tests {
 
     #[test]
     fn sizes() {
-        let b = Frame::Beacon(Beacon { carrier: CarrierKind::GfskBulk, announcer: NodeId(1), score: 0, caps: 0, next_ms: 0, round: 0, utc: 0, time_quality: 0, colour: 0, colours: 1, upload_phases: 1, occupancy: [0; 4] });
+        let b = Frame::Beacon(Beacon { carrier: CarrierKind::GfskBulk, announcer: NodeId(1), score: 0, caps: 0, next_ms: 0, round: 0, time: 0, time_quality: 0, colour: 0, colours: 1, upload_phases: 1, occupancy: [0; 4] });
         assert_eq!(b.encode().len(), 30);
         let k = Frame::Bulk(Bulk { object: ShortId([0; 8]), block: 0, esi: 0, len: 1, payload: vec![] });
         assert_eq!(k.encode().len(), 220);
