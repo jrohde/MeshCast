@@ -2418,7 +2418,8 @@ Not tried yet, in the order they look worth trying:
 3. **No shun for an announcer that is asking**: an announcer that lacks what its follower wants
    but asks for it, or for the manifest that names it, is honest and unable, not false; the
    follower should go on an excursion, not leave its cell leaderless for an hour. This needs care,
-   because a false announcer could ask forever (ABUSE.md, election capture).
+   because a false announcer could ask forever (ABUSE.md, election capture). (Measured in §25, the
+   other way round: a follower that leaves an announcer that asks and cannot get delivers more.)
 
 An upper bound for option 1, measured with an oracle (branch `experiment/backbone-oracle`, not
 merged): every minute each announcer is handed, for free and at once, what an announcer it can hear
@@ -2774,3 +2775,124 @@ What the new counters show instead is older: in four of those sparse worlds, 126
 follower left an honest announcer because the announcer ignored, for `T_excursion`, something
 the follower wanted, and could not answer for it. That is the case §21 already named: an
 announcer that cannot get what its follower wants is unable, not false.
+
+## 25. Asking is not getting
+
+§24 left honest announcers that their followers had left for ignoring a want: 21 to 389 times
+per world in the sparse band L network of §21 (100 nodes over 15 km², 24 channels, each node
+following 2; eight worlds of 48 hours). This section finds why, and what those leaves were doing.
+All figures are the eight worlds unless said otherwise.
+
+### 25.1 A wrong first guess
+
+What an announcer lacks it cannot answer a proof `NACK` for, honest or not. So the first attempt
+asked such an announcer for a symbol of something it did list, to let an honest one prove that it
+serves. The leaves moved, they did not go: leaves for ignored wants fell to 0 to 18 per world, and
+leaves under the 90-minute rule (not one symbol for the ceiling) rose from 0 to 37 to 16 to 590.
+Bulletins delivered within their period fell from 87.6 % (82.0 to 92.9 % per world) to 84.6 %
+(70.9 to 90.3 %), and proof `NACK`s went up four times. Not taken.
+
+### 25.2 Wants that were never asked for
+
+A trace at each such leave in one world (389 leaves) showed something else. The announcer held
+the object in none of them and wanted it itself in 380: it was not ignoring the object, it had
+taken on its follower's want. But in 351 it had never asked for it, 50 minutes after the follower
+began to wait. It wanted a median of 24 objects at the time (25th percentile 21, 75th 31, at most
+55), and a frame names eight objects or four sets (PROTOCOL.md §3.3). In the order of asking of
+§19, the earlier place first and then the most listeners per byte, the same objects led every
+round, and they were ones nobody in reach held: they stayed wanted, and filled the frame for good.
+(The follower notes only asks for objects it knows; widening that to everything it wants changed
+nothing, so that was not it.)
+
+The fix is a turn (PROTOCOL.md §4, "Asking in turns"). The first form put whatever was asked for
+in the last `T_want_min` after whatever was not. It asked for everything, and it undid §19 wherever
+more was wanted than a frame holds and all of it could be had: in the size sweep, band O over
+15 km² with 7 kB pieces started playback after 22.4 minutes instead of 8.8, and the band O town of
+the matrix 2.9 minutes later. The form taken turns only what is **stuck**: asked for, and neither
+granted nor arriving for `T_excursion`. That goes after everything else, the one asked for longest
+ago first, and everything else keeps the order of §19. A smoke test with 40 wanted pieces that
+nobody holds any more (`what_nobody_holds_does_not_keep_the_rest_from_being_asked_for`) had 32
+of them never asked for in five rounds before, and none now.
+
+### 25.3 The leaves were the transport
+
+Asking for everything ended the leaves for ignored wants (0 to 10 per world) and with them most
+role changes after the first hour (90 to 157 per world instead of 185 to 996), and delivery fell:
+
+| Sparse band L, eight worlds | Delivered, mean | Worst world | Uploads | Role changes after 1 h |
+|---|---|---|---|---|
+| Main (§24) | 87.6 % | 82.0 % | 2,438 to 4,359 | 185 to 996 |
+| Turning everything | 81.1 % | 63.5 % | 1,188 to 2,045 | 90 to 157 |
+| Turning what is stuck | 81.8 % | 66.6 % | 1,201 to 1,905 | 86 to 155 |
+| No turn, and no leave for an ignored want | 72.7 % | 54.7 % | 981 to 1,852 | 80 to 184 |
+
+So the leaves for ignored wants carried most of what reached a cell without followers of its own
+channel. A follower that leaves its announcer follows the next one it hears or, hearing none,
+leads a cell of its own; as an announcer its own asks reach the holders around it, which the old
+announcer could not reach. Traced in three worlds with the rule below, 60 to 85 % of the
+follower-object pairs a follower had left for got the object later, a median of 17 to 24 minutes
+after the leave, and each such pair took four to six leaves.
+
+That makes the rule: an announcer that has neither served nor named an uploader for what its
+follower wants, for `T_excursion`, loses that follower, whether it asked for the object or not
+(PROTOCOL.md §5.2, "Asking is not getting"). Other ways tried to carry the want:
+
+| Sparse band L, eight worlds | Delivered, mean | Range |
+|---|---|---|
+| Leave an announcer that names no uploader, without turns | 92.8 % | 89.0 to 97.6 % |
+| The same, and turns for what is stuck | 92.5 % | 89.8 to 95.5 % |
+| Taken: that, and proof `NACK`s only for what is listed (§25.5) | 92.2 % | 88.5 to 96.7 % |
+| The same, but only for another announcer it hears, never leading | 83.7 % | 74.1 to 90.8 % |
+| Turning everything, and visiting the strongest other announcer it hears instead of leaving | 81.7 % | 67.4 to 90.6 % |
+| Leave only if no other announcer was heard asking for it | 89.2 % | 80.1 to 95.9 % |
+| Leave only under the 90-minute rule | 88.3 % | 81.6 to 94.8 % |
+
+Leading a cell is what carries the want, and a visit brought no more than turning alone. Followers
+in the sparse network heard other announcers ask for what they waited for as well (with that
+condition 751 leaves in eight worlds instead of 4,600), so hearing others ask does not tell when
+staying helps. How soon matters, in steps: leaving after 35, 40, 45, 50 and 65 minutes without an
+uploader (each plus the `T_want_min` of the proof wait) delivered 92.7, 92.5, 91.2, 88.7 and
+88.3 %; 25 minutes, 93.3 %.
+
+### 25.4 What it costs
+
+The whole validation against main (§24), eight worlds each:
+
+| | Main | Now |
+|---|---|---|
+| Sparse band L: delivered, mean (worst world) | 87.6 % (82.0 %) | 92.2 % (88.5 %) |
+| Sparse band L: uploads per world | 2,438 to 4,359 | 4,244 to 7,178 |
+| Sparse band L: role changes after the first hour | 185 to 996 | 1,286 to 2,672 |
+| Sparse band O: delivered; role changes after the first hour | 99.6 to 99.9 %; 0 to 14 | 99.6 to 99.9 %; 0 to 183 |
+| Band L over 15 km², 846 kB objects: playback start, frames | 60.4 min | 62.3 min, 19.1 % more |
+| the same with 423 kB: start, 90th percentile, frames | 45.7, 67.6 min | 45.7, 70.6 min, 7.5 % more |
+| the same with 7 kB: start, 90th percentile, frames | 42.1, 60.5 min | 44.8, 65.2 min, 7.3 % more |
+| Band L over 15 km², listeners pick collections: 90th percentile, frames | 67.1 min | 72.9 min, 13.2 % more |
+| Matrix, five lures, WANT floods, collections in band O | | within half a minute |
+| Living networks, with and without attackers | | the same or better, except that under a WANT flood one bulletin of one world had its 90th percentile after 15.6 minutes instead of 9.0, while the mean of the 90th percentiles fell in six worlds of eight |
+
+(The share of nodes that hold their current window counted the lure itself as a listener: in one
+world it held nothing of a channel it named, and the world looked 97.6 % up to date. It no
+longer counts attackers.)
+
+The cost is where everybody wants the same large objects and they take longer than `T_excursion`
+to cross the network: a follower leaves an announcer that would have had them soon. Leaving after
+50 instead of 40 minutes without an uploader cut that cost to 5.0 % more frames at 846 kB and
+1.5 % at 423 kB, and the sparse network then delivered 88.7 % instead of 92.5 %: the same step
+both ways. `T_excursion` stays where it is, the time after which a cell that cannot get an object
+sends its followers out for it anyway.
+
+### 25.5 Proof, and asking again
+
+A follower sent proof `NACK`s for wants its announcer did not list too, after `T_excursion`: an
+announcer cannot answer for what it lacks, so they were airtime for nothing, and under the new
+rule every want without an uploader brings them. Followers of the sparse band L network sent
+14,748 `NACK`s in eight worlds under main, 54,687 under the new rule, and 73 once they asked only
+for what was listed, waiting as long for the rest (`T_want_min`, PROTOCOL.md
+§5.2). Delivery was the same, 92.2 %.
+
+And an announcer that has answered a proof `NACK` is to be asked again only after `T_excursion`
+(§24). The code counted that from the start of the want, not from the answer, so once a want had
+waited that long the next `NACK` could follow every answer at once. Counted from the answer now,
+it made no measurable difference here: 73 `NACK`s in the sparse band L worlds either way, 190 and
+181 in band O.

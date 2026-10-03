@@ -70,8 +70,8 @@ of the pieces before it). The cell report also
 breaks down collisions between uploads to one announcer by cause. `--tracks N --mix snac-music:42` splits a source's content into N pieces of 42 kB; the
 object-size sweep of `docs/FEASIBILITY.md` §13 is built from those two options. `dynamics` also
 prints how many manifest corrections followers sent to their announcer (`docs/PROTOCOL.md` §2),
-how often followers asked their announcer for proof, and how often they left one as serving
-nothing: never one symbol, or no answer for what it listed or for what it ignored (§5.2).
+how often followers asked their announcer for proof, and how often they left one: never one
+symbol, no answer for what it listed, or no uploader named for what it lacks (§5.2).
 
 A source publishes its pieces as collections (`docs/PROTOCOL.md` §2): one series by default.
 `--collections N` splits them in order over N albums, `--follow-collections K` makes each follower

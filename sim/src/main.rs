@@ -1366,7 +1366,9 @@ fn run_dynamics(nodes: usize, area_km2: f64, stations: usize, channels: usize, f
     let mut up_to_date = 0usize;
     let mut online = 0usize;
     for i in 0..nodes {
-        if !eng.nodes[i].alive || subs[i].is_empty() || built.sources.iter().any(|s| s.node == i) {
+        // An attacker is no listener: counted, a lure that held nothing of a channel it named made
+        // a world look short of its window (FEASIBILITY.md §25).
+        if !eng.nodes[i].alive || subs[i].is_empty() || built.sources.iter().any(|s| s.node == i) || eng.attackers.iter().any(|a| a.node == i) {
             continue;
         }
         online += 1;
@@ -1457,7 +1459,7 @@ fn run_dynamics(nodes: usize, area_km2: f64, stations: usize, channels: usize, f
     println!("uploads {} ({} ended once their announcer held the object), announcers {}, role events {}, challenges {}, excursions {}", uploads, ended_held, announcers_final, m.role_events.len(), eng.nodes.iter().map(|n| n.node.challenges()).sum::<u32>(), eng.nodes.iter().map(|n| n.node.stats.excursions).sum::<u64>());
     let sum = |f: fn(&meshcast_core::node::Stats) -> u64| eng.nodes.iter().map(|n| f(&n.node.stats)).sum::<u64>();
     println!("  of the uploads, repair answers {}; grants given {}, lapsed {}", sum(|s| s.repairs_started), sum(|s| s.grants_given), sum(|s| s.grants_lapsed));
-    println!("  manifest corrections sent by followers to their announcer: {}; announcers asked for proof (probes): {}; left as serving nothing: {} never served, {} unanswered for what it listed, {} for what it ignored", sum(|s| s.manifest_corrections), sum(|s| s.probes), sum(|s| s.left_never_served), sum(|s| s.left_unanswered_listed), sum(|s| s.left_unanswered_ignored));
+    println!("  manifest corrections sent by followers to their announcer: {}; announcers asked for proof (probes): {}; followers that left their announcer: {} never served, {} unanswered for what it listed, {} no uploader for what it lacks", sum(|s| s.manifest_corrections), sum(|s| s.probes), sum(|s| s.left_never_served), sum(|s| s.left_unanswered_listed), sum(|s| s.left_lacking));
     {
         let mut n = 0;
         let mut kinds = std::collections::BTreeMap::new();

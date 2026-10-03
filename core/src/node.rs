@@ -154,11 +154,11 @@ pub struct Stats {
     /// One-symbol NACKs sent to an announcer that had not sent what we wait for, asking it to
     /// show it serves.
     pub probes: u64,
-    /// Announcers left as serving nothing: never one symbol for the ceiling, or no answer to a
-    /// proof NACK (PROTOCOL.md §5.2).
+    /// Announcers left (PROTOCOL.md §5.2): never one symbol for the ceiling, no answer to a proof
+    /// NACK for what it listed, or no uploader named for what it lacks.
     pub left_never_served: u64,
     pub left_unanswered_listed: u64,
-    pub left_unanswered_ignored: u64,
+    pub left_lacking: u64,
     /// Want sets sent, and the pieces they asked for.
     pub want_sets: u64,
     pub want_set_pieces: u64,
@@ -1763,10 +1763,15 @@ impl Node {
             }
             return;
         }
-        // Our own announcer is held to evidence too (ABUSE.md, "election capture"). An honest
-        // announcer does one of three things with what its follower asks for: it serves it, or,
-        // lacking it, asks for it itself or grants it to an uploader. One that has done none of
-        // them for an object we want, and lists it or not, so that we have never had one symbol
+        // Our own announcer is held to evidence too (ABUSE.md, "election capture"). An announcer
+        // does one of two things with what its follower wants: it serves it, or, lacking it, gets
+        // it, by naming an uploader. Asking alone is not getting: an announcer that asks and finds
+        // no holder in reach cannot get the object, honest or not, and its follower does better
+        // elsewhere, following the next announcer or leading a cell of its own, where its want
+        // reaches other holders. Counted as serving, asking kept the followers of a sparse band L
+        // network in place, and 87.6 % of bulletins arrived in their period instead of 92.2 %
+        // (FEASIBILITY.md §25). One that has done neither for an object we want, and lists it or
+        // not, so that we have never had one symbol
         // of it, for longer than an honest announcer can take to pass an object it was asked for
         // (its repetition ceiling, plus one interval for the ask), does not serve. That counts
         // from when we began to follow it: what we waited for under another announcer, or as
@@ -1775,12 +1780,13 @@ impl Node {
         let w = crate::carousel::longest_spacing(self.cfg.params.t_want_min_ms) + self.cfg.params.t_want_min_ms;
         let from = self.following_since;
         let own_haves = self.neighbors.get(&own).map(|n| n.haves.clone()).unwrap_or_default();
-        let claims_or_ignores = |x: &ShortId| own_haves.contains_key(x) || !self.ann_seeking(x);
-        let never_served = self.wants.iter().any(|x| claims_or_ignores(x) && self.progress.get(x).map(|p| p.last_progress == 0 && now >= p.wanted_at.max(from) + w).unwrap_or(false))
+        let claims_or_lacks = |x: &ShortId| own_haves.contains_key(x) || !self.ann_granted_within(x, t);
+        let never_served = self.wants.iter().any(|x| claims_or_lacks(x) && self.progress.get(x).map(|p| p.last_progress == 0 && now >= p.wanted_at.max(from) + w).unwrap_or(false))
             || self.pending_ack.iter().any(|(p, since)| own_haves.contains_key(p) && now >= *since + w);
         // Sooner by asking: an announcer that has listed what we wait for since we began to wait,
         // and has not sent one symbol of it for `T_want_min`, the time after which we would ask for
-        // it again, or that ignores it for `T_excursion`. Waiting alone proves nothing: an honest announcer whose
+        // it again, or that has named no uploader for it for `T_excursion`. Waiting alone proves
+        // nothing: an honest announcer whose
         // repetitions a WANT flood holds back waits too, for up to its ceiling. So we ask it for one
         // symbol of it, naming it to answer, every `T_nack_stall`; it answers from the front of its
         // carousel at once, whatever the backoff. One that has sent not one symbol of it
@@ -1788,19 +1794,24 @@ impl Node {
         // been heard for `T_excursion` let any frame of anyone else's restart the wait
         // (FEASIBILITY.md §22); asking only after `T_excursion` let five false announcers hand
         // followers on from one to the next, and playback began 21 minutes later than now. What an
-        // announcer ignores it cannot answer, so that is still asked after `T_excursion`: asked
+        // announcer does not list it cannot answer, so that is still asked after `T_excursion`: asked
         // after `T_want_min`, honest announcers that had not yet asked for what their followers
         // wanted were left by them, and a band O network had 72 % more role changes. And an announcer
-        // that has answered us once has shown that it serves: it too is asked only after
-        // `T_excursion` (FEASIBILITY.md §24).
-        let proven = self.proven.map(|(a, t)| a == own && t >= from).unwrap_or(false);
+        // that has answered us once has shown that it serves: it is asked again only `T_excursion`
+        // after its answer (FEASIBILITY.md §24). Counted from the start of the wait instead, the next
+        // probe could follow every answer at once (§25).
+        let proven = self.proven.filter(|(a, at)| *a == own && *at >= from).map(|(_, at)| at);
         let waiting = self.wants.iter().find(|x| {
-            claims_or_ignores(x)
+            claims_or_lacks(x)
                 && self.progress.get(x).map(|p| {
                     let start = since(p).max(from);
                     // Listed since we began to wait: what it listed before, it may have dropped since.
                     let claims = own_haves.get(x).map(|at| *at >= start).unwrap_or(false);
-                    now >= start + if claims && !proven { self.cfg.params.t_want_min_ms } else { t }
+                    now >= match proven {
+                        Some(at) => start.max(at) + t,
+                        None if claims => start + self.cfg.params.t_want_min_ms,
+                        None => start + t,
+                    }
                 })
                 .unwrap_or(false)
         }).copied();
@@ -1826,7 +1837,10 @@ impl Node {
                     self.probing = None;
                 } else {
                     silent = now >= first + self.cfg.params.t_want_min_ms;
-                    if !silent && now >= self.last_probe + self.cfg.params.t_nack_stall_ms {
+                    // What it does not list it cannot answer for: that only waits as long. Asked
+                    // anyway, followers of a sparse band L network sent 54,687 proof NACKs in eight
+                    // worlds; asked only for what was listed, 73 (FEASIBILITY.md §25).
+                    if !silent && silent_listed && now >= self.last_probe + self.cfg.params.t_nack_stall_ms {
                         self.probe(x, own);
                     }
                 }
@@ -1839,7 +1853,7 @@ impl Node {
             } else if silent_listed {
                 self.stats.left_unanswered_listed += 1;
             } else {
-                self.stats.left_unanswered_ignored += 1;
+                self.stats.left_lacking += 1;
             }
             let (score, caps) = (self.score, self.caps());
             let tr = self.carriers[i].election.as_mut().and_then(|e| e.shun(now, own, now + ttl, score, caps, &mut self.rng));
@@ -2391,7 +2405,8 @@ impl Node {
         // many collections are in flight as arrive; one that stopped arriving takes turns again.
         // Asked for side by side, twelve albums of a band L network shared its uploads and each
         // could be played through only later. Within that, the earliest place first (§2), then
-        // the one asked for longest ago.
+        // the one asked for longest ago. Before all that, its turn, as by name: a collection whose
+        // wanted pieces are all stuck goes after the rest.
         let asked = |m: &ShortId, ks: &[u16]| -> Millis {
             let list = self.pieces.get(m);
             ks.iter().filter_map(|k| list.and_then(|l| l.get(*k as usize))).map(|id| self.progress.get(id).map(|p| p.last_want).unwrap_or(0)).min().unwrap_or(0)
@@ -2407,10 +2422,16 @@ impl Node {
                     || self.pieces.get(m).map(|l| l.iter().any(|id| self.grants.contains_key(id) || self.progress.get(id).map(|p| recent(p.last_progress)).unwrap_or(false))).unwrap_or(false)
             })
             .collect();
-        let mut order: Vec<(u16, Millis, SetKey)> = groups.iter().map(|(g, ks)| (first(&g.0, ks), asked(&g.0, ks), *g)).collect();
+        let turn = |m: &ShortId, ks: &[u16]| -> (bool, Millis) {
+            let list = self.pieces.get(m);
+            let ts: Vec<(bool, Millis)> = ks.iter().filter_map(|k| list.and_then(|l| l.get(*k as usize))).map(|id| self.turn(id)).collect();
+            let stuck = !ts.is_empty() && ts.iter().all(|t| t.0);
+            (stuck, if stuck { ts.iter().map(|t| t.1).min().unwrap_or(0) } else { 0 })
+        };
+        let mut order: Vec<((bool, Millis), u16, Millis, SetKey)> = groups.iter().map(|(g, ks)| (turn(&g.0, ks), first(&g.0, ks), asked(&g.0, ks), *g)).collect();
         order.sort_unstable();
         let mut seen = BTreeSet::new();
-        let mut order: Vec<(bool, bool, usize, SetKey)> = order.into_iter().enumerate().map(|(i, (_, _, g))| (!seen.insert(g.0), !moving.contains(&g.0), i, g)).collect();
+        let mut order: Vec<(bool, bool, usize, SetKey)> = order.into_iter().enumerate().map(|(i, (_, _, _, g))| (!seen.insert(g.0), !moving.contains(&g.0), i, g)).collect();
         order.sort_unstable();
         let mut sets = Vec::new();
         'groups: for (_, _, _, g) in order {
@@ -2642,11 +2663,24 @@ impl Node {
         };
         let places = self.places();
         let place = |id: &ShortId| places.get(id).copied().unwrap_or(0);
+        // Before that, the turn (§4): what nobody in reach holds is wanted for good, and in this
+        // order alone it took the frame round after round while the rest was never asked for.
+        // What is stuck goes last; everything else keeps this order.
         ids.sort_by(|a, b| {
             let ((la, ba), (lb, bb)) = (key(a), key(b));
-            place(a).cmp(&place(b)).then((lb * ba).cmp(&(la * bb))).then(a.cmp(b))
+            self.turn(a).cmp(&self.turn(b)).then(place(a).cmp(&place(b))).then((lb * ba).cmp(&(la * bb))).then(a.cmp(b))
         });
         ids
+    }
+
+    /// The turn of a wanted object in asking (§4, "Asking in turns"): one we asked for and that has
+    /// been neither granted nor arriving for `T_excursion` is stuck, and goes after everything
+    /// else, what was asked for longest ago first. Nobody in reach holds it; asked for every round
+    /// in the order of place, such objects took the frame and the rest was never asked for.
+    fn turn(&self, id: &ShortId) -> (bool, Millis) {
+        let p = self.progress.get(id).copied().unwrap_or_default();
+        let stuck = !self.grants.contains_key(id) && p.last_want != 0 && self.now >= p.wanted_at.max(p.last_progress) + self.cfg.params.t_excursion_ms;
+        (stuck, if stuck { p.last_want } else { 0 })
     }
 
     /// Followers stay silent unless they have wants that the announcer is not serving.
@@ -4060,14 +4094,6 @@ impl Node {
                 }
             }
         }
-    }
-
-    /// Whether our announcer was heard, within `want_ttl`, asking for `id` itself or granting it
-    /// to an uploader: what an honest announcer does with an object it lacks.
-    fn ann_seeking(&self, id: &ShortId) -> bool {
-        let ttl = self.cfg.params.want_ttl_ms;
-        let within = |t: Option<&Millis>| t.map(|t| self.now < *t + ttl).unwrap_or(false);
-        within(self.ann_asks.get(id)) || within(self.ann_grants.get(id))
     }
 
     /// Ask our announcer for one symbol of `x`, naming it as the one to answer: proof that it

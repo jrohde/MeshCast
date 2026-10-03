@@ -281,7 +281,7 @@ fn a_station_back_from_a_power_cut_takes_over_once() {
     assert_eq!(b.engine.nodes[station].node.role(1), meshcast_core::node::Role::Announcer);
 }
 
-fn island(params: Params, lure: bool) -> (usize, u64) {
+fn island(params: Params, lure: bool) -> (usize, u64, u64) {
     // A source and one neighbour around station A, and station B with three followers 1.35 km
     // away in band L (range about 985 m). Only one follower of B, at 900 m from A, hears A at
     // all; nobody in A's cell hears B's cell. The stations do not hear each other. With `lure`, a
@@ -314,19 +314,23 @@ fn island(params: Params, lure: bool) -> (usize, u64) {
             }
         }
     }
-    (missing, b.engine.nodes.iter().map(|n| n.node.stats.excursions).sum())
+    // When the last of it arrived.
+    let last = b.tracks.iter().flat_map(|(id, t)| t.followers.iter().filter(|&&f| f != 7 && f != 1).filter_map(|&f| b.engine.metrics.completions.get(&(f, *id)).copied()).collect::<Vec<_>>()).max().unwrap_or(0);
+    (missing, b.engine.nodes.iter().map(|n| n.node.stats.excursions).sum(), last)
 }
 
 #[test]
 fn a_follower_fetches_what_its_cell_cannot_get() {
     // B asks and nobody it hears holds anything; its follower at the edge hears A list it all.
     // That follower goes on an excursion, fetches, comes back and uploads to B (PROTOCOL.md §4).
-    let (missing, excursions) = island(Params::default(), false);
+    let (missing, excursions, with) = island(Params::default(), false);
     assert!(excursions > 0, "no excursion");
     assert_eq!(missing, 0, "{missing} follower-object pairs never completed");
-    // Without excursions B's cell gets nothing at all.
-    let (missing, _) = island(Params { t_excursion_ms: u64::MAX / 4, ..Params::default() }, false);
-    assert!(missing > 0, "B's cell was served without an excursion");
+    // Without excursions B's cell gets it only once that follower gives B up, having had not one
+    // symbol while B named no uploader, for the ceiling (PROTOCOL.md §5.2): after 107 minutes
+    // instead of 62 in this world.
+    let (missing, _, without) = island(Params { t_excursion_ms: u64::MAX / 4, ..Params::default() }, false);
+    assert!(missing > 0 || without >= with + 30 * 60_000, "B's cell was served as soon without an excursion ({without} ms, with {with} ms)");
 }
 
 #[test]
@@ -334,7 +338,7 @@ fn a_lure_is_visited_once() {
     // The same island, and a node that lists every object and serves none, heard better than A by
     // the only follower that could fetch. It goes there first, gets nothing, does not go back,
     // and fetches from A (ABUSE.md). Without that memory it chose the lure every time.
-    let (missing, excursions) = island(Params::default(), true);
+    let (missing, excursions, _) = island(Params::default(), true);
     assert!(excursions >= 2, "{excursions} excursions");
     assert_eq!(missing, 0, "{missing} follower-object pairs never completed");
 }
@@ -911,6 +915,40 @@ fn an_announcer_asks_for_every_collection_s_first_pieces() {
             assert!(asked.contains(first), "collection {c}: its first missing piece was not asked for in two rounds");
         }
     }
+}
+
+#[test]
+fn what_nobody_holds_does_not_keep_the_rest_from_being_asked_for() {
+    // Band O: an announcer asks by name, eight to a frame (PROTOCOL.md §3.3). What nobody in
+    // reach holds is wanted for good, and asked for in the order of place alone the same eight
+    // took every frame: in a sparse band L network an announcer had never asked, after 50
+    // minutes, for what its follower wanted, in 351 of 389 cases (FEASIBILITY.md §25). Now what
+    // has been asked for and neither granted nor arriving for `T_excursion` goes last, the longest
+    // asked ago first, and a few rounds name everything that is wanted.
+    let mut s = spec(BulkPreset::GfskO, vec![(0.0, 0.0), (300.0, 0.0), (150.0, 0.0)], vec![0], vec![2], 1.0);
+    s.tracks = 40;
+    s.mix = meshcast_sim::scenario::parse_mix("snac-music:14").unwrap();
+    let mut b = build(&s, Params::default());
+    let manifest = b.sources[0].collections[0].as_object().0.id.short();
+    let mut t = 0;
+    while !b.engine.nodes[2].node.holds(&manifest) {
+        t += 1_000;
+        assert!(t < 3_600_000, "the station should hold the collection manifest within an hour");
+        b.engine.run(t, 600_000);
+    }
+    // Nobody else holds the pieces now: what the station lacks stays wanted, and after
+    // `T_excursion` what it asked for is stuck.
+    b.engine.set_alive(0, false);
+    b.engine.run(t + Params::default().t_excursion_ms + 5 * 60_000, 600_000);
+    let lacking: Vec<meshcast_core::ids::ShortId> = b.tracks.keys().copied().filter(|id| !b.engine.nodes[2].node.holds(id)).collect();
+    assert!(lacking.len() > 16, "more than two frames of pieces should be wanted, {} are", lacking.len());
+    let station = &mut b.engine.nodes[2].node;
+    let mut asked = Vec::new();
+    for _ in 0..lacking.len().div_ceil(8) {
+        asked.extend(station.ask_now());
+    }
+    let never: Vec<_> = lacking.iter().filter(|id| !asked.contains(id)).collect();
+    assert!(never.is_empty(), "{} of {} wanted pieces were not asked for in {} rounds", never.len(), lacking.len(), lacking.len().div_ceil(8));
 }
 
 #[test]
