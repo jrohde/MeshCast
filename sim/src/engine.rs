@@ -110,6 +110,7 @@ pub struct Engine {
     no_ctrl_rx: bool,
     /// EXPERIMENT: the backbone oracle, its next run and how often it handed something over.
     oracle: bool,
+    oracle_roots_on: bool,
     next_oracle: Millis,
     pub oracle_transfers: u64,
     /// Diagnostic (MESHCAST_TRACE_BUSY=<node index>): who keeps that node's channel busy when it
@@ -170,7 +171,7 @@ impl Engine {
         }
         let mut metrics = Metrics::default();
         metrics.per_node_bulk = vec![(0, 0); n];
-        let mut e = Engine { attackers: Vec::new(), attack_ids: Vec::new(), rendition_ids: Default::default(), nodes, phys, heap: BinaryHeap::new(), seq: 0, tx_seq: 0, loss, reach, recent: HashMap::new(), txs: HashMap::new(), now: 0, metrics, verbose: false, trace_grants: std::env::var("MESHCAST_TRACE_GRANTS").is_ok(), trace_busy: std::env::var("MESHCAST_TRACE_BUSY").ok().and_then(|v| v.parse().ok()), busy_from: VecDeque::new(), busy_blame: Default::default(), next_sample: 0, lose: Vec::new(), trace_rx: std::env::var("MESHCAST_TRACE_RX").ok().and_then(|v| v.parse().ok()), no_ctrl_rx: std::env::var("MESHCAST_NO_CTRL_RX").is_ok(), oracle: std::env::var("MESHCAST_ORACLE_BACKBONE").is_ok(), next_oracle: 60_000, oracle_transfers: 0 };
+        let mut e = Engine { attackers: Vec::new(), attack_ids: Vec::new(), rendition_ids: Default::default(), nodes, phys, heap: BinaryHeap::new(), seq: 0, tx_seq: 0, loss, reach, recent: HashMap::new(), txs: HashMap::new(), now: 0, metrics, verbose: false, trace_grants: std::env::var("MESHCAST_TRACE_GRANTS").is_ok(), trace_busy: std::env::var("MESHCAST_TRACE_BUSY").ok().and_then(|v| v.parse().ok()), busy_from: VecDeque::new(), busy_blame: Default::default(), next_sample: 0, lose: Vec::new(), trace_rx: std::env::var("MESHCAST_TRACE_RX").ok().and_then(|v| v.parse().ok()), no_ctrl_rx: std::env::var("MESHCAST_NO_CTRL_RX").is_ok(), oracle: std::env::var("MESHCAST_ORACLE_BACKBONE").is_ok(), oracle_roots_on: std::env::var("MESHCAST_ORACLE_ROOTS").is_ok(), next_oracle: 60_000, oracle_transfers: 0 };
         for i in 0..n {
             e.schedule_wake(i, 1);
         }
@@ -321,8 +322,13 @@ impl Engine {
             }
             let Some(Reverse((t, _, ev))) = self.heap.pop() else { break };
             self.now = t;
-            if self.oracle && t >= self.next_oracle {
-                self.oracle_backbone();
+            if (self.oracle || self.oracle_roots_on) && t >= self.next_oracle {
+                if self.oracle_roots_on {
+                    self.oracle_roots();
+                }
+                if self.oracle {
+                    self.oracle_backbone();
+                }
                 self.next_oracle = t + 60_000;
             }
             if t >= next_sample {
@@ -361,6 +367,37 @@ impl Engine {
     /// EXPERIMENT (MESHCAST_ORACLE_BACKBONE=1): an upper bound for announcers that upload to
     /// neighbouring announcers. Each announcer is handed, for free and at once, every object its
     /// own followers asked for that an announcer it can hear holds complete.
+    /// EXPERIMENT (MESHCAST_ORACLE_ROOTS=1): every node is handed, for free, each manifest (root
+    /// or collection) it wants that any node it can hear on the control carrier holds.
+    fn oracle_roots(&mut self) {
+        let n = self.nodes.len();
+        let now = self.now;
+        let (ctrl, bulk) = (0, self.phys.len() - 1);
+        for b in 0..n {
+            if !self.nodes[b].alive {
+                continue;
+            }
+            for w in self.nodes[b].node.wanted_manifests() {
+                for a in 0..n {
+                    if a == b || !self.nodes[a].alive || self.rx_dbm(a, b, ctrl) < self.phys[ctrl].sensitivity_dbm {
+                        continue;
+                    }
+                    let symbols = self.nodes[a].node.symbols_of(&w);
+                    if symbols.is_empty() {
+                        continue;
+                    }
+                    for s in symbols {
+                        let actions = self.nodes[b].node.handle_frame(now, bulk, &Frame::Bulk(s), -80);
+                        self.apply(b, actions);
+                    }
+                    self.reschedule(b);
+                    self.oracle_transfers += 1;
+                    break;
+                }
+            }
+        }
+    }
+
     fn oracle_backbone(&mut self) {
         let n = self.nodes.len();
         let now = self.now;
