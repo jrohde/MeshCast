@@ -327,8 +327,8 @@ frequency of the bulk carrier, the window also keeps the two from overlapping.
 | 6 | 2 | `score` (see §5) |
 | 8 | 2 | `next_ms` — milliseconds until the next beacon from this announcer |
 | 10 | 2 | `round` — carousel round counter |
-| 12 | 8 | `utc` — UTC seconds if known, else 0 |
-| 20 | 1 | `time_quality` — 0 none, 1 mesh-derived, 2 phone/NTP, 3 GPS |
+| 12 | 8 | `time` — the sender's shared time in milliseconds as the frame begins (§6) |
+| 20 | 1 | `time_quality` — 1 shared time; 2 phone/NTP and 3 GPS are reserved (§6) |
 | 21 | 1 | `colour` — this announcer's rank in its conflict set: its channel offset, or its time slot on a single-channel carrier |
 | 22 | 1 | `colours` — colours in use around it: how many slots the cycle has |
 | 23 | 1 | `upload_phases` — how many phases its listening time is divided into for uploads (§4); 1 means none |
@@ -480,6 +480,10 @@ arrived for `T_want_min`, or one thing it wants has not for twice that. Waiting 
 arrived let one object that trickled in from a neighbouring cell keep a follower silent for
 hours, holding 79.6 % of another, just short of a repair; asking again whenever one want had
 waited `T_want_min` was about as fast and cost up to 8 % more frames (FEASIBILITY.md §22).
+And a trickle is not coming: what has not completed `T_excursion` after the follower last asked for
+it is asked for again, whatever arrived meanwhile. A follower that missed an announcer's first
+pass of four objects took one or two symbols from each repetition, each counted as having
+arrived, and it never asked again: it held 64 of 113 symbols after six hours (FEASIBILITY.md §26).
 
 **Repetition that does not help is repeated ever more slowly.** The first time an object is asked
 for again it is passed again at once; each further repetition waits longer after the pass before:
@@ -636,8 +640,8 @@ without a symbol. Answers that
 nobody named, from holders that cannot hear each other, were nearly all the collisions left in
 band L after grants had phases; FEASIBILITY.md §9.6.
 
-**An upload keeps out of the phases other announcers gave away.** Phases are slots of one grid,
-`T_upload_phase` wide from time zero, so the slot tells which phase every announcer is in. A
+**An upload keeps out of the phases other announcers gave away.** Phases are slots of one grid on
+the shared time (§6), `T_upload_phase` wide, so the slot tells which phase every announcer is in. A
 holder that hears another announcer grant a phase to a holder other than itself, in a WANT, keeps
 its uploads to anyone else out of that phase while it hears that announcer, wherever that
 announcer listens on the channel it sends on. The phase counts until that announcer's beacon
@@ -1096,14 +1100,89 @@ first hour, and never completed two objects in twelve hours (FEASIBILITY.md §22
 During the outage, playback of already-collected objects continues from the schedule. New content
 arrives a few minutes later than it otherwise would. That is the entire user-visible effect.
 
-## 6. Time and playback synchronisation
+## 6. Time
 
-- Manifests schedule objects at UTC times. Nodes play an object at its scheduled time if they have
-  it complete; otherwise they skip it (or play the previous complete object in the channel, a
-  channel-level option).
-- Time sources in order of trust: GPS, phone/NTP over BLE or IP, announcer BEACON `utc` with
-  `time_quality`, and finally nothing (the node plays on demand only). A node adopts a BEACON's time
-  only if its own quality is lower.
+### 6.1 The shared time
+
+Schedules run on a **shared time** in milliseconds: hop dwells and the rendezvous (§5.3), the time
+slots of announcers that share a channel (§5.3), the upload phases (§4), the control window (§3), and playback (§6.3).
+Durations, every wait and timer of the protocol, run on each node's own clock. A node without GPS,
+phone or a battery-backed clock starts counting from zero whenever it is switched on, and its
+crystal runs a little fast or slow: the ESP32-S3 asks for a 40 MHz crystal within ±10 ppm (ESP32-S3
+Hardware Design Guidelines, schematic checklist, "External Crystal Clock Source"), and in LoRaWAN
+use the SX1262's 32 MHz reference should stay within about ±30 ppm in all conditions (SX1261/2
+datasheet rev 1.2, §3.4, Table 3-4). Two free-running clocks at ±10 ppm drift 100 ms apart in about
+83 minutes (2 × 10 ppm × 5,000 s; an estimate). The schedules need agreement to well within a
+second: dwells last 20 s, slots 10 s, the window 4 s.
+
+Every BEACON tells its sender's shared time as the frame begins, in milliseconds (`time`, §3.1). A
+receiver adds the frame's airtime, which it knows from the length: that is the time as the frame
+ends, which is when it receives it. LoRaWAN Class B devices take the time of their beacons the same
+way, beacon time plus time on air (LoRaMac-node, `LoRaMacClassB.c`).
+
+### 6.2 How nodes agree
+
+- **A follower keeps its announcer's time**, whichever way it differs, at every beacon of it.
+- **Announcers keep the latest time any of them tells**, and never go back. An announcer takes a
+  later time at its own next beacon: that beacon goes out on the schedule its followers still
+  keep, with the new time in it, and the cell moves at once. Among announcers this is maximum
+  consensus (He, Cheng, Shi, Chen, Sun, "Time Synchronization in WSNs: A Maximum-Value-Based
+  Consensus Approach", IEEE Transactions on Automatic Control 59(3), 2014): every group that hears
+  itself converges to its fastest clock. Taking only later times everywhere, a follower whose
+  clock ran ahead never heard back from anyone, since followers do not beacon, and kept a time of
+  its own: in a band O neighbourhood started with clocks up to an hour apart, playback could start
+  after 7.7 minutes instead of 6.0 (FEASIBILITY.md §26).
+- **A node following nobody keeps the time of the announcer it heard last**, whom it is about to
+  find. Taking only later times, a node whose clock ran ahead looked for that announcer on the
+  wrong channel and led a cell of its own instead.
+
+Where the cell's carrier hops, a node that knows no time finds nobody on it, and two groups that do
+not share a time never meet: their windows and their hop sequences differ. The control carrier
+carries the time across:
+
+- **Every announcer tells its time on the control carrier**, once every `T_tell`, in the window.
+- **A node that knows no time listens on the control carrier all the time** until it hears a
+  beacon there, and takes that announcer's time. One that has heard none steps up only after
+  `T_acquire` of listening, a control period and its window, and is then a source of time itself:
+  it tells it at once on the control carrier, outside the window, where whoever else knows none is
+  listening, and keeps listening there for `T_acquire`, for a source that started before it.
+- **A candidate whose time moved steps up in the next rendezvous of its new time**, where the
+  other candidates and announcers are. Planned by its old time, it stepped up where nobody heard
+  it, and in a town started with clocks apart three cells too many stayed side by side.
+- **Once every `T_watch` an announcer listens on the control carrier through a whole period**, and
+  takes a later time it hears there; one that started the time itself does so two periods after it
+  began, and then twice as long each time, up to `T_watch`. Without the watch, two groups of 26
+  and 24 nodes in one band L neighbourhood kept times nine minutes apart for over an hour, until
+  they met by chance.
+
+On a carrier that does not hop, every node hears every announcer's beacon on the cell's channel,
+and with it the time, without knowing it first: none of the three is needed there, and none is
+used.
+
+**A frame keeps `T_guard` from the edges** of a hop dwell and of the control window: a receiver
+whose clock is a few milliseconds off has retuned there already, or still listens on the other
+carrier. Sent at the very end of the window, the beacons of a band O announcer met followers a
+millisecond behind it still listening on the control carrier; they missed three in a row and stood
+for election: 408 role changes in that world, 128 with the guard.
+
+Over the whole validation, with clocks up to an hour apart and ±20 ppm, every scenario delivered
+within a point of what it did with one clock; a cold start, where every node first has to learn the time, began playback
+1 to 5 minutes later (a band L town after 28.6 minutes instead of 24.7), and once agreed the nodes
+kept within a few milliseconds of each other (FEASIBILITY.md §26).
+
+A false announcer can pull every announcer that hears it to a later time, as maximum consensus
+lets the fastest clock lead (He et al. 2014, Remark 3.8, name the same weakness); see ABUSE.md,
+"Time pulled ahead". GPS and a phone or NTP would give a better time than the mesh's own
+(`time_quality` 3 and 2); how such a time takes precedence is not specified yet, because the
+simulator has no node with one.
+
+### 6.3 Playback
+
+- Manifests schedule objects at UTC times, which nodes read on the shared time. Nodes play an
+  object at its scheduled time if they have it complete; otherwise they skip it (or play the
+  previous complete object in the channel, a channel-level option). A shared time that came from
+  no GPS or phone is not UTC: in such a mesh a schedule is only as right as the clock that happened
+  to lead (open question 6).
 - A device that cannot decode asks for the rendition of an object `T_render_ahead` before its
   slot (§1.2), so a radio fetches what is on next and nothing else.
 - Accuracy needed: seconds, not milliseconds. Two neighbours playing the same track one second
@@ -1161,6 +1240,10 @@ arrives a few minutes later than it otherwise would. That is the entire user-vis
 | `T_dwell` | 20 s | hop dwell on frequency-agile carriers |
 | `meet_every` | 5 | every fifth dwell is on the common control-plane sequence |
 | `T_ctrl_period`, `T_ctrl_window` | 60 s, 4 s | the control window: control-carrier frames go only in it, and a radio shared with a sub-GHz bulk carrier listens on the control carrier only then; it begins halfway through each period (§3) |
+| `T_acquire` | 64 s | where the cell's carrier hops: how long a node that knows no shared time listens on the control carrier before it may step up by its own clock, a control period and its window (§6) |
+| `T_watch` | 30 min | where the cell's carrier hops: how often an announcer listens on the control carrier through a whole period, for the time of announcers whose window it does not share (§6) |
+| `T_tell` | 60 s | where the cell's carrier hops: how often an announcer tells its time on the control carrier, in the window (§6); `T_acquire` covers one |
+| `T_guard` | 50 ms | how far a frame keeps from the edges of a hop dwell and of the control window, for clocks a few milliseconds apart (§6) |
 | `T_offer` | 0–3 s | random delay before a holder offers on an open ask |
 | repair wait | `T_suppress × (neighbours heard better than the asker) / (all neighbours)` + jitter | ungranted NACK answer |
 | `T_upload_phase` | 1 s | one upload phase: uploaders to one announcer take turns this long each |
@@ -1186,7 +1269,9 @@ arrives a few minutes later than it otherwise would. That is the entire user-vis
 4. Multi-announcer cells on purpose (two bulk channels, two announcers) in dense areas?
 5. How does a node learn a channel id in the first place without internet? (QR code, spoken
    over the mesh in a "directory" channel that every node follows by default, or both.)
-6. Time without GPS or phone in a fully offline mesh: does mesh-derived time drift acceptably?
+6. Time without GPS or phone in a fully offline mesh: the shared time of §6 keeps schedules
+   together, but it is not UTC. How a GPS or phone time takes precedence, and what a mesh without
+   one does with a manifest's UTC schedule, is open.
 7. *(resolved in Phase 0: any holder answers any announcer's WANT, with suppression; see §4.)*
 8. Nodes with two bulk carriers (GFSK and ESP-NOW) run two elections; the simulator models one
    bulk carrier per node so far.
