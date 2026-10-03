@@ -687,6 +687,19 @@ ago. What is flowing is not asked for, so a collection in progress gives up its 
 uploads run: as many collections are in flight as arrive, and one that stopped arriving takes
 turns with the rest.
 
+**Asking in turns.** A frame names eight objects or four sets, and what nobody in reach holds is
+wanted for good: in the order above alone, such wants took the frame round after round, and the
+rest was never asked for. In a sparse band L network an announcer wanted a median of 24 objects
+when a follower left it for ignoring one, and in 351 of 389 such leaves it had never asked for that
+object, which it wanted too, in 50 minutes (FEASIBILITY.md §25). So what is **stuck**, asked for
+and neither granted nor arriving for `T_excursion`, goes after everything else, and among what is
+stuck the one asked for longest ago goes first; a set goes there once every piece it names is
+stuck. Everything else keeps the order above, so what can be had is asked for as
+before. Turning everything, so that what was asked for in the last `T_want_min` went after what
+was not, also asked for every want, but undid the order above wherever more was wanted than a frame
+holds and all of it could be had: in a band O network over 15 km² with 7 kB pieces, playback
+started after 22.4 minutes instead of 8.8.
+
 Each part answers a measurement (FEASIBILITY.md §19). In the order of manifest ids, the sets of
 the lowest ids and their grants filled the frame round after round, and one announcer asked three
 times in 26 minutes for a source whose manifest id sorted last, against 41 and 130 times for the
@@ -939,11 +952,11 @@ persist and EtherFatsoen shares the channel between them.
   report make announcers step down and come back, over and over (ABUSE.md; FEASIBILITY.md §11).
   Removing it changed nothing in any scenario without an attacker. Convergence to one announcer
   per connected cell takes at most a few beacon intervals.
-- **An announcer that does not serve is not followed.** Beacons and HAVE are claims; serving is
-  evidence. An honest announcer does one of three things with an object its follower wants: it
-  serves it, or, lacking it, asks for it itself or grants it to an uploader. A follower ignores its
+- **An announcer that does not serve, or cannot get, is not followed.** Beacons and HAVE are
+  claims; serving is evidence. An announcer does one of two things with an object its follower
+  wants: it serves it, or, lacking it, gets it, by granting it to an uploader. A follower ignores its
   announcer for `want_ttl`, as it ignores one whose excursion brought nothing (§4), when the
-  announcer has done none of these for an object the follower wants, whether it lists the object or
+  announcer has done neither for an object the follower wants, whether it lists the object or
   not, so that the follower has never received one symbol of it, for longer than an honest
   announcer can take to pass an object it was asked for: its repetition ceiling (§4, eight
   `T_want_min`) and one `T_want_min` for the ask, 90 minutes at the draft, counted from when the
@@ -958,12 +971,15 @@ persist and EtherFatsoen shares the channel between them.
   what a follower cannot want yet (the objects of a manifest the follower lacks) held followers that
   wanted only that manifest for good once manifests were no longer repeated (FEASIBILITY.md §13).
   **Sooner, the follower asks for proof.** When a want the announcer has listed since the follower
-  began to wait for it has stalled for `T_want_min`, or one it ignores for `T_excursion`, the
-  follower sends its announcer a `NACK` for one symbol of it that it lacks, naming the announcer as
-  the one to answer, every `T_nack_stall`. (What the announcer listed only before, it may have
-  dropped since.) An honest announcer answers it from the front of its carousel at once, whatever
-  its repetition backoff; one that has sent not one symbol of that object `T_want_min` after the
-  first `NACK` serves nothing. Waiting alone is no
+  began to wait for it has stalled for `T_want_min`, the follower sends its announcer a `NACK` for
+  one symbol of it that it lacks, naming the announcer as the one to answer, every
+  `T_nack_stall`. (What the announcer listed only before, it may have dropped since.) An honest
+  announcer answers it from the front of its carousel at once, whatever its repetition backoff;
+  one that has sent not one symbol of that object `T_want_min` after the first `NACK` serves
+  nothing. What it does not list it cannot answer for: a want it has named no uploader for in
+  `T_excursion` gets no `NACK`, and the follower waits as long, `T_want_min`, before it leaves.
+  Asked anyway, the followers of a sparse band L network sent 54,687 `NACK`s in eight worlds;
+  asked only for what was listed, 73 (FEASIBILITY.md §25). Waiting alone is no
   evidence: an honest announcer whose repetitions a WANT flood holds back is silent on that
   object too, for up to its ceiling. Only the named announcer answers such a `NACK`, so a symbol
   of the object is its answer even on a channel the follower shares with other cells. The rule
@@ -971,11 +987,13 @@ persist and EtherFatsoen shares the channel between them.
   of anyone else restarted that wait, and in a busy band L network a false announcer kept its
   followers for 88 minutes once they held the manifests and wanted only what it claimed
   (FEASIBILITY.md §22). Asking only after `T_excursion` let five false announcers hand followers
-  on from one to the next, and playback started 21 minutes later. What an announcer ignores it
-  cannot answer, so that waits `T_excursion` still: asked sooner, honest announcers that had not
+  on from one to the next, and playback started 21 minutes later. What an announcer does not list
+  it cannot answer, so that waits `T_excursion` still: asked sooner, honest announcers that had not
   yet asked for what their followers wanted lost them, and a band O network over 15 km² had 72 %
   more role changes. An announcer that has answered a follower once has shown that it serves, and
-  is asked by it again only after `T_excursion`. An answer proves that the announcer serves, and is not
+  is asked by it again only `T_excursion` after that answer (counted from the start of the wait,
+  as the simulator first did, the next `NACK` could follow every answer at once; FEASIBILITY.md
+  §25). An answer proves that the announcer serves, and is not
   counted as progress on the object, so the follower asks for the rest as usual (§4): one symbol
   per answer, counted as progress, had kept a follower from asking, and it held 24 of 216 symbols
   after four hours (FEASIBILITY.md §24). A source's own object stops being pending, as in the
@@ -989,6 +1007,23 @@ persist and EtherFatsoen shares the channel between them.
   claiming the maximum: five such beacons in a 15 km² band L network left 66 % of deliveries done in
   twelve hours, 60 % in the worst world; with the rule, 95 % and 87 % (FEASIBILITY.md §12), and with
   the form above 96 % and 94 % (§13 there).
+  **Asking is not getting.** The rule first counted an announcer that asked for the object itself
+  as one that serves. An announcer that asks and finds no holder in reach cannot get the object,
+  honest or not, and its follower does better elsewhere: following the next announcer it hears or,
+  hearing none, leading a cell of its own, it takes its want where other holders are, and as an
+  announcer its own asks reach them. It is not a verdict that the announcer lies, and the
+  simulator counts these leaves apart. In a sparse band L network (24 channels, each node
+  following 2) honest announcers that asked kept their followers, and 87.6 % of bulletins arrived
+  within their period (82.0 % in the worst of eight worlds); leaving them, 92.2 % (88.5 %)
+  (FEASIBILITY.md §25). It is leading a cell that carries the want: leaving only for another
+  announcer it heard, 83.7 %; visiting the strongest other announcer instead of leaving, 81.7 %.
+  What it costs: where everybody wants the same large objects and they take longer than
+  `T_excursion` to cross the network, followers leave announcers that would have had them soon:
+  in a band L network over 15 km² with 846 kB objects, 19 % more frames and playback 1.9 minutes
+  later, and where listeners pick single collections, 13 % more frames and a 90th percentile
+  5.8 minutes later. The matrix, the living networks and the networks under attack did not
+  change. And an announcer can no longer keep its followers by asking forever for what it never
+  gets (ABUSE.md, "election capture").
 - **Challenge on capability, not on circumstance**: a follower more capable than its announcer
   (a station back from a power cut, following the battery node that took over) for
   `challenge_beacons` consecutive beacons becomes a candidate; the incumbent hears the more
@@ -1113,7 +1148,7 @@ arrives a few minutes later than it otherwise would. That is the entire user-vis
 | `H` | 10 % of `score_max` | yield hysteresis between announcers of equal capability |
 | `challenge_beacons` | 3 | beacons from a less capable announcer before a follower challenges it |
 | step-up order | span in 4 capability bands; in a band, 2/3 by score + 1/3 jitter | span `T_base + T_jitter` from the candidacy, or 7/10 of the meeting dwell after its first fifth on a hopping carrier |
-| `T_excursion` | 40 min | a want without a symbol, and without a grant by our announcer, this long sends a follower to another announcer that has it; a visit without a symbol this long ends, and one that brought none is not repeated for `want_ttl` |
+| `T_excursion` | 40 min | a want without a symbol, and without a grant by our announcer, this long sends a follower to another announcer that has it; a visit without a symbol this long ends, and one that brought none is not repeated for `want_ttl`; with nobody to visit, and one `T_want_min` more, it makes the follower leave its announcer (§5.2); and what was asked for and neither granted nor arriving this long is stuck, and asked for last (§4) |
 | `rssi_hysteresis` | 6 dB | a follower switches announcer only for a clearly stronger one |
 | `near_rssi` | sensitivity + 17 dB | beacon strength that means "same cell" for the tie-break |
 | `max_passes` | 1 | carousel passes per object unless re-wanted |
