@@ -408,6 +408,9 @@ pub struct Node {
     /// Announcer side: uploader granted per wanted object, with the time of the grant.
     /// object -> (granted holder, when, phase of our listening time it uploads in).
     grants: BTreeMap<ShortId, (NodeId, Millis, u8)>,
+    /// Grants we have named in a WANT: only their phases count in the phases our beacon
+    /// announces (§4), since the holder of any other does not know it may speak.
+    told: BTreeSet<ShortId>,
     /// Phases an announcer reserved for answers to its NACK of an object nobody is granted:
     /// object -> (phase, since).
     repair_phases: BTreeMap<ShortId, (u8, Millis)>,
@@ -538,6 +541,7 @@ impl Node {
             report_due: false,
             last_report: 0,
             grants: BTreeMap::new(),
+            told: BTreeSet::new(),
             repair_phases: BTreeMap::new(),
             phase_heard: [0; MAX_UPLOAD_PHASES as usize],
             renditions: BTreeMap::new(),
@@ -786,7 +790,19 @@ impl Node {
 
     /// Diagnostic: the phase count we believe `announcer` uses, and ours if we are one.
     pub fn upload_phases_believed(&self, announcer: NodeId) -> u8 {
-        self.neighbors.get(&announcer).map(|n| n.upload_phases).unwrap_or(0)
+        if self.neighbors.contains_key(&announcer) {
+            self.phases_of(announcer)
+        } else {
+            0
+        }
+    }
+
+    /// How many phases `announcer` divides its listening time into, as far as we know: what its
+    /// last beacon said, or more if it has since granted a higher phase in a WANT, or reserved one
+    /// for a repair in a NACK, that we heard (§4): a grant raises the count at once, and the beacon
+    /// tells it only at the next dwell.
+    fn phases_of(&self, announcer: NodeId) -> u8 {
+        self.neighbors.get(&announcer).map(|n| n.upload_phases.max(16 - n.granted_phases.leading_zeros() as u8)).unwrap_or(1)
     }
     pub fn upload_phases_now(&self) -> u8 {
         self.upload_phase_count()
@@ -1873,7 +1889,11 @@ impl Node {
     /// its own phase, and the cycle has as many phases as the highest one in use. One upload gets
     /// all the time; hidden uploaders never overlap.
     fn upload_phase_count(&self) -> u8 {
-        self.phases_in_use().map(|p| p + 1).max().unwrap_or(1).max(1)
+        // Only grants we have named count: a grant that did not fit our asks yet raised the count
+        // in our beacon while its holder kept silent, and uploaders that heard the beacon and one
+        // that had not divided the time differently and collided frame for frame.
+        let told = self.grants.iter().filter(|(id, _)| self.told.contains(id)).map(|(_, (_, _, p))| *p);
+        told.chain(self.repair_phases.values().map(|(p, _)| *p)).map(|p| p + 1).max().unwrap_or(1).max(1)
     }
 
     /// Phases held by running grants and by reserved repairs.
@@ -1940,6 +1960,45 @@ impl Node {
             Some((slot + 1) * width)
         } else {
             None
+        }
+    }
+
+    /// The control window that contains `t`, or else the next one, as (start, end): a node with
+    /// one radio for its control and bulk carriers listens on the control carrier only then, and
+    /// every node sends control-carrier frames only then (PROTOCOL.md §3). Windows sit in the
+    /// middle of each period. `None` without a separate control carrier, or with windows off.
+    fn ctrl_window_from(&self, t: Millis) -> Option<(Millis, Millis)> {
+        let (p, w) = (self.cfg.params.t_ctrl_period_ms, self.cfg.params.t_ctrl_window_ms);
+        if w == 0 || p <= w || self.ctrl == self.cell_carrier() {
+            return None;
+        }
+        let pos = (t + p - (p / 2) % p) % p;
+        let start = if pos < w { t - pos } else { t + (p - pos) };
+        Some((start, start + w))
+    }
+
+    /// Whether carrier `i` runs on the radio of the control carrier: a sub-GHz bulk carrier on
+    /// the same SX126x, which receives LoRa or FSK, never both at once (SX1261/2 datasheet
+    /// rev 1.2, §13.4.2: the packet type changes only in standby).
+    fn shares_ctrl_radio(&self, i: usize) -> bool {
+        matches!(self.carriers[i].p.kind, CarrierKind::GfskBulk | CarrierKind::LoraBulk)
+    }
+
+    /// Whether we receive on `carrier` at `t`: outside the control window our one radio listens
+    /// on the bulk carrier, inside it on the control carrier.
+    pub fn listening(&self, carrier: usize, t: Millis) -> bool {
+        match self.ctrl_window_from(t) {
+            None => true,
+            Some((start, _)) => {
+                let open = t >= start;
+                if carrier == self.ctrl {
+                    open
+                } else if self.shares_ctrl_radio(carrier) {
+                    !open
+                } else {
+                    true
+                }
+            }
         }
     }
 
@@ -2153,14 +2212,31 @@ impl Node {
         let quiet = self.cfg.params.t_want_min_ms;
         let store = &self.store;
         self.pushed_on_ctrl.retain(|id| store.is_known(id));
+        // What one control window carries: a root always, and the collection manifests new in it
+        // as far as they fit. With 7 kB pieces a collection manifest ran to many frames, its push
+        // took a window a minute for twelve minutes, and its source, counting it delivered, no
+        // longer offered it in its own cell, where it would have taken four (FEASIBILITY.md §23).
+        let symbols = |s: &ShortId| -> u32 { (0..self.store.entry(s).map(|e| e.known_blocks()).unwrap_or(0)).map(|b| self.store.block_k(s, b).unwrap_or(0) as u32).sum() };
+        let frame_ms = self.carriers[self.ctrl].p.airtime_ms(SYMBOL_SIZE + 32).max(1) as u32;
+        let budget = match self.ctrl_window_from(now) {
+            Some((start, end)) => ((end - start) as u32 / frame_ms).max(1),
+            None => u32::MAX,
+        };
         let mut objects: Vec<ShortId> = Vec::new();
         for r in roots {
             if self.pushed_on_ctrl.contains(r) || !self.store.has_complete(r) {
                 continue;
             }
             objects.push(*r);
+            let mut used = symbols(r);
             if let Some(index) = self.roots.get(r) {
-                objects.extend(index.collections.iter().filter(|c| c.changed).map(|c| c.manifest.id.short()).filter(|s| self.store.has_complete(s)));
+                for s in index.collections.iter().filter(|c| c.changed).map(|c| c.manifest.id.short()).filter(|s| self.store.has_complete(s)) {
+                    let k = symbols(&s);
+                    if used + k <= budget {
+                        used += k;
+                        objects.push(s);
+                    }
+                }
             }
         }
         for id in objects {
@@ -2300,14 +2376,20 @@ impl Node {
                 sets.push(WantSet { set, grant, phase });
             }
         }
-        for (id, _, _) in &want {
+        for (id, grant, _) in &want {
             self.progress.entry(*id).or_default().last_want = now;
+            if !grant.is_none() {
+                self.told.insert(*id);
+            }
         }
         for w in &sets {
             let list = self.pieces.get(&w.set.manifest).cloned().unwrap_or_default();
             for k in w.set.pieces() {
                 if let Some(id) = list.get(k as usize) {
                     self.progress.entry(*id).or_default().last_want = now;
+                    if !w.grant.is_none() {
+                        self.told.insert(*id);
+                    }
                 }
             }
         }
@@ -2463,6 +2545,8 @@ impl Node {
             }
             keep
         });
+        let grants = &self.grants;
+        self.told.retain(|id| grants.contains_key(id));
         let wants = &self.wants;
         self.repair_phases.retain(|id, (_, t)| {
             let p = progress.get(id).copied().unwrap_or_default();
@@ -2781,6 +2865,28 @@ impl Node {
             }
         };
         let airtime = self.carriers[i].p.airtime_ms(bytes.len());
+        // One radio, two carriers: control-carrier frames go in the control window, whole, and
+        // a bulk carrier on the same radio keeps out of it.
+        if let Some((start, end)) = self.ctrl_window_from(now) {
+            let wait = if i == self.ctrl {
+                if now < start || now + airtime as Millis > end.max(start + airtime as Millis) {
+                    Some(if now < start { start } else { self.ctrl_window_from(end).map(|w| w.0).unwrap_or(end) })
+                } else {
+                    None
+                }
+            } else if self.shares_ctrl_radio(i) && (now >= start || now + airtime as Millis > start) {
+                Some(end)
+            } else {
+                None
+            };
+            if let Some(t) = wait {
+                self.carriers[i].hold(class, t);
+                if class == Class::Content {
+                    self.stats.defer_ms[1] += t.saturating_sub(now);
+                }
+                return;
+            }
+        }
         // Content travels in its announcer's slot: our own colouring for the carousel, the
         // target announcer's (from its beacons) for an upload.
         let content_colour = match (&cand, self.carriers[i].upload.as_ref()) {
@@ -2809,7 +2915,7 @@ impl Node {
             // uploaders that cannot hear each other never overlap there.
             let divides = self.divides_listening_time(i);
             if let (Cand::Upload(..), Some(u), true) = (&cand, self.carriers[i].upload.as_ref(), divides) {
-                let announced = self.neighbors.get(&u.to).map(|n| n.upload_phases).unwrap_or(1).max(1) as u64;
+                let announced = self.phases_of(u.to).max(1) as u64;
                 let phase = u.phase as u64;
                 let phases = announced.max(phase + 1);
                 if phases > 1 {
@@ -2830,7 +2936,7 @@ impl Node {
             }
             // Nor in a phase that another announcer we hear gave someone else.
             if let (Cand::Upload(..), Some(u), true) = (&cand, self.carriers[i].upload.as_ref(), divides) {
-                let announced = self.neighbors.get(&u.to).map(|n| n.upload_phases).unwrap_or(1).max(1) as u64;
+                let announced = self.phases_of(u.to).max(1) as u64;
                 let own = (u.phase as u64, announced.max(u.phase as u64 + 1));
                 if let Some(t) = self.foreign_phase_wait(i, u.to, own, now, airtime as Millis) {
                     self.stats.foreign_phase_wait_ms += t.saturating_sub(now);
@@ -3464,6 +3570,8 @@ impl Node {
         let now = self.now;
         for s in ids {
             self.grants.insert(s, (h, now, phase));
+            // Named with the root they follow (§4).
+            self.told.insert(s);
             self.stats.grants_given += 1;
             self.stats.follow_ups_granted += 1;
         }
@@ -3627,6 +3735,7 @@ impl Node {
                 let phase = self.phase_for(g.node);
                 if let (true, true, false, Some(phase)) = (offering, self.wants.contains(h), self.grants.contains_key(h), phase) {
                     self.grants.insert(*h, (g.node, now, phase));
+                    self.told.remove(h);
                     // A root manifest comes with what its holder listed with it (§4).
                     if self.store.entry(h).map(|e| e.kind() == ContentType::Manifest).unwrap_or(false) {
                         self.root_follow_ups.insert(*h, (g.node, g.have.clone()));
@@ -3948,7 +4057,13 @@ impl Node {
         if n.node == self.cfg.id {
             return;
         }
-        self.touch(n.node, rssi);
+        let me = self.cfg.id;
+        let nb = self.touch(n.node, rssi);
+        // An announcer's NACK reserves the phase it names for that repair (§4): the count of its
+        // phases has grown, as with a grant, before its next beacon says so.
+        if nb.announcer == n.node && n.answerer != me && !n.answerer.is_none() {
+            nb.granted_phases |= 1 << (n.phase & PHASE_MASK);
+        }
         if !self.store.has_complete(&n.object) {
             return;
         }

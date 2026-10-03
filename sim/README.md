@@ -42,8 +42,11 @@ rural cells). `--verbose` prints role changes; `--out` writes the full report as
 
 Not modelled yet: terrain, buildings, antenna patterns, GFSK versus LoRa co-channel interference
 across carriers, clock drift, packet error rate below the sensitivity cliff, multiple bulk
-carriers per node. A node hears its control carrier and its bulk carrier at once, as if it had a
-radio for each; an SX1262 has one, and must divide its listening between LoRa and GFSK.
+carriers per node, the few hundred microseconds a radio takes to change between LoRa and GFSK.
+A node whose bulk carrier is GFSK or LoRa hears its control carrier only in the control window
+and its bulk carrier only outside it, as one SX1262 would (PROTOCOL.md §3); an ESP-NOW or IP
+bulk carrier is another radio. Frames that reach a node tuned to its other carrier count as
+"not listening" in the report.
 
 ## Output
 
@@ -91,11 +94,12 @@ chosen against (`docs/ABUSE.md`, item 5).
   is not the same world as `--seed 6`: the ensemble keeps the positions of its first seed.
 - `MESHCAST_TRACE_GRANTS=1` writes one line per event to stderr: `GA` open ask, `GT` grant, `GH`
   grant heard by its holder, `OF` offer, `UP` upload frame sent, `UO` upload frame received by
-  its announcer, `UC` upload frame collided there (with the other frame and its sender; the line
-  does not name the object), `UH` upload frame lost because its announcer was sending, `BO`
-  other symbol of an object an announcer wants, `MA` manifest announcement, `OC` object
-  completed, `OX` an offer reaching (`ok`) or not reaching (`col` collided, with the interferer;
-  `hd` the announcer was sending) an announcer that wants what it offers, and at the end
+  its announcer, `UC` upload frame collided there (with the other frame and its sender, and the
+  phase count each uploader believed against the announcer's; the line does not name the
+  object), `UH` upload frame lost because its announcer was sending, `BO` other symbol of an
+  object an announcer wants, `MA` manifest announcement, `OC` object completed, `OX` an offer
+  reaching (`ok`) or not reaching (`col` collided, with the interferer; `hd` the announcer was
+  sending) an announcer that wants what it offers, and at the end
   `MISSING` for every object a follower lacks (with the announcers it hears and who listed the
   object, to tell whether an excursion or a named repair was possible) and `NOLEN` for every
   want whose length the wanter does not know.
@@ -107,7 +111,9 @@ chosen against (`docs/ABUSE.md`, item 5).
 - `MESHCAST_TRACE_ANNOUNCE=1` prints every manifest announcement and who heard it.
 - `MESHCAST_T_EXCURSION_MIN=40` overrides `T_excursion` for an experiment, and
   `MESHCAST_BACKOFF_MAX_ATTEMPT=4` the number of times the random backoff after a busy channel
-  doubles.
+  doubles. `MESHCAST_CTRL_WINDOW_MS=4000 MESHCAST_CTRL_PERIOD_MS=60000` set the
+  control window (a window of 0 turns it off: a node then hears both carriers at once), and
+  `MESHCAST_NO_CTRL_RX=1` makes nobody receive on a separate control carrier at all.
 - `MESHCAST_TRACE_BUSY=0` counts, for node index 0, which transmitter kept its channel busy each
   time it wanted to send, with the first and last minute; the cell report prints it as
   `busy blame`. It found an announcer whose carousel chained frames without a gap

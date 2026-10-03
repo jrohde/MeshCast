@@ -106,6 +106,8 @@ pub struct Engine {
     lose: Vec<(usize, meshcast_core::ids::ShortId, u16)>,
     /// MESHCAST_TRACE_RX=<node>: every symbol that node receives.
     trace_rx: Option<usize>,
+    /// Experiment: nobody receives on a separate control carrier (MESHCAST_NO_CTRL_RX).
+    no_ctrl_rx: bool,
     /// Diagnostic (MESHCAST_TRACE_BUSY=<node index>): who keeps that node's channel busy when it
     /// wants to send, per transmitter, with the minute of the first and last time.
     trace_busy: Option<usize>,
@@ -164,7 +166,7 @@ impl Engine {
         }
         let mut metrics = Metrics::default();
         metrics.per_node_bulk = vec![(0, 0); n];
-        let mut e = Engine { attackers: Vec::new(), attack_ids: Vec::new(), rendition_ids: Default::default(), nodes, phys, heap: BinaryHeap::new(), seq: 0, tx_seq: 0, loss, reach, recent: HashMap::new(), txs: HashMap::new(), now: 0, metrics, verbose: false, trace_grants: std::env::var("MESHCAST_TRACE_GRANTS").is_ok(), trace_busy: std::env::var("MESHCAST_TRACE_BUSY").ok().and_then(|v| v.parse().ok()), busy_from: VecDeque::new(), busy_blame: Default::default(), next_sample: 0, lose: Vec::new(), trace_rx: std::env::var("MESHCAST_TRACE_RX").ok().and_then(|v| v.parse().ok()) };
+        let mut e = Engine { attackers: Vec::new(), attack_ids: Vec::new(), rendition_ids: Default::default(), nodes, phys, heap: BinaryHeap::new(), seq: 0, tx_seq: 0, loss, reach, recent: HashMap::new(), txs: HashMap::new(), now: 0, metrics, verbose: false, trace_grants: std::env::var("MESHCAST_TRACE_GRANTS").is_ok(), trace_busy: std::env::var("MESHCAST_TRACE_BUSY").ok().and_then(|v| v.parse().ok()), busy_from: VecDeque::new(), busy_blame: Default::default(), next_sample: 0, lose: Vec::new(), trace_rx: std::env::var("MESHCAST_TRACE_RX").ok().and_then(|v| v.parse().ok()), no_ctrl_rx: std::env::var("MESHCAST_NO_CTRL_RX").is_ok() };
         for i in 0..n {
             e.schedule_wake(i, 1);
         }
@@ -677,6 +679,9 @@ impl Engine {
             if !self.nodes[j].alive {
                 continue;
             }
+            if self.no_ctrl_rx && self.phys[tx.carrier].kind == meshcast_core::frame::CarrierKind::LoraControl && self.phys.len() > 1 {
+                continue;
+            }
             if let Some(Frame::Bulk(b)) = &decoded {
                 if let Some(k) = self.lose.iter().position(|(n, o, e)| *n == j && *o == b.object && *e == b.esi) {
                     self.lose.remove(k);
@@ -688,6 +693,14 @@ impl Engine {
                 (Some(Frame::Bulk(b)), true) => Some(format!("RX {} {} from {} {:?} esi={} before={:?}", now, j, tx.from, b.object, b.esi, self.nodes[j].node.object_progress(&b.object))),
                 _ => None,
             };
+            // One radio: a receiver hears a carrier only while it listens there, the whole frame.
+            if !self.nodes[j].node.listening(tx.carrier, tx.start) || !self.nodes[j].node.listening(tx.carrier, tx.end.saturating_sub(1)) {
+                self.metrics.frames_not_listening += 1;
+                if let Some(t) = &rx_trace {
+                    eprintln!("{} lost=not-listening", t);
+                }
+                continue;
+            }
             // Half-duplex: receiver was transmitting on this carrier during the frame.
             let hd = self.nodes[j].own_tx[tx.carrier].iter().any(|&(s, e)| s < tx.end && e > tx.start);
             if hd {
@@ -734,7 +747,7 @@ impl Engine {
                     self.metrics.upload_interferer[k] += 1;
                     if self.trace_grants {
                         let o = other.map(|t| (t.start, t.end, t.frame_type)).unwrap_or((0, 0, FrameType::Bulk));
-                        eprintln!("UC {} {} {} kind={} tx=[{},{}] other=[{},{}] {:?} from {}", now, tx.from, j, k, tx.start, tx.end, o.0, o.1, o.2, worst_from);
+                        eprintln!("UC {} {} {} kind={} tx=[{},{}] other=[{},{}] {:?} from {} phases(believed,actual)={:?}/{:?}", now, tx.from, j, k, tx.start, tx.end, o.0, o.1, o.2, worst_from, tx.upload_phase_view, other.map(|t| t.upload_phase_view));
                     }
                     if k == 0 {
                         let views = [tx.upload_phase_view, other.map(|t| t.upload_phase_view).unwrap_or((0, 0, false))];

@@ -45,13 +45,14 @@ flowchart LR
         E1 -->|hash, sign manifest| L1[(Local library)]
     end
 
-    L1 -->|GOSSIP HAVE + MANIFEST_ANNOUNCE on LoRa| A
+    L1 -->|GOSSIP HAVE on the bulk carrier| A
+    L1 -->|MANIFEST_ANNOUNCE and roots on LoRa, in the control window| A2
     L1 -->|BULK upload on GFSK / ESP-NOW| A
     L1 -.->|HTTPS if internet| S[(Station on the internet, other town)]
     S -.->|HTTPS| A
 
     subgraph Cell["Cell (neighbourhood / district)"]
-        A[Announcer: carousel on GFSK / ESP-NOW, BEACON on LoRa]
+        A[Announcer: BEACON and carousel on GFSK / ESP-NOW]
         A -->|BULK symbols, broadcast| F1[Follower]
         A -->|BULK symbols, broadcast| F2[Follower]
         A -->|BULK symbols, broadcast| B[Bridge node hears two announcers]

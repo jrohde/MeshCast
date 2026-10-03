@@ -243,15 +243,18 @@ Rules:
   and every honest announcement made a follower evict the window it held while it waited for the
   new manifest (FEASIBILITY.md §13).
 - **A root travels with its announcement.** The first time a node announces a root manifest it
-  holds on the long-range control carrier, the root's symbols follow there, and those of the
-  collection manifests the root flags as changed, unless someone has sent them there in the last
-  `T_want_min`. Every node in range that follows the channel, and every announcer, keeps them; a
-  source that pushed its own counts it as delivered, since it sent the true bytes to everyone in
-  range, its announcer included. Symbols heard on the control carrier say nothing about a node's
-  own cell: they end no offer of its own and prove nothing about its announcer (§5.2). A root is
-  a symbol or two; without this it crossed a cell only through a node that followed its channel,
-  and where interests are sparse many cells never had it and their listeners never learned of the
-  bulletin it named (FEASIBILITY.md §21, §22).
+  holds on the long-range control carrier, the root's symbols follow there, in the control window
+  (§3), and those of the collection manifests the root flags as changed as far as they fit in the
+  same window, unless someone has sent them there in the last `T_want_min`; a larger collection
+  manifest goes the usual way, through its cell. Pushed whole, a collection manifest of 120 pieces
+  arrived after twelve minutes instead of four (FEASIBILITY.md §23). Every node in range that
+  follows the channel, and every announcer, keeps them; a source that pushed its own counts it as
+  delivered, since it sent the true bytes to everyone in range, its announcer included. Symbols
+  heard on the control carrier say nothing about a node's own cell: they end no offer of its own
+  and prove nothing about its announcer (§5.2). A root is a symbol or two; without this it crossed
+  a cell only through a node that followed its channel, and where interests are sparse many cells
+  never had it and their listeners never learned of the bulletin it named (FEASIBILITY.md §21,
+  §22).
 - **Followers keep their announcer current.** An announcer announces its manifests in ascending
   channel order: all of them in one frame, flagged as its whole list, when they fit, otherwise
   from a cursor that steps one entry less than a frame holds, so that any two neighbours on the
@@ -297,7 +300,23 @@ running the election over a long-range control carrier elects announcers that mo
 "followers" cannot receive content from. So everything cell-local (beacons, election, gossip,
 NACK) travels on the bulk carrier, where a control frame costs milliseconds; the LoRa control
 carrier only carries `MANIFEST_ANNOUNCE`, so that neighbouring cells learn which channels exist
-and fetch them through bridge nodes.
+and fetch them through bridge nodes, and the roots those announce (§2).
+
+**One radio, two carriers: the control window.** An SX1262 receives LoRa or (G)FSK, never both at
+once: the packet type changes only in standby, and the other mode's settings are lost (SX1261/2
+datasheet rev 1.2, §13.4.2); the change itself is quick, standby to receive taking 83 µs
+(Table 8-2). A node whose bulk carrier is GFSK on that radio therefore listens on the control
+carrier only in a common window, `T_ctrl_window` (draft 4 s) every `T_ctrl_period` (60 s),
+beginning halfway through each period of the shared time base the hop sequences already use (§5.3,
+§6), and on the bulk carrier the rest of the time. Every node sends control-carrier frames only in
+the window, each one whole, and nothing on a bulk carrier that shares the radio during it; a bulk
+carrier on another radio (ESP-NOW, IP) is not held. A station whose concentrator receives LoRa
+and FSK at once (SX1302) follows the same rule, so that the ones that cannot hear it miss nothing.
+Short windows were tried as well: 1 to 4 s every 30 or 60 s delivered within a few percent of a
+node with two receivers, and a node that never listened on the control carrier fell far behind,
+so the draft takes the longest window, which leaves the most room for clocks that disagree and for
+busy windows (FEASIBILITY.md §23). In band O, where the draft puts the control carrier on the
+frequency of the bulk carrier, the window also keeps the two from overlapping.
 
 ### 3.1 `BEACON`
 
@@ -569,9 +588,13 @@ Listening time is divided among those who speak, not among the objects they brin
 uploads one object at a time, so a phase per object left most of each cycle idle while a holder
 with several objects waited its turn in each of them, and an hour of music in 3-minute pieces
 reached a band L neighbourhood in 70 minutes instead of 27 (FEASIBILITY.md §13). The announcer's beacon carries `upload_phases`, K = the highest
-phase in use + 1. A phase lasts `T_upload_phase` (1 s, one permitted transmission under polite
-access), and an uploader transmits only in its own phase of each cycle of K phases; an uploader
-that has not yet heard the new K after a grant uses its phase + 1. One running upload has K = 1
+phase in use + 1, counting only grants it has named in a WANT and repairs it has reserved: a grant
+that did not fit its asks yet raised K in the beacon while its holder kept silent, and the
+uploaders that had heard the beacon and one that had not divided the time differently and
+collided frame for frame (FEASIBILITY.md §23). A phase lasts `T_upload_phase` (1 s, one permitted
+transmission under polite access), and an uploader transmits only in its own phase of each cycle
+of K phases. An uploader that has not yet heard the new K takes the larger of its phase + 1 and
+the highest phase it heard its announcer grant in a WANT or reserve in a NACK, + 1. One running upload has K = 1
 and all the time. K follows the number of running uploads, so as many may run at once as before,
 and none overlaps another. When a grant ends its phase is free for the next one, and K shrinks
 once the highest phase is released. An announcer grants at most 16 uploads at once; a holder
@@ -1092,6 +1115,7 @@ arrives a few minutes later than it otherwise would. That is the entire user-vis
 | own share | `min(regulatory, occ_high_own / (announcers heard + 1))` | content pacing ceiling; derived, not configured |
 | `T_dwell` | 20 s | hop dwell on frequency-agile carriers |
 | `meet_every` | 5 | every fifth dwell is on the common control-plane sequence |
+| `T_ctrl_period`, `T_ctrl_window` | 60 s, 4 s | the control window: control-carrier frames go only in it, and a radio shared with a sub-GHz bulk carrier listens on the control carrier only then; it begins halfway through each period (§3) |
 | `T_offer` | 0–3 s | random delay before a holder offers on an open ask |
 | repair wait | `T_suppress × (neighbours heard better than the asker) / (all neighbours)` + jitter | ungranted NACK answer |
 | `T_upload_phase` | 1 s | one upload phase: uploaders to one announcer take turns this long each |

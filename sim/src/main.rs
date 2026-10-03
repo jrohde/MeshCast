@@ -227,6 +227,7 @@ struct Report {
     frames_delivered: u64,
     frames_collided: u64,
     frames_half_duplex: u64,
+    frames_not_listening: u64,
     bulk_sent: u64,
     bulk_delivered: u64,
     announcers_final: Vec<u32>,
@@ -884,6 +885,7 @@ fn simulate(spec: ScenarioSpec, verbose: bool, failover: Option<(f64, f64)>) -> 
         frames_delivered: m.frames_delivered,
         frames_collided: m.frames_collided,
         frames_half_duplex: m.frames_half_duplex,
+        frames_not_listening: m.frames_not_listening,
         bulk_sent: m.bulk_sent,
         bulk_delivered: m.bulk_delivered,
         announcers_final,
@@ -951,6 +953,10 @@ fn params() -> Params {
     }
     if let Some(a) = std::env::var("MESHCAST_BACKOFF_MAX_ATTEMPT").ok().and_then(|v| v.parse::<u8>().ok()) {
         p.fatsoen.backoff_max_attempt = a;
+    }
+    if let (Some(w), Some(per)) = (std::env::var("MESHCAST_CTRL_WINDOW_MS").ok().and_then(|v| v.parse::<u64>().ok()), std::env::var("MESHCAST_CTRL_PERIOD_MS").ok().and_then(|v| v.parse::<u64>().ok())) {
+        p.t_ctrl_window_ms = w;
+        p.t_ctrl_period_ms = per;
     }
     p
 }
@@ -1040,8 +1046,8 @@ fn print_report(r: &Report, wall: std::time::Duration) {
     for p in &r.phys {
         println!("  carrier: {}", p.name);
     }
-    println!("\nframes: sent {} delivered {} collided {} half-duplex {} | bulk sent {} delivered {}",
-        r.frames_sent, r.frames_delivered, r.frames_collided, r.frames_half_duplex, r.bulk_sent, r.bulk_delivered);
+    println!("\nframes: sent {} delivered {} collided {} half-duplex {} not listening {} | bulk sent {} delivered {}",
+        r.frames_sent, r.frames_delivered, r.frames_collided, r.frames_half_duplex, r.frames_not_listening, r.bulk_sent, r.bulk_delivered);
     println!("announcers at end: {:?} ({} role events, {} challenges, {} excursions)", r.announcers_final, r.role_events, r.challenges, r.excursions);
     println!("collisions by frame type [beacon,bulk,gossip,announce,nack]: meeting dwell {:?}, other {:?}", &r.collided_meeting[1..], &r.collided_other[1..]);
     if !r.busy_blame.is_empty() {

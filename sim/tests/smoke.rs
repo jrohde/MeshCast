@@ -1065,3 +1065,23 @@ fn an_upload_to_another_cell_outlives_a_change_of_announcer() {
     assert!(src.announcer_of(1) == louder && before != louder, "the source should now follow the louder announcer");
     assert_eq!(src.uploads(1), vec![(p[0], other)], "the upload to another cell should go on");
 }
+
+#[test]
+fn the_control_carrier_is_heard_in_its_window() {
+    // A dongle's one SX1262 receives LoRa or GFSK, never both at once, so it listens on the LoRa
+    // control carrier only in the control window, and every control-carrier frame goes in it
+    // (PROTOCOL.md §3). A node 5 km from a source, beyond the reach of band O GFSK, still gets
+    // the source's root and its collection manifest on LoRa, inside a window, and no frame
+    // reaches a node tuned to its other carrier.
+    let s = spec(BulkPreset::GfskO, vec![(0.0, 0.0), (5000.0, 0.0)], vec![0], vec![], 1.0);
+    let p = Params::default();
+    let (period, window) = (p.t_ctrl_period_ms, p.t_ctrl_window_ms);
+    assert!(window > 0 && period > window, "the control window should be on by default");
+    let mut b = build(&s, p);
+    let manifest = b.sources[0].collections[0].as_object().0.id.short();
+    b.engine.run(3_600_000, 600_000);
+    let t = *b.engine.metrics.completions.get(&(1, manifest)).expect("the far node should get the collection manifest on LoRa");
+    let start = period / 2;
+    assert!((start..=start + window).contains(&(t % period)), "it arrived {} ms into a period, outside the window", t % period);
+    assert_eq!(b.engine.metrics.frames_not_listening, 0, "a frame went out while its receivers listened elsewhere");
+}
