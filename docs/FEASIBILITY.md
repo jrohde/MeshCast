@@ -2699,3 +2699,20 @@ first hour per world instead of 4 to 88, with the slowest bulletin earlier (42.6
 - **Stations with a concentrator.** An SX1302 receives LoRa and FSK at once and could listen to
   the control carrier always, relaying into its cell what it hears; the window rule keeps it
   silent there outside the window for the sake of the others.
+
+### 23.5 What still limits sparse interests
+
+With roots everywhere and one radio, sparse band L delivers 88.5 % of bulletins within their
+period (eight worlds). The oracle of §21 on this code (branch `experiment/backbone-oracle-2`, not
+merged), handing every announcer each minute, for free, what an announcer it can hear holds: only
+what its own followers asked for, 88.9 %; everything it wants, 91.4 %. So even a perfect
+backbone between announcers adds three points.
+
+At the end of three worlds, the bulletins a follower still lacked were 46, 58 and 41; for 44,
+49 and 37 of them the follower heard other nodes on the bulk carrier, but none of them held the
+bulletin, and for none was the follower out of everyone's reach. The bulletin had stopped
+where nobody follows its channel: a node carries what it listens to, and an announcer what its
+cell asks for or what it can fetch from a holder in reach. What remains is a choice of principle,
+not a tuning: nodes that relay channels they do not follow (option 2 of §21), at the cost of
+carrying what nobody near them listens to, or pieces on the long-range control carrier, at four
+seconds a minute.
