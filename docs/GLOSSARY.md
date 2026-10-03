@@ -95,6 +95,10 @@ role; see Capability.
 manifest's short id and a bitmap over its list. Used where a round of asking is dear
 (PROTOCOL.md §3.3, §4).
 
+**Shared time.** The milliseconds every node keeps in step with its announcer, and announcers with
+each other, for schedules: hop dwells, the rendezvous, slots, upload phases, the control window,
+playback. Each node's own clock only counts durations (PROTOCOL.md §6).
+
 **Short id.** The first 8 bytes of an object's BLAKE3 hash, used on the air.
 
 **SNAC.** The neural audio codec MeshCast uses: the 24 kHz model for speech, the 32 kHz model for

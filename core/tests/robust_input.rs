@@ -106,7 +106,7 @@ fn seeds() -> Vec<(&'static str, Vec<u8>)> {
             caps: CAP_MAINS,
             next_ms: 60000,
             round: 7,
-            utc: 1_700_000_000,
+            time: 1_700_000_000_000,
             time_quality: 2,
             colour: 3,
             colours: 5,

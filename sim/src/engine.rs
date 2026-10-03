@@ -16,6 +16,36 @@ use crate::radio::{distance_loss, Phy, Propagation};
 const OCC_WINDOW_MS: Millis = 10_000;
 const MAX_AIRTIME_MS: Millis = 5_000;
 
+/// A node's own clock: what it reads at global time `g`. Its crystal runs `ppm` parts per million
+/// fast or slow, and it started counting at `epoch`: a node without GPS, phone or a battery-backed
+/// clock knows no time but its own (PROTOCOL.md §6). The default is the simulator's own time.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Clock {
+    pub epoch: i64,
+    pub ppm: i32,
+}
+
+impl Clock {
+    pub fn local(&self, g: Millis) -> Millis {
+        let g = g as i128;
+        (self.epoch as i128 + g + g * self.ppm as i128 / 1_000_000).max(0) as Millis
+    }
+
+    /// The first global time at which this clock reads `l` or more.
+    pub fn global(&self, l: Millis) -> Millis {
+        if l == Millis::MAX {
+            return Millis::MAX;
+        }
+        let rate = 1_000_000 + self.ppm as i128;
+        let x = l as i128 - self.epoch as i128;
+        let mut g = ((x * 1_000_000 + rate - 1).div_euclid(rate)).max(0) as Millis;
+        while self.local(g) < l {
+            g += 1;
+        }
+        g
+    }
+}
+
 pub struct SimNode {
     pub node: Node,
     pub alive: bool,
@@ -29,6 +59,7 @@ pub struct SimNode {
     /// Others' energy above CCA threshold per carrier (start, end), recent only.
     busy: Vec<VecDeque<(Millis, Millis)>>,
     pub airtime_ms: Vec<u64>,
+    pub clock: Clock,
 }
 
 struct Transmission {
@@ -108,6 +139,8 @@ pub struct Engine {
     trace_rx: Option<usize>,
     /// Experiment: nobody receives on a separate control carrier (MESHCAST_NO_CTRL_RX).
     no_ctrl_rx: bool,
+    /// A node switched on again starts its clock from zero.
+    clock_restart: bool,
     /// Diagnostic (MESHCAST_TRACE_BUSY=<node index>): who keeps that node's channel busy when it
     /// wants to send, per transmitter, with the minute of the first and last time.
     trace_busy: Option<usize>,
@@ -118,6 +151,13 @@ pub struct Engine {
 
 impl Engine {
     pub fn new(configs: Vec<NodeConfig>, positions: Vec<(f64, f64)>, phys: Vec<Phy>, prop: Propagation, seed: u64) -> Self {
+        let n = configs.len();
+        Self::with_clocks(configs, positions, phys, prop, seed, vec![Clock::default(); n], false)
+    }
+
+    /// With a clock per node; `restart`: a node switched on again counts from zero, as one
+    /// without a battery-backed clock does.
+    pub fn with_clocks(configs: Vec<NodeConfig>, positions: Vec<(f64, f64)>, phys: Vec<Phy>, prop: Propagation, seed: u64, clocks: Vec<Clock>, restart: bool) -> Self {
         let n = configs.len();
         let mut rng = Rng::new(seed ^ 0xC0FFEE);
         // Symmetric shadowing per link.
@@ -149,9 +189,10 @@ impl Engine {
             }
         }
         let mut nodes = Vec::with_capacity(n);
-        for cfg in configs.into_iter() {
+        for (k, cfg) in configs.into_iter().enumerate() {
             let mains = cfg.mains;
-            let node = Node::new(cfg, 0);
+            let clock = clocks[k];
+            let node = Node::new(cfg, clock.local(0));
             nodes.push(SimNode {
                 node,
                 alive: true,
@@ -162,11 +203,12 @@ impl Engine {
                 own_tx: vec![VecDeque::new(); phys.len()],
                 busy: vec![VecDeque::new(); phys.len()],
                 airtime_ms: vec![0; phys.len()],
+                clock,
             });
         }
         let mut metrics = Metrics::default();
         metrics.per_node_bulk = vec![(0, 0); n];
-        let mut e = Engine { attackers: Vec::new(), attack_ids: Vec::new(), rendition_ids: Default::default(), nodes, phys, heap: BinaryHeap::new(), seq: 0, tx_seq: 0, loss, reach, recent: HashMap::new(), txs: HashMap::new(), now: 0, metrics, verbose: false, trace_grants: std::env::var("MESHCAST_TRACE_GRANTS").is_ok(), trace_busy: std::env::var("MESHCAST_TRACE_BUSY").ok().and_then(|v| v.parse().ok()), busy_from: VecDeque::new(), busy_blame: Default::default(), next_sample: 0, lose: Vec::new(), trace_rx: std::env::var("MESHCAST_TRACE_RX").ok().and_then(|v| v.parse().ok()), no_ctrl_rx: std::env::var("MESHCAST_NO_CTRL_RX").is_ok() };
+        let mut e = Engine { attackers: Vec::new(), attack_ids: Vec::new(), rendition_ids: Default::default(), nodes, phys, heap: BinaryHeap::new(), seq: 0, tx_seq: 0, loss, reach, recent: HashMap::new(), txs: HashMap::new(), now: 0, metrics, verbose: false, trace_grants: std::env::var("MESHCAST_TRACE_GRANTS").is_ok(), trace_busy: std::env::var("MESHCAST_TRACE_BUSY").ok().and_then(|v| v.parse().ok()), busy_from: VecDeque::new(), busy_blame: Default::default(), next_sample: 0, lose: Vec::new(), trace_rx: std::env::var("MESHCAST_TRACE_RX").ok().and_then(|v| v.parse().ok()), no_ctrl_rx: std::env::var("MESHCAST_NO_CTRL_RX").is_ok(), clock_restart: restart };
         for i in 0..n {
             e.schedule_wake(i, 1);
         }
@@ -215,7 +257,7 @@ impl Engine {
         let id = if spoof { NodeId(0x8000_0000 | (self.tx_seq as u32 & 0x7fff_ffff)) } else { node.id() };
         let g = meshcast_core::frame::Gossip { node: id, announcer, announcer_colour: 0, announcer_colours: 1, heard: Vec::new(), have: Vec::new(), have_sets: Vec::new(), want, sets: Vec::new() };
         let bytes = Frame::Gossip(g).encode();
-        let channel = node.channel(carrier, now);
+        let channel = node.channel(carrier, self.nodes[i].clock.local(now));
         let airtime = self.phys[carrier].to_core().airtime_ms(bytes.len());
         self.metrics.attack_frames += 1;
         self.tx_start(i, carrier, channel, bytes, airtime, FrameType::Gossip, None);
@@ -229,7 +271,7 @@ impl Engine {
         let carrier = self.phys.iter().position(|p| p.kind != meshcast_core::frame::CarrierKind::LoraControl).unwrap_or(0);
         // Where every follower listens: in the rendezvous on a hopping carrier, at any time on one
         // that does not hop.
-        if self.phys[carrier].channels.len() > 1 && !self.nodes[i].node.in_meeting(carrier, now) {
+        if self.phys[carrier].channels.len() > 1 && !self.nodes[i].node.in_meeting(carrier, self.nodes[i].clock.local(now)) {
             return;
         }
         let a = &mut self.attackers[k];
@@ -243,9 +285,9 @@ impl Engine {
         }
         let node = &self.nodes[i].node;
         let id = node.id();
-        let channel = node.channel(carrier, now);
+        let channel = node.channel(carrier, self.nodes[i].clock.local(now));
         let kind = self.phys[carrier].kind;
-        let b = meshcast_core::frame::Beacon { carrier: kind, announcer: id, score, caps, next_ms: 60_000, round: 0, utc: 0, time_quality: 0, colour: 0, colours: 1, upload_phases: 1, occupancy: [0; 4] };
+        let b = meshcast_core::frame::Beacon { carrier: kind, announcer: id, score, caps, next_ms: 60_000, round: 0, time: node.shared_time(self.nodes[i].clock.local(now)), time_quality: 1, colour: 0, colours: 1, upload_phases: 1, occupancy: [0; 4] };
         let g = meshcast_core::frame::Gossip { node: id, announcer: id, announcer_colour: 0, announcer_colours: 1, heard: Vec::new(), have, have_sets: Vec::new(), want: Vec::new(), sets: Vec::new() };
         let (f, ft) = if beacon { (Frame::Beacon(b), FrameType::Beacon) } else { (Frame::Gossip(g), FrameType::Gossip) };
         let bytes = f.encode();
@@ -276,7 +318,9 @@ impl Engine {
         self.nodes[node].next_wake = Millis::MAX;
         if alive {
             let now = self.now;
-            self.nodes[node].node.reboot(now);
+            self.restart_clock(node);
+            let local = self.nodes[node].clock.local(now);
+            self.nodes[node].node.reboot(local);
             self.schedule_wake(node, now + 1);
         }
     }
@@ -286,8 +330,32 @@ impl Engine {
         let now = self.now;
         self.nodes[node].alive = true;
         self.nodes[node].next_wake = Millis::MAX;
-        self.nodes[node].node.factory_reset(now);
+        self.restart_clock(node);
+        let local = self.nodes[node].clock.local(now);
+        self.nodes[node].node.factory_reset(local);
         self.schedule_wake(node, now + 1);
+    }
+
+    /// Diagnostic: how far apart the live nodes' shared times are now (ms), how many nodes are
+    /// within one second of the median, and how many live nodes there are (PROTOCOL.md §6).
+    pub fn shared_time_spread(&self) -> (u64, usize, usize) {
+        let mut t: Vec<u64> = self.nodes.iter().filter(|n| n.alive).map(|n| n.node.shared_time(n.clock.local(self.now))).collect();
+        if t.is_empty() {
+            return (0, 0, 0);
+        }
+        t.sort_unstable();
+        let med = t[t.len() / 2];
+        let near = t.iter().filter(|x| x.abs_diff(med) <= 1_000).count();
+        (t[t.len() - 1] - t[0], near, t.len())
+    }
+
+    /// A node switched on again without a battery-backed clock counts from zero.
+    fn restart_clock(&mut self, i: usize) {
+        if self.clock_restart {
+            let now = self.now as i128;
+            let c = &mut self.nodes[i].clock;
+            c.epoch = -((now + now * c.ppm as i128 / 1_000_000) as i64);
+        }
     }
 
     fn schedule_wake(&mut self, i: usize, t: Millis) {
@@ -302,7 +370,7 @@ impl Engine {
     }
 
     fn reschedule(&mut self, i: usize) {
-        let d = self.nodes[i].node.next_deadline();
+        let d = self.nodes[i].clock.global(self.nodes[i].node.next_deadline());
         self.schedule_wake(i, d);
     }
 
@@ -333,7 +401,9 @@ impl Engine {
                     self.nodes[i].alive = true;
                     self.nodes[i].next_wake = Millis::MAX;
                     let now = self.now;
-                    self.nodes[i].node.reboot(now);
+                    self.restart_clock(i);
+                    let local = self.nodes[i].clock.local(now);
+                    self.nodes[i].node.reboot(local);
                     self.schedule_wake(i, self.now + 1);
                 }
             }
@@ -433,7 +503,8 @@ impl Engine {
             let occ = self.occupancy(i, c, now);
             states.push(CarrierState { busy, occupancy_permille: occ });
         }
-        let actions = self.nodes[i].node.handle(Event::Tick { now, carriers: &states });
+        let local = self.nodes[i].clock.local(now);
+        let actions = self.nodes[i].node.handle(Event::Tick { now: local, carriers: &states });
         self.apply(i, actions);
         self.reschedule(i);
     }
@@ -444,13 +515,16 @@ impl Engine {
                 Action::Tx { .. } if self.nodes[i].mute => {}
                 Action::Role { .. } if self.nodes[i].mute => {}
                 Action::Tx { carrier, channel, bytes, airtime_ms, class: _, frame_type, upload_to } => self.tx_start(i, carrier, channel, bytes, airtime_ms, frame_type, upload_to),
-                Action::ObjectComplete { id, now } => {
+                Action::ObjectComplete { id, now: _ } => {
+                    // When it happened, by the simulator's clock: the node's own may differ.
+                    let now = self.now;
                     if self.trace_grants {
                         eprintln!("OC {} {} {:?} {:?} role={:?}", now, i, id, self.nodes[i].node.object_kind(&id), self.nodes[i].node.role(self.phys.len() - 1));
                     }
                     self.metrics.completions.entry((i, id)).or_insert(now);
                 }
-                Action::Role { carrier, role, announcer, now } => {
+                Action::Role { carrier, role, announcer, now: _ } => {
+                    let now = self.now;
                     let nid = self.nodes[i].node.id();
                     if self.verbose {
                         eprintln!("[{:>9.2} h] node {} carrier {} -> {:?} (announcer {:?})", now as f64 / 3.6e6, i, carrier, role, announcer);
@@ -507,7 +581,7 @@ impl Engine {
                         Some(5)
                     } else if rx.map(|r| r < self.phys[carrier].sensitivity_dbm).unwrap_or(true) {
                         Some(4)
-                    } else if self.nodes[j].node.channel(carrier, now) != channel {
+                    } else if self.nodes[j].node.channel(carrier, self.nodes[j].clock.local(now)) != channel {
                         let target_ann = self.nodes[j].node.role(carrier) == meshcast_core::node::Role::Announcer;
                         let believed = self.nodes[from].node.colour_believed(carrier, t);
                         let actual = self.nodes[j].node.own_colour();
@@ -542,7 +616,7 @@ impl Engine {
             };
             match decoded {
                 Ok(Frame::Gossip(g)) if g.announcer == g.node => {
-                    let meet = self.nodes[from].node.in_meeting(carrier, now);
+                    let meet = self.nodes[from].node.in_meeting(carrier, self.nodes[from].clock.local(now));
                     eprintln!("GS {} {} want={} have={} meet={} wants_len={}", now, from, g.want.len(), g.have.len(), meet, self.nodes[from].node.wants_len());
                     if std::env::var("MESHCAST_TRACE_WANTS_AT_ROLE").ok().and_then(|v| v.parse::<usize>().ok()) == Some(from) {
                         eprintln!("WANTS-AT-ASK {:.3} h node {}: {}", now as f64 / 3_600_000.0, from, self.nodes[from].node.want_report());
@@ -556,11 +630,11 @@ impl Engine {
                     }
                 }
                 Ok(Frame::ManifestAnnounce(m)) => {
-                    eprintln!("MA {} {} n={} meet={} ch={}", now, from, m.entries.len(), self.nodes[from].node.in_meeting(carrier, now), channel);
+                    eprintln!("MA {} {} n={} meet={} ch={}", now, from, m.entries.len(), self.nodes[from].node.in_meeting(carrier, self.nodes[from].clock.local(now)), channel);
                 }
                 Ok(Frame::Gossip(g)) if !g.have.is_empty() => {
                     for o in &g.have {
-                        eprintln!("OF {} {} {:?} meet={} ch={}", now, from, o, self.nodes[from].node.in_meeting(carrier, now), channel);
+                        eprintln!("OF {} {} {:?} meet={} ch={}", now, from, o, self.nodes[from].node.in_meeting(carrier, self.nodes[from].clock.local(now)), channel);
                     }
                 }
                 Ok(Frame::Bulk(b)) if upload_to.is_none() && b.esi == 0 && self.nodes[from].node.role(carrier) == meshcast_core::node::Role::Announcer => {
@@ -581,7 +655,7 @@ impl Engine {
         }
         if std::env::var("MESHCAST_TRACE_ANNOUNCE").is_ok() {
             if let Ok(Frame::ManifestAnnounce(m)) = Frame::decode(&bytes) {
-                let heard: Vec<String> = reach.iter().filter(|(j, rx)| self.nodes[*j].alive && *rx >= phy.sensitivity_dbm && self.nodes[*j].node.channel(carrier, now) == channel).map(|(j, _)| self.nodes[*j].node.id().0.to_string()).collect();
+                let heard: Vec<String> = reach.iter().filter(|(j, rx)| self.nodes[*j].alive && *rx >= phy.sensitivity_dbm && self.nodes[*j].node.channel(carrier, self.nodes[*j].clock.local(now)) == channel).map(|(j, _)| self.nodes[*j].node.id().0.to_string()).collect();
                 println!("ANN {} {} carrier {} entries {} -> {}", now, self.nodes[from].node.id().0, carrier, m.entries.len(), heard.join(" "));
             }
         }
@@ -589,10 +663,11 @@ impl Engine {
         if trace_bcn {
             if let Ok(Frame::Beacon(b)) = Frame::decode(&bytes) {
                 let heard: Vec<String> = reach.iter().filter(|(j, rx)| self.nodes[*j].alive && *rx >= phy.sensitivity_dbm).map(|(j, rx)| {
-                    let jch = self.nodes[*j].node.channel(carrier, now);
-                    format!("{}{}:{:.0}/{}", self.nodes[*j].node.id().0, if jch == channel { "" } else { "x" }, rx, self.nodes[*j].node.score())
+                    let jch = self.nodes[*j].node.channel(carrier, self.nodes[*j].clock.local(now));
+                    let deaf = !self.nodes[*j].node.listening(carrier, self.nodes[*j].clock.local(now));
+                    format!("{}{}{}:{:.0}/{}", self.nodes[*j].node.id().0, if jch == channel { "" } else { "x" }, if deaf { "d" } else { "" }, rx, self.nodes[*j].node.score())
                 }).collect();
-                println!("BCN {} {} score {} ch {} colour {}/{} meet {} -> {}", now, self.nodes[from].node.id().0, b.score, channel, b.colour, b.colours, self.nodes[from].node.in_meeting(carrier, now), heard.join(" "));
+                println!("BCN {} {} score {} ch {} colour {}/{} meet {} -> {}", now, self.nodes[from].node.id().0, b.score, channel, b.colour, b.colours, self.nodes[from].node.in_meeting(carrier, self.nodes[from].clock.local(now)), heard.join(" "));
             }
         }
         for &(j, rx) in &reach {
@@ -600,7 +675,7 @@ impl Engine {
                 continue;
             }
             // A receiver hears only the channel it is tuned to.
-            let jch = self.nodes[j].node.channel(carrier, now);
+            let jch = self.nodes[j].node.channel(carrier, self.nodes[j].clock.local(now));
             if trace {
                 eprintln!("t={} tx from {} carrier {} ch {} {:?} -> node {} ch {} rx {:.1} dBm", now, from, carrier, channel, frame_type, j, jch, rx);
             }
@@ -634,7 +709,7 @@ impl Engine {
         for o in offered {
             if self.nodes[j].node.wants_object(o) {
                 let by = if by == usize::MAX { String::from("-") } else { by.to_string() };
-                eprintln!("OX {} {} {} {:?} {} by={} meet={}", tx.start, tx.from, j, o, outcome, by, self.nodes[j].node.in_meeting(tx.carrier, tx.start));
+                eprintln!("OX {} {} {} {:?} {} by={} meet={}", tx.start, tx.from, j, o, outcome, by, self.nodes[j].node.in_meeting(tx.carrier, self.nodes[j].clock.local(tx.start)));
             }
         }
     }
@@ -694,10 +769,18 @@ impl Engine {
                 _ => None,
             };
             // One radio: a receiver hears a carrier only while it listens there, the whole frame.
-            if !self.nodes[j].node.listening(tx.carrier, tx.start) || !self.nodes[j].node.listening(tx.carrier, tx.end.saturating_sub(1)) {
+            if !self.nodes[j].node.listening(tx.carrier, self.nodes[j].clock.local(tx.start)) || !self.nodes[j].node.listening(tx.carrier, self.nodes[j].clock.local(tx.end.saturating_sub(1))) {
                 self.metrics.frames_not_listening += 1;
                 if let Some(t) = &rx_trace {
                     eprintln!("{} lost=not-listening", t);
+                }
+                continue;
+            }
+            // A receiver on a hopping carrier retunes at the end of its dwell, frame or no frame.
+            if self.nodes[j].node.channel(tx.carrier, self.nodes[j].clock.local(tx.end.saturating_sub(1))) != tx.channel {
+                self.metrics.frames_retuned += 1;
+                if let Some(t) = &rx_trace {
+                    eprintln!("{} lost=retuned", t);
                 }
                 continue;
             }
@@ -779,7 +862,7 @@ impl Engine {
                         }
                     }
                 }
-                let meeting = (tx.start / 20_000) % 5 == 0;
+                let meeting = self.nodes[tx.from].node.in_meeting(tx.carrier, self.nodes[tx.from].clock.local(tx.start));
                 let ft = tx.frame_type as usize;
                 if meeting {
                     self.metrics.collided_meeting[ft] += 1;
@@ -831,9 +914,10 @@ impl Engine {
                     }
                 }
             }
+            let local = self.nodes[j].clock.local(now);
             let actions = match &decoded {
-                Some(f) => self.nodes[j].node.handle_frame(now, tx.carrier, f, rx.round() as i16),
-                None => self.nodes[j].node.handle(Event::Rx { now, carrier: tx.carrier, bytes: &tx.bytes, rssi_dbm: rx.round() as i16 }),
+                Some(f) => self.nodes[j].node.handle_frame(local, tx.carrier, f, rx.round() as i16),
+                None => self.nodes[j].node.handle(Event::Rx { now: local, carrier: tx.carrier, bytes: &tx.bytes, rssi_dbm: rx.round() as i16 }),
             };
             self.apply(j, actions);
             self.reschedule(j);

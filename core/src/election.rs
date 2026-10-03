@@ -310,6 +310,13 @@ impl Election {
         }
     }
 
+    /// A candidate steps up `d` later than it would.
+    pub fn delay_step_up(&mut self, d: Millis) {
+        if let State::Candidate { until } = self.state {
+            self.state = State::Candidate { until: until + d };
+        }
+    }
+
     /// Next time `tick` needs to run.
     pub fn deadline(&self) -> Millis {
         match self.state {
@@ -369,7 +376,7 @@ mod tests {
     use crate::frame::{CarrierKind, CAP_MAINS};
 
     fn beacon(from: NodeId, score: u16, caps: u8) -> Beacon {
-        Beacon { carrier: CarrierKind::GfskBulk, announcer: from, score, caps, next_ms: 60000, round: 0, utc: 0, time_quality: 0, colour: 0, colours: 1, upload_phases: 1, occupancy: [0; 4] }
+        Beacon { carrier: CarrierKind::GfskBulk, announcer: from, score, caps, next_ms: 60000, round: 0, time: 0, time_quality: 0, colour: 0, colours: 1, upload_phases: 1, occupancy: [0; 4] }
     }
 
     #[test]

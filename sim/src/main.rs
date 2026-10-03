@@ -58,6 +58,16 @@ struct Common {
     /// Print role changes as they happen.
     #[arg(long, default_value_t = false)]
     verbose: bool,
+    /// Node clocks start counting at a random time up to this many seconds apart (0: every node
+    /// reads the simulator's time). A node switched on again then counts from zero.
+    #[arg(long, default_value_t = 0)]
+    clock_epoch_s: u64,
+    /// Node clocks run up to this many parts per million fast or slow.
+    #[arg(long, default_value_t = 0)]
+    clock_ppm: u32,
+    /// Every node's clock starts at the same random time, up to --clock-epoch-s.
+    #[arg(long, default_value_t = false)]
+    clock_same: bool,
     /// Name an Opus rendition of every audio object in its manifest, at these rates in kbit/s
     /// for music and speech, e.g. "16,8" (PROTOCOL.md §1.2). Stations make them on demand.
     #[arg(long)]
@@ -103,6 +113,10 @@ struct Common {
 }
 
 impl Common {
+    fn clocks(&self) -> scenario::ClockSpec {
+        scenario::ClockSpec { epoch_s: self.clock_epoch_s, ppm: self.clock_ppm, same: self.clock_same }
+    }
+
     fn renditions(&self) -> Option<scenario::RenditionSpec> {
         let r = self.renditions.as_deref()?;
         let (m, sp) = r.split_once(',').unwrap_or_else(|| panic!("--renditions: expected music,speech kbit/s"));
@@ -228,6 +242,7 @@ struct Report {
     frames_collided: u64,
     frames_half_duplex: u64,
     frames_not_listening: u64,
+    frames_retuned: u64,
     bulk_sent: u64,
     bulk_delivered: u64,
     announcers_final: Vec<u32>,
@@ -490,6 +505,7 @@ fn main() {
                 sources_at: Some(vec![0]),
                 renditions: common.renditions(),
                 attack: common.attack(),
+                clocks: common.clocks(),
                 collections: common.collections(),
             };
             run(spec, &common, None);
@@ -515,6 +531,7 @@ fn main() {
                 sources_at: None,
                 renditions: common.renditions(),
                 attack: common.attack(),
+                clocks: common.clocks(),
                 collections: common.collections(),
             };
             run(spec, &common, None);
@@ -551,6 +568,7 @@ fn main() {
                 sources_at: Some(vec![0]),
                 renditions: common.renditions(),
                 attack: common.attack(),
+                clocks: common.clocks(),
                 collections: common.collections(),
             };
             run(spec, &common, None);
@@ -579,6 +597,7 @@ fn main() {
                 sources_at: None,
                 renditions: common.renditions(),
                 attack: common.attack(),
+                clocks: common.clocks(),
                 collections: common.collections(),
             };
             run(spec, &common, Some((kill_at_h, revive_at_h)));
@@ -676,7 +695,38 @@ fn simulate(spec: ScenarioSpec, verbose: bool, failover: Option<(f64, f64)>) -> 
         fo_killed = Some((victim, kill_h, revive_h));
     }
     let t0 = std::time::Instant::now();
-    built.engine.run(until, 600_000);
+    if std::env::var("MESHCAST_TRACE_TIME").is_ok() {
+        let mut t = 0;
+        while t < until {
+            let step: Millis = std::env::var("MESHCAST_TRACE_TIME_STEP_S").ok().and_then(|v| v.parse::<u64>().ok()).map(|s| s * 1000).unwrap_or(300_000);
+            t = (t + step).min(until);
+            built.engine.run(t, 600_000);
+            let (spread, near, n) = built.engine.shared_time_spread();
+            let steps: u64 = built.engine.nodes.iter().map(|n| n.node.stats.time_steps).sum();
+            let roles = built.engine.metrics.role_events.len();
+            let anns = built.engine.nodes.iter().filter(|n| n.alive && n.node.is_announcing()).count();
+            let blind = built.engine.nodes.iter().filter(|n| n.alive && !n.node.knows_time()).count();
+            let exc: u64 = built.engine.nodes.iter().map(|n| n.node.stats.excursions).sum();
+            eprintln!("TIME {:.2} h spread {} ms, {} of {} within 1 s of the median, steps {}, role events {}, announcers {}, without time {}, excursions {}", t as f64 / 3.6e6, spread, near, n, steps, roles, anns, blind, exc);
+            if std::env::var("MESHCAST_TRACE_TIME").as_deref() == Ok("2") {
+                let e = &built.engine;
+                let mut v: Vec<(u64, usize)> = e.nodes.iter().enumerate().filter(|(_, n)| n.alive).map(|(i, n)| (n.node.shared_time(n.clock.local(e.now)), i)).collect();
+                v.sort_unstable();
+                let med = v[v.len() / 2].0;
+                for (t, i) in v.iter().filter(|(t, _)| t.abs_diff(med) > 10) {
+                    let n = &e.nodes[*i];
+                    eprintln!("  off node {} by {} ms role {:?} ann {:?} ppm {}", i, *t as i64 - med as i64, n.node.role(1.min(e.phys.len() - 1)), n.node.announcer_of(1.min(e.phys.len() - 1)), n.clock.ppm);
+                }
+            }
+        }
+    } else {
+        built.engine.run(until, 600_000);
+    }
+    if std::env::var("MESHCAST_TRACE_TIME").is_ok() {
+        for (i, n) in built.engine.nodes.iter().enumerate().filter(|(_, n)| n.mains) {
+            eprintln!("STATION node {} role {:?} follows {:?} score {}", i, n.node.role(1.min(built.engine.phys.len() - 1)), n.node.announcer_of(1.min(built.engine.phys.len() - 1)), n.node.score());
+        }
+    }
     let wall = t0.elapsed();
     let eng = &built.engine;
     let m = &eng.metrics;
@@ -886,6 +936,7 @@ fn simulate(spec: ScenarioSpec, verbose: bool, failover: Option<(f64, f64)>) -> 
         frames_collided: m.frames_collided,
         frames_half_duplex: m.frames_half_duplex,
         frames_not_listening: m.frames_not_listening,
+        frames_retuned: m.frames_retuned,
         bulk_sent: m.bulk_sent,
         bulk_delivered: m.bulk_delivered,
         announcers_final,
@@ -904,7 +955,7 @@ fn simulate(spec: ScenarioSpec, verbose: bool, failover: Option<(f64, f64)>) -> 
     };
     if std::env::var("MESHCAST_DEBUG_WANTS").is_ok() {
         for (i, n) in eng.nodes.iter().enumerate() {
-            if n.node.role(bulk_c) == meshcast_core::node::Role::Announcer || i < 3 {
+            if n.node.role(bulk_c) == meshcast_core::node::Role::Announcer || i < 3 || std::env::var("MESHCAST_DEBUG_NODE").ok().and_then(|v| v.parse::<usize>().ok()) == Some(i) {
                 println!("WANTS node {i} (id {}): {}", n.node.id().0, n.node.want_report());
             }
             let missing: Vec<String> = built.tracks.iter().filter(|(id, t)| t.followers.contains(&i) && !m.completions.contains_key(&(i, **id))).map(|(id, _)| format!("{:?}:{}", id, if n.node.holds(id) { "held" } else { "absent" })).collect();
@@ -957,6 +1008,18 @@ fn params() -> Params {
     if let (Some(w), Some(per)) = (std::env::var("MESHCAST_CTRL_WINDOW_MS").ok().and_then(|v| v.parse::<u64>().ok()), std::env::var("MESHCAST_CTRL_PERIOD_MS").ok().and_then(|v| v.parse::<u64>().ok())) {
         p.t_ctrl_window_ms = w;
         p.t_ctrl_period_ms = per;
+    }
+    if let Some(g) = std::env::var("MESHCAST_T_GUARD_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
+        p.t_guard_ms = g;
+    }
+    if let Some(w) = std::env::var("MESHCAST_T_WATCH_MIN").ok().and_then(|v| v.parse::<u64>().ok()) {
+        p.t_watch_ms = w * 60_000;
+    }
+    if let Some(s) = std::env::var("MESHCAST_T_TELL_S").ok().and_then(|v| v.parse::<u64>().ok()) {
+        p.t_tell_ms = s * 1000;
+    }
+    if let Some(s) = std::env::var("MESHCAST_T_ACQUIRE_S").ok().and_then(|v| v.parse::<u64>().ok()) {
+        p.t_acquire_ms = s * 1000;
     }
     p
 }
@@ -1046,8 +1109,8 @@ fn print_report(r: &Report, wall: std::time::Duration) {
     for p in &r.phys {
         println!("  carrier: {}", p.name);
     }
-    println!("\nframes: sent {} delivered {} collided {} half-duplex {} not listening {} | bulk sent {} delivered {}",
-        r.frames_sent, r.frames_delivered, r.frames_collided, r.frames_half_duplex, r.frames_not_listening, r.bulk_sent, r.bulk_delivered);
+    println!("\nframes: sent {} delivered {} collided {} half-duplex {} not listening {} retuned {} | bulk sent {} delivered {}",
+        r.frames_sent, r.frames_delivered, r.frames_collided, r.frames_half_duplex, r.frames_not_listening, r.frames_retuned, r.bulk_sent, r.bulk_delivered);
     println!("announcers at end: {:?} ({} role events, {} challenges, {} excursions)", r.announcers_final, r.role_events, r.challenges, r.excursions);
     println!("collisions by frame type [beacon,bulk,gossip,announce,nack]: meeting dwell {:?}, other {:?}", &r.collided_meeting[1..], &r.collided_other[1..]);
     if !r.busy_blame.is_empty() {
@@ -1131,6 +1194,7 @@ fn run_dynamics(nodes: usize, area_km2: f64, stations: usize, channels: usize, f
         sources_at: None,
         renditions: common.renditions(),
         attack: common.attack(),
+        clocks: common.clocks(),
         // One series per channel, followed whole: a bulletin is a new episode of it.
         collections: scenario::CollectionSpec { per_source: 1, follow: 0, cover_kb: common.cover_kb, singles: false },
     };

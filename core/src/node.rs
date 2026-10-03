@@ -159,6 +159,11 @@ pub struct Stats {
     pub left_never_served: u64,
     pub left_unanswered_listed: u64,
     pub left_lacking: u64,
+    /// Steps forward of our shared time (§6), and the largest, in ms.
+    pub time_steps: u64,
+    pub time_step_max_ms: u64,
+    /// Whole control periods an announcer listened through for other times (§6).
+    pub time_watches: u64,
     /// Want sets sent, and the pieces they asked for.
     pub want_sets: u64,
     pub want_set_pieces: u64,
@@ -457,6 +462,25 @@ pub struct Node {
     probing: Option<(ShortId, Millis)>,
     /// The announcer that answered our proof NACK since we began to follow it, and when (§5.2).
     proven: Option<(NodeId, Millis)>,
+    /// What the latest shared time heard adds to our own clock (PROTOCOL.md §6).
+    mesh_off: i64,
+    /// As announcer, a later shared time heard from another announcer, to take at our next beacon.
+    time_pending: Millis,
+    /// Whether we have heard a shared time since we were switched on, and when we were (§6).
+    time_heard: bool,
+    booted_at: Millis,
+    /// When we next tell the time on the control carrier, as announcer.
+    next_ctrl_beacon: Millis,
+    /// As announcer that started the shared time itself: since when, and whether our first time
+    /// beacon on the control carrier is still to go, outside the window (§6).
+    time_source_since: Millis,
+    ctrl_at_once: bool,
+    /// We started the shared time ourselves and have taken nobody's since (§6).
+    self_started: bool,
+    /// As announcer: when we next listen on the control carrier through a whole period, and until
+    /// when we do (§6).
+    next_watch: Millis,
+    watch_until: Millis,
     /// The symbol our last proof NACK asked for, and when its answer came (§5.2).
     probe_symbol: Option<(ShortId, u16)>,
     probe_answered: Option<(ShortId, Millis)>,
@@ -570,6 +594,16 @@ impl Node {
             last_probe: 0,
             probing: None,
             proven: None,
+            mesh_off: 0,
+            time_pending: 0,
+            time_heard: false,
+            booted_at: now,
+            next_ctrl_beacon: 0,
+            time_source_since: 0,
+            ctrl_at_once: false,
+            self_started: false,
+            next_watch: 0,
+            watch_until: 0,
             probe_symbol: None,
             probe_answered: None,
             ask_rest_at: None,
@@ -648,6 +682,7 @@ impl Node {
         if n == 1 {
             return 0;
         }
+        let now = self.mesh(now);
         let dwell = self.cfg.params.dwell_ms.max(1);
         let di = now / dwell;
         if self.is_meeting_dwell(di) {
@@ -738,16 +773,17 @@ impl Node {
             return None;
         }
         let slot = self.cfg.params.t_slot_ms.max(1);
-        let cur = (now / slot) % k;
+        let m = self.mesh(now);
+        let cur = (m / slot) % k;
         if cur == mine {
             None
         } else {
-            let cycle_start = (now / (slot * k)) * slot * k;
+            let cycle_start = (m / (slot * k)) * slot * k;
             let mut t = cycle_start + mine * slot;
-            if t <= now {
+            if t <= m {
                 t += slot * k;
             }
-            Some(t)
+            Some(self.local_at(t))
         }
     }
 
@@ -766,7 +802,7 @@ impl Node {
     /// every cell is on one channel and can hear every other. A carrier that does not hop has no
     /// rendezvous, because its cells never leave each other's channel in the first place.
     fn in_rendezvous(&self, carrier: usize, now: Millis) -> bool {
-        self.hops(carrier) && self.is_meeting_dwell(now / self.cfg.params.dwell_ms.max(1))
+        self.hops(carrier) && self.is_meeting_dwell(self.dwell_index(now))
     }
 
     /// On a hopping carrier a candidate steps up in a meeting dwell, where every candidate is on
@@ -775,17 +811,18 @@ impl Node {
     fn step_up_time(&mut self, now: Millis, score: u16, caps: u8) -> Millis {
         let dwell = self.cfg.params.dwell_ms.max(1);
         let off = dwell / 5 + step_up_order(caps, score, dwell * 7 / 10, &mut self.rng);
-        let this = if self.is_meeting_dwell(now / dwell) { (now / dwell) * dwell + off } else { 0 };
-        if this > now { this } else { self.next_meeting_start(now) + off }
+        let m = self.mesh(now);
+        let this = if self.is_meeting_dwell(m / dwell) { (m / dwell) * dwell + off } else { 0 };
+        if this > m { self.local_at(this) } else { self.next_meeting_start(now) + off }
     }
 
     /// Start of the next meeting dwell strictly after `now`.
     fn next_meeting_start(&self, now: Millis) -> Millis {
         let dwell = self.cfg.params.dwell_ms.max(1);
         let m = self.cfg.params.meet_every.max(1);
-        let di = now / dwell + 1;
+        let di = self.mesh(now) / dwell + 1;
         let next = di.div_ceil(m) * m;
-        next * dwell
+        self.local_at(next * dwell)
     }
 
 
@@ -1198,10 +1235,60 @@ impl Node {
         scheduled
     }
 
-    /// Local time of a schedule entry's UTC start. The simulation's epoch is UTC 0; a real node
-    /// adds the offset from its time source (§6).
+    /// Local time of a schedule entry's UTC start, by the shared time (§6). The simulation's epoch
+    /// is UTC 0.
     fn slot_ms(&self, utc_s: u64) -> Millis {
-        utc_s.saturating_mul(1000) as Millis
+        self.local_at(utc_s.saturating_mul(1000))
+    }
+
+    /// Our shared time (PROTOCOL.md §6) at local time `t`: our own clock plus what the latest time
+    /// heard has added to it. Schedules run on it: hops, the rendezvous, slots, the control window,
+    /// playback. Durations run on our own clock.
+    fn mesh(&self, t: Millis) -> Millis {
+        (t as i64).saturating_add(self.mesh_off).max(0) as Millis
+    }
+
+    /// Local time at which our shared time reads `m`.
+    fn local_at(&self, m: Millis) -> Millis {
+        (m as i64).saturating_sub(self.mesh_off).max(0) as Millis
+    }
+
+    fn step_time(&mut self, step: i64) {
+        self.mesh_off = self.mesh_off.saturating_add(step);
+        self.stats.time_steps += 1;
+        self.stats.time_step_max_ms = self.stats.time_step_max_ms.max(step.unsigned_abs());
+        // A candidate whose time moved steps up in the next rendezvous of the time it now keeps,
+        // where the other candidates and announcers are: planned by the old one, it stepped up
+        // where nobody heard it, and in a town started without a shared time three cells too many
+        // stayed side by side (§6).
+        let cell = self.cell_carrier();
+        if step.unsigned_abs() > self.cfg.params.t_guard_ms && self.hops(cell) && self.role(cell) == Role::Candidate {
+            let (score, caps) = (self.score, self.caps());
+            let at = self.step_up_time(self.now, score, caps);
+            if let Some(e) = self.carriers[cell].election.as_mut() {
+                e.step_up_at(at);
+            }
+        }
+    }
+
+    /// Diagnostic: whether we have a shared time, heard or our own as its source (§6).
+    pub fn knows_time(&self) -> bool {
+        !self.acquiring()
+    }
+
+    /// Diagnostic: our shared time at local time `t`.
+    pub fn shared_time(&self, t: Millis) -> Millis {
+        self.mesh(t)
+    }
+
+    fn dwell_index(&self, now: Millis) -> u64 {
+        self.mesh(now) / self.cfg.params.dwell_ms.max(1)
+    }
+
+    /// Local time of the first dwell start after `now`.
+    fn next_dwell_start(&self, now: Millis) -> Millis {
+        let dwell = self.cfg.params.dwell_ms.max(1);
+        self.local_at((self.mesh(now) / dwell + 1) * dwell)
     }
 
     /// Renditions whose slot has come near are wanted now.
@@ -1491,8 +1578,7 @@ impl Node {
                 }
                 if c.p.channels.len() > 1 {
                     // A hopping announcer beacons at every dwell start.
-                    let dwell = self.cfg.params.dwell_ms.max(1);
-                    d = d.min((self.now / dwell + 1) * dwell);
+                    d = d.min(self.next_dwell_start(self.now));
                 }
             }
         }
@@ -1576,8 +1662,50 @@ impl Node {
                         e.step_up_at(at);
                     }
                 }
+                // Who has heard no time yet steps up only after a whole control period of listening
+                // for one: it would lead a cell by a clock nobody else keeps (§6). Its turn among the
+                // candidates is kept: held to the same moment, all stepped up at once.
+                let gate = self.booted_at + self.cfg.params.t_acquire_ms;
+                if t == Transition::BecameCandidate && self.acquiring() && now < gate {
+                    if self.hops(i) {
+                        let at = self.step_up_time(gate, score, caps);
+                        if let Some(e) = self.carriers[i].election.as_mut() {
+                            e.step_up_at(at);
+                        }
+                    } else if let Some(e) = self.carriers[i].election.as_mut() {
+                        e.delay_step_up(gate - now);
+                    }
+                }
                 self.on_transition(i, t, out);
             }
+        }
+        if self.is_announcing() && self.acquiring() && now >= self.time_source_since + self.cfg.params.t_acquire_ms {
+            // Nobody told us an earlier start: our time is the shared time here.
+            self.time_heard = true;
+        }
+        // The time of announcers whose window we do not share (§6): once every `T_watch` an announcer
+        // listens on the control carrier through a whole period, and takes a later time it hears there.
+        // One that started the time itself watches sooner, two periods after it began and then twice
+        // as long each time, up to `T_watch`: where several started at once, out of each other's
+        // reach, their groups otherwise kept apart until the first watch, half an hour later.
+        if self.is_announcing() && self.time_on_ctrl() && self.cfg.params.t_watch_ms > 0 {
+            let p = self.cfg.params.t_ctrl_period_ms;
+            let every = |me: &Self| if me.self_started { (2 * (now - me.time_source_since)).clamp(2 * p, me.cfg.params.t_watch_ms) } else { me.cfg.params.t_watch_ms };
+            if self.next_watch == 0 {
+                self.next_watch = if self.self_started { now + 2 * p } else { now + 1 + self.rng.below(self.cfg.params.t_watch_ms) };
+            }
+            if now >= self.next_watch {
+                self.watch_until = now + p;
+                self.next_watch = now + every(self);
+                self.stats.time_watches += 1;
+            }
+        }
+        // The time for those who have none (§6): an announcer tells it on the control carrier, where a
+        // node that knows no time can hear it, once every control period.
+        if self.is_announcing() && self.time_on_ctrl() && (self.cfg.params.t_tell_ms > 0 || self.ctrl_at_once) && now >= self.next_ctrl_beacon {
+            self.next_ctrl_beacon = now + self.cfg.params.t_tell_ms.max(self.cfg.params.t_ctrl_period_ms);
+            let b = self.make_beacon(self.cell_carrier());
+            self.enqueue(self.ctrl, Frame::Beacon(b));
         }
         if now >= self.next_beacon {
             self.next_beacon = now + self.cfg.params.election.t_beacon_ms;
@@ -1591,7 +1719,7 @@ impl Node {
         // Frequency-agile carriers: a beacon at every dwell start so scanners can find us.
         for i in 0..self.carriers.len() {
             if self.hops(i) && self.role(i) == Role::Announcer {
-                let d = now / self.cfg.params.dwell_ms.max(1);
+                let d = self.dwell_index(now);
                 if self.carriers[i].last_dwell != d {
                     self.carriers[i].last_dwell = d;
                     if !self.carriers[i].queue.iter().any(|p| p.frame_type == FrameType::Beacon) {
@@ -1670,6 +1798,18 @@ impl Node {
                 out.push(Action::Role { carrier, role: Role::Candidate, announcer: NodeId::NONE, now: self.now });
             }
             Transition::BecameAnnouncer => {
+                self.next_watch = 0;
+                if carrier == self.cell_carrier() {
+                    // An announcer that has heard no time is a source of it: it tells it at once on the
+                    // control carrier, where whoever else knows none is listening, and listens there
+                    // itself for `T_acquire` for one that started before it (§6).
+                    if self.acquiring() {
+                        self.time_source_since = self.now;
+                        self.self_started = true;
+                        self.ctrl_at_once = true;
+                    }
+                    self.next_ctrl_beacon = self.now;
+                }
                 let mut car = Carousel::new(self.carousel_params());
                 for a in self.manifests.values().filter_map(|i| i.adopted) {
                     car.add_manifest(a.short, true);
@@ -1899,6 +2039,19 @@ impl Node {
         }
     }
 
+    /// Hold carrier `i` until `t` for what `cand` is. A queued frame of any class waits on the
+    /// pace, which is what tells when the queue is next due: held on the content hold, a queued
+    /// root symbol waiting for the control window was polled every millisecond until the window
+    /// came, most of a minute.
+    fn hold_for(&mut self, i: usize, cand: &Cand, class: Class, t: Millis) {
+        let c = &mut self.carriers[i];
+        if matches!(cand, Cand::Queue(_)) {
+            c.pace_until = c.pace_until.max(t);
+        } else {
+            c.hold(class, t);
+        }
+    }
+
     /// Whether our announcer has named an uploader for `id` within the last `window`. If it has
     /// not, our cell cannot get the object: a named repair waits `T_grant` for that (a grant
     /// lapses after as long without a symbol), an excursion, which costs more, `T_excursion`.
@@ -1925,8 +2078,8 @@ impl Node {
             caps: self.caps(),
             next_ms: self.cfg.params.election.t_beacon_ms.min(65535) as u16,
             round,
-            utc: 0,
-            time_quality: 0,
+            time: self.mesh(self.now) + self.time_pending,
+            time_quality: 1,
             colour: self.my_colour(),
             colours: self.colours(),
             upload_phases: if self.divides_listening_time(carrier) { self.upload_phase_count() } else { 1 },
@@ -1990,7 +2143,7 @@ impl Node {
 
     /// When an upload of ours to `to`, in phase `own.0` of `own.1`, must wait: in a slot that an
     /// announcer we hear, listening on the channel we send on, gave a holder other than us
-    /// (§4). Phases are slots of one grid, `T_upload_phase` wide from time zero, so the slot
+    /// (§4). Phases are slots of one grid on the shared time (§6), `T_upload_phase` wide, so the slot
     /// says which phase every announcer is in. A holder that cannot hear that other holder
     /// collided with it there: in a band O world, 15 % of the upload frames at their own
     /// announcer were lost to uploads to the next cell's. Returns the start of the next slot;
@@ -2010,16 +2163,17 @@ impl Node {
             return None;
         }
         let (phase, phases) = own;
-        let taken = |s: u64, b: &NodeId, k: u64, m: u16| m & (1 << (s % k)) != 0 && (b.is_none() || self.channel_for(i, *b, s * width) == self.channel_for(i, home, s * width));
-        let slot = now / width;
+        let taken = |s: u64, b: &NodeId, k: u64, m: u16| m & (1 << (s % k)) != 0 && (b.is_none() || self.channel_for(i, *b, self.local_at(s * width)) == self.channel_for(i, home, self.local_at(s * width)));
+        let mesh = self.mesh(now);
+        let slot = mesh / width;
         // Courtesy, not silence: we yield only where it leaves us a turn.
         let free = (slot..slot + 64).any(|s| (phases <= 1 || s % phases == phase) && !others.iter().any(|(_, k, m)| taken(s, &NodeId::NONE, *k, *m)));
         if !free {
             return None;
         }
-        let last = (now + airtime.max(1) - 1) / width;
+        let last = (mesh + airtime.max(1) - 1) / width;
         if (slot..=last).any(|s| others.iter().any(|(b, k, m)| taken(s, b, *k, *m))) {
-            Some((slot + 1) * width)
+            Some(self.local_at((slot + 1) * width))
         } else {
             None
         }
@@ -2034,8 +2188,9 @@ impl Node {
         if w == 0 || p <= w || self.ctrl == self.cell_carrier() {
             return None;
         }
-        let pos = (t + p - (p / 2) % p) % p;
-        let start = if pos < w { t - pos } else { t + (p - pos) };
+        let m = self.mesh(t);
+        let pos = (m + p - (p / 2) % p) % p;
+        let start = self.local_at(if pos < w { m - pos } else { m + (p - pos) });
         Some((start, start + w))
     }
 
@@ -2049,6 +2204,9 @@ impl Node {
     /// Whether we receive on `carrier` at `t`: outside the control window our one radio listens
     /// on the bulk carrier, inside it on the control carrier.
     pub fn listening(&self, carrier: usize, t: Millis) -> bool {
+        if self.acquiring() || t < self.watch_until {
+            return carrier == self.ctrl || !self.shares_ctrl_radio(carrier);
+        }
         match self.ctrl_window_from(t) {
             None => true,
             Some((start, _)) => {
@@ -2062,6 +2220,20 @@ impl Node {
                 }
             }
         }
+    }
+
+    /// Whether the shared time travels on the control carrier (§6): where the cell's carrier hops,
+    /// a node that knows no time finds nobody on it. On a carrier that does not hop it hears any
+    /// announcer's beacon, and with it the time, without knowing it first.
+    fn time_on_ctrl(&self) -> bool {
+        self.ctrl != self.cell_carrier() && self.cfg.params.t_ctrl_window_ms > 0 && self.cfg.params.t_acquire_ms > 0 && self.hops(self.cell_carrier())
+    }
+
+    /// Whether we listen for a shared time on the control carrier (§6): we know none yet, and are
+    /// no time source ourselves. A node that knows none cannot find a hopping carrier's schedule,
+    /// nor the window; every announcer tells the time there once a period.
+    fn acquiring(&self) -> bool {
+        !self.time_heard && self.time_on_ctrl()
     }
 
     /// The lowest phase no grant or repair uses, if any is left.
@@ -2114,6 +2286,16 @@ impl Node {
         }
         self.neighbors.clear();
         self.next_beacon = now + p.election.t_beacon_ms;
+        // Our shared time was in memory, and our clock may have started again (§6).
+        self.mesh_off = 0;
+        self.time_pending = 0;
+        self.time_heard = false;
+        self.booted_at = now;
+        self.next_ctrl_beacon = 0;
+        self.ctrl_at_once = false;
+        self.next_watch = 0;
+        self.self_started = false;
+        self.watch_until = 0;
         self.next_gossip = now + p.t_gossip_ms;
         self.next_score = now;
         self.want_refresh = true;
@@ -2281,7 +2463,7 @@ impl Node {
         let symbols = |s: &ShortId| -> u32 { (0..self.store.entry(s).map(|e| e.known_blocks()).unwrap_or(0)).map(|b| self.store.block_k(s, b).unwrap_or(0) as u32).sum() };
         let frame_ms = self.carriers[self.ctrl].p.airtime_ms(SYMBOL_SIZE + 32).max(1) as u32;
         let budget = match self.ctrl_window_from(now) {
-            Some((start, end)) => ((end - start) as u32 / frame_ms).max(1),
+            Some((start, end)) => ((end - start).saturating_sub(2 * self.cfg.params.t_guard_ms) as u32 / frame_ms).max(1),
             None => u32::MAX,
         };
         let mut objects: Vec<ShortId> = Vec::new();
@@ -2700,6 +2882,12 @@ impl Node {
         // short of a repair, in a band O town where the announcer had long stopped passing it.
         let since = |id: &ShortId| self.progress.get(id).map(|p| p.last_progress.max(p.last_want)).unwrap_or(0);
         let stalled = self.wants.iter().all(|id| now >= since(id) + stall) || self.wants.iter().any(|id| now >= since(id) + 2 * stall);
+        // Nor does a trickle count as coming: what has not completed `T_excursion` after we last
+        // asked for it is asked for again, whatever arrived meanwhile. A follower that missed an
+        // announcer's first pass of four objects took one or two symbols from each repetition,
+        // never stalled, never asked again, and held 64 of 113 after six hours (FEASIBILITY.md §26).
+        let trickle = self.wants.iter().any(|id| self.progress.get(id).map(|p| now >= p.last_want.max(p.wanted_at) + self.cfg.params.t_excursion_ms).unwrap_or(false));
+        let stalled = stalled || trickle;
         let full = (self.want_refresh || stalled) && now >= self.next_want_at;
         // What a manifest we just adopted names is the rest of an ask already made, not a new
         // one: asked for soon, at most every `T_gossip_min`, and only what was never asked for.
@@ -2910,7 +3098,15 @@ impl Node {
         let (bytes, class, frame_type) = match &cand {
             Cand::Queue(j) => {
                 let p = &self.carriers[i].queue[*j];
-                (p.bytes.clone(), p.class, p.frame_type)
+                let mut bytes = p.bytes.clone();
+                // A beacon tells the shared time as it goes on the air (§6), not as it was queued.
+                if p.frame_type == FrameType::Beacon {
+                    if let Ok(Frame::Beacon(mut b)) = Frame::decode(&bytes) {
+                        b.time = self.mesh(now) + self.time_pending;
+                        bytes = Frame::Beacon(b).encode();
+                    }
+                }
+                (bytes, p.class, p.frame_type)
             }
             Cand::Carousel(Item::Beacon { .. }) => {
                 let b = self.make_beacon(i);
@@ -2948,24 +3144,47 @@ impl Node {
         };
         let airtime = self.carriers[i].p.airtime_ms(bytes.len());
         // One radio, two carriers: control-carrier frames go in the control window, whole, and
-        // a bulk carrier on the same radio keeps out of it.
+        // a bulk carrier on the same radio keeps out of it. Both keep `T_guard` from its edges: a
+        // receiver whose clock is a few milliseconds off may still be in it, or not yet (§6).
+        // Sent at the very end of the window, the beacons of a band O announcer met followers a
+        // millisecond behind it still listening on the control carrier, and they left it.
+        let g = self.cfg.params.t_guard_ms;
+        let air = airtime as Millis;
         if let Some((start, end)) = self.ctrl_window_from(now) {
             let wait = if i == self.ctrl {
-                if now < start || now + airtime as Millis > end.max(start + airtime as Millis) {
-                    Some(if now < start { start } else { self.ctrl_window_from(end).map(|w| w.0).unwrap_or(end) })
+                if !(self.ctrl_at_once && frame_type == FrameType::Beacon) && (now < start + g || now + air + g > end.max(start + g + air + g)) {
+                    Some(if now < start + g { start + g } else { self.ctrl_window_from(end).map(|w| w.0).unwrap_or(end) + g })
                 } else {
                     None
                 }
-            } else if self.shares_ctrl_radio(i) && (now >= start || now + airtime as Millis > start) {
-                Some(end)
+            } else if self.shares_ctrl_radio(i) {
+                // The window we may still be in the guard after, or the next one.
+                let (s, e) = self.ctrl_window_from(now.saturating_sub(g)).unwrap_or((start, end));
+                if now + air + g > s && now < e + g {
+                    Some(e + g)
+                } else {
+                    None
+                }
             } else {
                 None
             };
             if let Some(t) = wait {
-                self.carriers[i].hold(class, t);
+                self.hold_for(i, &cand, class, t);
                 if class == Class::Content {
                     self.stats.defer_ms[1] += t.saturating_sub(now);
                 }
+                return;
+            }
+        }
+        // On a hopping carrier a frame goes whole inside a dwell, `T_guard` from its edges, where a
+        // receiver whose clock is a little off retunes (§6).
+        if self.hops(i) {
+            let dwell = self.cfg.params.dwell_ms.max(1);
+            let ds = self.local_at(self.dwell_index(now) * dwell);
+            let de = self.next_dwell_start(now);
+            let wait = if now < ds + g { Some(ds + g) } else if now + air + g > de { Some(de + g) } else { None };
+            if let Some(t) = wait {
+                self.hold_for(i, &cand, class, t);
                 return;
             }
         }
@@ -2981,9 +3200,8 @@ impl Node {
         if let Some((colour, colours)) = content_colour {
             // The meeting dwell is control plane only, and announcers that share a channel take
             // turns: content (carousel or upload) runs only in its announcer's slot.
-            let dwell = self.cfg.params.dwell_ms.max(1);
             if self.in_rendezvous(i, now) {
-                let t = (now / dwell + 1) * dwell;
+                let t = self.next_dwell_start(now);
                 self.stats.defer_ms[0] += t - now;
                 self.carriers[i].content_until = t;
                 return;
@@ -3003,17 +3221,18 @@ impl Node {
                 if phases > 1 {
                     let width = self.cfg.params.t_upload_phase_ms.max(1);
                     let cycle = width * phases;
-                    let start = (now / cycle) * cycle + phase * width;
-                    let from = if now >= start + width { start + cycle } else { start };
-                    if now < from || now + airtime as Millis > from + width {
-                        let t = if now < from { from } else { from + cycle };
+                    let mesh = self.mesh(now);
+                    let start = (mesh / cycle) * cycle + phase * width;
+                    let from = if mesh >= start + width { start + cycle } else { start };
+                    if mesh < from || mesh + airtime as Millis > from + width {
+                        let t = self.local_at(if mesh < from { from } else { from + cycle });
                         self.stats.defer_ms[1] += t.saturating_sub(now);
                         self.carriers[i].content_until = t;
                         return;
                     }
                     // A cycle's budget is spent inside the phase.
                     self.carriers[i].fatsoen.set_burst_at_least(cycle as u32);
-                    phase_end = Some(from + width);
+                    phase_end = Some(self.local_at(from + width));
                 }
             }
             // Nor in a phase that another announcer we hear gave someone else.
@@ -3031,10 +3250,11 @@ impl Node {
             if let (Cand::Carousel(Item::Symbol { .. }), true) = (&cand, divides) {
                 let width = self.cfg.params.t_upload_phase_ms.max(1);
                 let k = self.upload_phase_count() as u64;
-                let current = ((now / width) % k) as usize;
+                let mesh = self.mesh(now);
+                let current = ((mesh / width) % k) as usize;
                 let heard = self.phase_heard.get(current).copied().unwrap_or(0);
                 if heard > 0 && now < heard + 2 * k * width {
-                    let t = (now / width + 1) * width;
+                    let t = self.local_at((mesh / width + 1) * width);
                     self.stats.defer_ms[1] += t - now;
                     self.carriers[i].content_until = t;
                     return;
@@ -3085,8 +3305,7 @@ impl Node {
                     // past the end of this dwell.
                     let mut w = w.min(60_000);
                     if self.hops(i) {
-                        let dwell = self.cfg.params.dwell_ms.max(1);
-                        w = w.min((now / dwell + 1) * dwell - now);
+                        w = w.min(self.next_dwell_start(now) - now);
                     }
                     self.carriers[i].hold(class, now + w);
                     self.stats.discipline_waits += 1;
@@ -3161,6 +3380,16 @@ impl Node {
         };
         self.commit(i, cand);
         out.push(Action::Tx { carrier: i, channel, bytes, airtime_ms: airtime, class, frame_type, upload_to });
+        // The beacon that told our followers the later time went out on the schedule they keep;
+        // now we all keep the new one (§6).
+        if frame_type == FrameType::Beacon && i == self.ctrl {
+            self.ctrl_at_once = false;
+        }
+        if frame_type == FrameType::Beacon && i == self.cell_carrier() && self.time_pending > 0 {
+            let step = core::mem::take(&mut self.time_pending);
+            self.self_started = false;
+            self.step_time(step as i64);
+        }
     }
 
     fn commit(&mut self, i: usize, cand: Cand) {
@@ -3316,6 +3545,28 @@ impl Node {
     fn rx_beacon(&mut self, carrier: usize, b: &Beacon, rssi: i16, out: &mut Vec<Action>) {
         if b.announcer == self.cfg.id {
             return;
+        }
+        // The shared time (PROTOCOL.md §6): the latest heard, never back. The beacon told its
+        // sender's time as it began, and it ends now.
+        let air = self.carriers.get(carrier).map(|c| c.p.airtime_ms(Frame::Beacon(b.clone()).encode().len())).unwrap_or(0) as Millis;
+        let theirs = b.time.saturating_add(air);
+        let ours = self.mesh(self.now);
+        let own = self.announcer_of(self.cell_carrier());
+        self.time_heard = true;
+        if self.is_announcing() {
+            // Announcers keep the latest time any of them tells, never back, and take it at their
+            // own next beacon, so that their followers hear it on the schedule they still keep.
+            if theirs > ours + self.time_pending + 1 {
+                self.time_pending = theirs - ours;
+            }
+        } else if b.announcer == own || own.is_none() {
+            // A follower keeps its announcer's time, whichever way it differs; a node following
+            // nobody, the time of the announcer it heard last, whom it is about to find. Taking only
+            // a later one, a node whose clock ran ahead looked for that announcer on the wrong
+            // channel, and led a cell of its own instead.
+            if theirs.abs_diff(ours) > 1 {
+                self.step_time(theirs as i64 - ours as i64);
+            }
         }
         let Some(ti) = self.carriers.iter().position(|c| c.p.kind == b.carrier) else { return };
         if carrier != ti {

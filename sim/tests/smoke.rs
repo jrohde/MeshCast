@@ -25,6 +25,7 @@ fn spec(bulk: BulkPreset, positions: Vec<(f64, f64)>, sources: Vec<usize>, stati
         sources_at: Some(sources),
         renditions: None,
         attack: None,
+        clocks: Default::default(),
         collections: Default::default(),
     }
 }
@@ -1098,7 +1099,7 @@ fn an_upload_to_another_cell_outlives_a_change_of_announcer() {
     let before = src.announcer_of(1);
     src.handle_frame(now, 1, &grant_frame(other, me, &[p[0]]), -60);
     assert_eq!(src.uploads(1), vec![(p[0], other)]);
-    let beacon = Beacon { carrier: CarrierKind::GfskBulk, announcer: louder, score: 1000, caps: 0, next_ms: 30_000, round: 0, utc: 0, time_quality: 0, colour: 0, colours: 1, upload_phases: 1, occupancy: [0; 4] };
+    let beacon = Beacon { carrier: CarrierKind::GfskBulk, announcer: louder, score: 1000, caps: 0, next_ms: 30_000, round: 0, time: 0, time_quality: 0, colour: 0, colours: 1, upload_phases: 1, occupancy: [0; 4] };
     src.handle_frame(now + 10, 1, &Frame::Beacon(beacon), -20);
     assert!(src.announcer_of(1) == louder && before != louder, "the source should now follow the louder announcer");
     assert_eq!(src.uploads(1), vec![(p[0], other)], "the upload to another cell should go on");
@@ -1122,4 +1123,45 @@ fn the_control_carrier_is_heard_in_its_window() {
     let start = period / 2;
     assert!((start..=start + window).contains(&(t % period)), "it arrived {} ms into a period, outside the window", t % period);
     assert_eq!(b.engine.metrics.frames_not_listening, 0, "a frame went out while its receivers listened elsewhere");
+}
+
+#[test]
+fn nodes_whose_clocks_start_apart_agree_on_the_time() {
+    // Band L hops, so a node that knows no time finds nobody on it (PROTOCOL.md §6). Fifty nodes
+    // whose clocks start up to an hour apart and run up to 20 ppm fast or slow: without a shared
+    // time 4 to 20 % of a neighbourhood's programme arrived; with it, every node keeps one time
+    // within a second after a quarter of an hour, and within a few milliseconds after that.
+    let mut s = cell(BulkPreset::GfskL, 50, 2.0, 1);
+    s.clocks = meshcast_sim::scenario::ClockSpec { epoch_s: 3600, ppm: 20, same: false };
+    let mut b = build(&s, Params::default());
+    b.engine.run(15 * 60_000, 600_000);
+    let (spread, near, n) = b.engine.shared_time_spread();
+    assert_eq!(near, n, "{near} of {n} nodes within a second of the median, spread {spread} ms");
+    b.engine.run(2 * 3_600_000, 600_000);
+    let (spread, _, _) = b.engine.shared_time_spread();
+    assert!(spread < 100, "the shared time drifted {spread} ms apart");
+}
+
+#[test]
+fn a_follower_that_missed_the_first_pass_asks_again() {
+    // Band L, the neighbourhood of the matrix, world 5. Two followers still listened for the time
+    // when the station first passed four objects (PROTOCOL.md §6). Afterwards they took one or two
+    // symbols from each repetition: every symbol counted as progress, so the want never stalled,
+    // they never asked again, and after six hours they held 64 of 113. What has not completed
+    // `T_excursion` after the last ask is asked for again (PROTOCOL.md §4).
+    let mut s = cell(BulkPreset::GfskL, 50, 6.0, 5);
+    s.sources = 2;
+    s.tracks = 10;
+    s.mix = meshcast_sim::scenario::parse_mix("snac-music:42,snac-speech:22").unwrap();
+    let mut b = build(&s, Params::default());
+    b.engine.run((s.hours * 3.6e6) as u64, 600_000);
+    let mut missing = 0;
+    for (id, t) in &b.tracks {
+        for &f in &t.followers {
+            if !b.engine.metrics.completions.contains_key(&(f, *id)) {
+                missing += 1;
+            }
+        }
+    }
+    assert_eq!(missing, 0, "{missing} follower-object pairs never completed");
 }

@@ -2896,3 +2896,122 @@ And an announcer that has answered a proof `NACK` is to be asked again only afte
 waited that long the next `NACK` could follow every answer at once. Counted from the answer now,
 it made no measurable difference here: 73 `NACK`s in the sparse band L worlds either way, 190 and
 181 in band O.
+
+## 26. A shared time
+
+Until now every simulated node read the simulator's own clock, so every node agreed on every
+schedule by construction: hop dwells, the rendezvous, slots, upload phases, the control window.
+Real nodes count from wherever they were switched on, and their crystals drift (PROTOCOL.md §6.1
+has the tolerances). The simulator now gives each node a clock that starts at a random time up to
+`--clock-epoch-s` and runs up to `--clock-ppm` fast or slow, and restarts from zero when the node is
+switched on again; `--clock-same` gives all nodes one random start instead. The figures below use
+clocks up to an hour apart and ±20 ppm ("real clocks") unless they say otherwise.
+
+### 26.1 Without a shared time
+
+In the neighbourhood of the matrix (50 nodes on 1 km², four worlds), band L, whose carrier hops,
+delivered 4 to 20 % of a programme in six hours instead of all of it, with over 6,000 role changes
+per world instead of about 110: followers hopped out of step with their announcers. Band O, which
+does not hop, delivered everything, but playback started after 7.6 minutes instead of 4.1 and the
+cell sent twice the frames: the control window and the slots no longer agreed.
+
+### 26.2 Building it
+
+Each rule of PROTOCOL.md §6.2 answers a step of this; band L and band O neighbourhoods unless said.
+
+- **The latest time, everywhere.** Every node took any later time it heard and never went back.
+  Band L delivered everything again, but playback started after 19.9 minutes instead of 6.8. In
+  band O it took 40 minutes before the role changes stopped, and playback started after 7.7: a
+  follower whose clock ran ahead kept it, since followers do not beacon and nobody learned it.
+- **Time follows the announcer.** Followers take their announcer's time either way, announcers the
+  latest among themselves, at their own next beacon. Band O started playback after 6.0 minutes,
+  and three worlds of four were as calm as with one clock. Band L got worse, 26.4 minutes: a node
+  that knows no time finds nobody on a hopping carrier, and announcers met only by chance.
+- **The control carrier.** Every announcer tells its time there, and a node that knows none listens
+  there until it hears it; one that has heard none steps up only after `T_acquire`, and then tells
+  its time at once, outside the window. Band L agreed sooner, but two groups of 26 and 24 nodes
+  kept times nine minutes apart for over an hour, until they met by chance: their windows and hop
+  sequences never coincided. **The watch**, a whole period on the control carrier every `T_watch`,
+  merged them, and after that the nodes kept within 4 ms of each other.
+- **Following nobody, the announcer's time either way.** A node whose clock ran ahead of the first
+  announcer it heard kept its own, as the latest, and looked for that announcer on the wrong
+  channel. Taking it either way, all 50 nodes of the band L neighbourhood agreed within four
+  minutes.
+- **The guard.** A band O announcer held its beacon to the end of its window and sent it at that
+  very millisecond; followers a millisecond behind it still listened on the control carrier, missed
+  three in a row and stood for election: 408 role changes in that world. With frames kept
+  `T_guard` (50 ms) from the edges of dwells and windows, 128. (The simulator also lets a receiver
+  lose a frame that runs past its dwell, as a radio that retunes does; with one clock that had been
+  13 frames of 504,000.)
+- **Upload phases on the shared time.** Phases were a grid on each node's own clock, so uploaders
+  and announcers disagreed about whose turn it was. On the shared time, a band L network over
+  15 km² started playback after 19.3 minutes instead of 25.3, and a band L town after 33.6
+  instead of 44.6.
+- **A candidate whose time moved re-plans its step-up** into the next rendezvous of its new time:
+  in the band L town, 30.9 minutes instead of 31.6, and fewer role changes.
+- **What was dropped.** A node that heard an announcer on the control carrier listened on its
+  schedule for two dwells, and a candidate waited as long. With one clock that cost 4 minutes in the
+  band L network over 15 km² (21.1 instead of 17.4), and with real clocks it was worse there too.
+  Telling the time every 10 minutes instead of every minute changed nothing in the town; it stays
+  at a minute, because `T_acquire` has to cover one telling, and a station back from a power cut
+  otherwise stepped up without knowing the announcer that had taken over.
+
+Two findings on the way were older than this section:
+
+- **A node that polled every millisecond.** A frame queued for the control window was held on the
+  content hold, which the node's next deadline did not count while the queue was not empty: the
+  node woke every millisecond until the window came, most of a minute before every push of a root.
+  It came to light when, with a lure that told the time 0, one simulation ran for half an hour before
+  it was stopped instead of twelve seconds, and the node found waking every millisecond was waiting
+  so. A queued frame now waits on the pace, which the deadline counts.
+- **The cold start always began at a rendezvous.** With one clock that started at zero, every node
+  was switched on at the first instant of a meeting dwell. In one band L town world, started with
+  clocks that agreed at 40 to 200 seconds, the first hour had 29 to 51 excursions; started at 0 and
+  20 seconds, 2 and 12. The matrix's cold starts were a little luckier than any real one.
+- **A trickle kept a follower silent.** Two followers that still listened for the time when a
+  station first passed four objects then took one or two symbols from each repetition; each
+  counted as having arrived, so they never asked again, and after six hours they held 64 of 113.
+  What has not completed `T_excursion` after the last ask is now asked for again (PROTOCOL.md §4);
+  smoke test `a_follower_that_missed_the_first_pass_asks_again`.
+
+### 26.3 Results
+
+The whole validation, eight worlds each, against main (§25). "One clock": every node reads the
+simulator's time, as before, so only what the rules cost shows. "Real clocks": up to an hour apart
+and ±20 ppm, restarting from zero when a node is switched on again. Playback start in minutes
+unless said.
+
+| | Main | One clock | Real clocks |
+|---|---|---|---|
+| Neighbourhood, band O / band L | 4.1 / 7.5 | 4.1 / 8.0 | 5.8 / 10.0 |
+| 15 km², band O / band L | 5.1 / 17.0 | 5.2 / 17.4 | 7.5 / 18.2 |
+| Town, band O / band L | 14.7 / 23.9 | 16.0 / 24.7 | 18.9 / 28.6 |
+| ESP-NOW / two band L clusters | 7.8 / 14.8 | 7.8 / 9.4 | 10.4 / 10.3 |
+| Five lures: delivered, start | 98.5 %, 30.5 | 98.6 %, 22.6 | 98.6 %, 24.6 |
+| Five WANT spoofers | 17.8 | 18.4 | 18.5 |
+| Living band L: bulletin median, newcomers caught up | 4.2, 8.5 | 4.2, 9.5 | 4.8, 9.6 |
+| Sparse band L: delivered, mean | 92.2 % | 92.0 % | 92.9 % |
+| Size sweep, band L neighbourhood, 7 kB / 211 kB | 10.5 / 8.5 | 17.1 / 12.3 | 15.9 / 13.8 |
+| Size sweep, band O over 15 km², 42 kB | 9.1 | 10.4 | 14.6 |
+
+Every scenario delivered within a point of before; five lures that claim the maximum score, the
+worst case, 97.4 % with real clocks against 98.4 %. With one clock the rules cost little, except in the
+size sweep's band L neighbourhood, a single cell whose station started the time itself and spent
+its first watches deaf to its uploaders. With real clocks a cold start, where every node first has
+to learn the time, starts playback 1 to 5 minutes later; once the nodes agree, they keep within a
+few milliseconds of each other. In the living networks, which run for days, the median bulletin
+arrives within a minute of before; under a lure in band L the worst 90th percentile came after 54
+minutes instead of 41.
+
+
+### 26.4 Open
+
+- A false announcer can pull everyone to a later time (ABUSE.md, "Time pulled ahead"). Not
+  measured.
+- How a GPS or phone time takes precedence over the mesh's own is not specified; the simulator has
+  no node with one.
+- The shared time rests on knowing when a frame was received. Semtech documents no latency or
+  jitter for the SX1262's receive interrupts (SX1261/2 datasheet rev 1.2, §8.5 and §13.3.1 list
+  them without timing); LongShoT reached under 2 µs over LoRaWAN with hardware timestamps (Ramirez,
+  Sergeyev, Dyussenova, Iannucci, IPSN 2019). Agreement to within `T_guard` needs far less, but it
+  is measured only on hardware (ROADMAP Phase 1).

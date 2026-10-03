@@ -12,7 +12,7 @@ use meshcast_core::params::Params;
 use meshcast_core::rng::Rng;
 use serde::Serialize;
 
-use crate::engine::Engine;
+use crate::engine::{Clock, Engine};
 use crate::radio::{bulk_phy, control_phy, profile_for, region_for, BulkPreset, Phy, Propagation};
 
 /// One kind of object in a publishing mix: a label for reports and a size. The label also names
@@ -122,6 +122,18 @@ pub struct ScenarioSpec {
     pub renditions: Option<RenditionSpec>,
     pub collections: CollectionSpec,
     pub attack: Option<AttackSpec>,
+    pub clocks: ClockSpec,
+}
+
+/// Node clocks (PROTOCOL.md §6): each starts counting at a random time up to `epoch_s` seconds and
+/// runs up to `ppm` parts per million fast or slow. With either, a node switched on again counts
+/// from zero. Without, every node reads the simulator's own time.
+#[derive(Clone, Copy, Debug, Default, Serialize)]
+pub struct ClockSpec {
+    pub epoch_s: u64,
+    pub ppm: u32,
+    /// Every node starts at the same random time: clocks that agree, at no special moment.
+    pub same: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -283,7 +295,21 @@ pub fn build(spec: &ScenarioSpec, params: Params) -> Built {
         .collect();
 
     let prop = Propagation { exponent: spec.exponent, shadow_sigma_db: spec.shadow_db };
-    let mut engine = Engine::new(configs, positions, phys.clone(), prop, spec.seed);
+    let real = spec.clocks.epoch_s > 0 || spec.clocks.ppm > 0;
+    let mut crng = Rng::new(spec.seed ^ 0xC10C);
+    let same = crng.below(spec.clocks.epoch_s * 1000 + 1) as i64;
+    let clocks: Vec<Clock> = (0..configs.len())
+        .map(|_| {
+            if !real {
+                return Clock::default();
+            }
+            let epoch = crng.below(spec.clocks.epoch_s * 1000 + 1) as i64;
+            let epoch = if spec.clocks.same { same } else { epoch };
+            let ppm = crng.below(2 * spec.clocks.ppm as u64 + 1) as i32 - spec.clocks.ppm as i32;
+            Clock { epoch, ppm }
+        })
+        .collect();
+    let mut engine = Engine::with_clocks(configs, positions, phys.clone(), prop, spec.seed, clocks, real);
 
     let mut tracks = BTreeMap::new();
     let mut source_infos = Vec::new();
