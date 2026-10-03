@@ -137,6 +137,11 @@ pub struct Params {
     /// A follower whose want has brought no symbol for this long follows, until it has the
     /// object, another announcer it heard offering it (PROTOCOL.md §4, excursions).
     pub t_excursion_ms: Millis,
+    /// A node with one sub-GHz radio for its control and bulk carriers listens on the control
+    /// carrier only in a window of `t_ctrl_window_ms` every `t_ctrl_period_ms`, and every node
+    /// sends control-carrier frames only then (PROTOCOL.md §3). A window of 0 disables them.
+    pub t_ctrl_period_ms: Millis,
+    pub t_ctrl_window_ms: Millis,
 }
 
 impl Default for Params {
@@ -171,6 +176,8 @@ impl Default for Params {
             t_grant_ms: 600_000,
             t_offer_ms: 3_000,
             t_excursion_ms: 2_400_000,
+            t_ctrl_period_ms: 60_000,
+            t_ctrl_window_ms: 4_000,
         }
     }
 }
