@@ -941,6 +941,11 @@ impl Node {
         ]
     }
 
+    /// EXPERIMENT (roots oracle): the manifests, root or collection, we want.
+    pub fn wanted_manifests(&self) -> Vec<ShortId> {
+        self.wants.iter().filter(|w| self.store.entry(w).map(|e| e.kind().is_manifest()).unwrap_or(false)).copied().collect()
+    }
+
     /// EXPERIMENT (backbone oracle): everything we want.
     pub fn wants_list(&self) -> Vec<ShortId> {
         self.wants.iter().copied().collect()
