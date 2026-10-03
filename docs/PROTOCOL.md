@@ -957,22 +957,32 @@ persist and EtherFatsoen shares the channel between them.
   is no evidence against this one. Whether listed or not, because a false announcer that lists only
   what a follower cannot want yet (the objects of a manifest the follower lacks) held followers that
   wanted only that manifest for good once manifests were no longer repeated (FEASIBILITY.md §13).
-  **Sooner, the follower asks for proof.** When a want the announcer lists or ignores has stalled
-  for `T_excursion`, the follower sends its announcer a `NACK` for one symbol of it, naming the
-  announcer as the one to answer, every `T_nack_stall`. An honest announcer answers it from the
-  front of its carousel at once, whatever its repetition backoff; one that has sent not one
-  symbol of that object `T_want_min` after the first `NACK` serves nothing. Waiting alone is no
+  **Sooner, the follower asks for proof.** When a want the announcer has listed since the follower
+  began to wait for it has stalled for `T_want_min`, or one it ignores for `T_excursion`, the
+  follower sends its announcer a `NACK` for one symbol of it that it lacks, naming the announcer as
+  the one to answer, every `T_nack_stall`. (What the announcer listed only before, it may have
+  dropped since.) An honest announcer answers it from the front of its carousel at once, whatever
+  its repetition backoff; one that has sent not one symbol of that object `T_want_min` after the
+  first `NACK` serves nothing. Waiting alone is no
   evidence: an honest announcer whose repetitions a WANT flood holds back is silent on that
   object too, for up to its ceiling. Only the named announcer answers such a `NACK`, so a symbol
   of the object is its answer even on a channel the follower shares with other cells. The rule
   first asked only once not one `BULK` frame of anything had arrived for `T_excursion`; any frame
   of anyone else restarted that wait, and in a busy band L network a false announcer kept its
   followers for 88 minutes once they held the manifests and wanted only what it claimed
-  (FEASIBILITY.md §22). A source's own object stops being
-  pending, as in the upload rule of §4, when the source hears anyone send it, passes it itself as
-  announcer, or sees an announcer it uploaded the object to list it, its own or a neighbouring
-  cell's; otherwise a source that had announced its own objects, or uploaded them to a neighbouring
-  cell, took the next honest announcer it followed for a liar (FEASIBILITY.md §13). The follower then
+  (FEASIBILITY.md §22). Asking only after `T_excursion` let five false announcers hand followers
+  on from one to the next, and playback started 21 minutes later. What an announcer ignores it
+  cannot answer, so that waits `T_excursion` still: asked sooner, honest announcers that had not
+  yet asked for what their followers wanted lost them, and a band O network over 15 km² had 72 %
+  more role changes. An announcer that has answered a follower once has shown that it serves, and
+  is asked by it again only after `T_excursion`. An answer proves that the announcer serves, and is not
+  counted as progress on the object, so the follower asks for the rest as usual (§4): one symbol
+  per answer, counted as progress, had kept a follower from asking, and it held 24 of 216 symbols
+  after four hours (FEASIBILITY.md §24). A source's own object stops being pending, as in the
+  upload rule of §4, when the source hears anyone send it, passes it itself as announcer, or sees
+  an announcer it uploaded the object to list it, its own or a neighbouring cell's; otherwise a
+  source that had announced its own objects, or uploaded them to a neighbouring cell, took the next
+  honest announcer it followed for a liar (FEASIBILITY.md §13). The follower then
   follows the best other announcer it hears; hearing none, it becomes a candidate, since an area
   whose only announcer serves nothing has none. Before this rule a follower only escaped an
   announcer that served nothing by challenging it on score, which a false beacon defeats by
@@ -1109,7 +1119,7 @@ arrives a few minutes later than it otherwise would. That is the entire user-vis
 | `max_passes` | 1 | carousel passes per object unless re-wanted |
 | repetition spacing | 0, then `T_want_min` × 1, 2, 4, 8 | wait before an object is passed again; the level climbs with each repetition and resets after a rest of twice the wait |
 | `T_nack_stall` | 60 s | no progress on a nearly complete object (≥ 80 %, or all but one symbol) before a NACK |
-| `T_want_min` | 10 min | minimum interval between a follower's WANT frames, except an ask for what a manifest the follower asked for, or fetched on an excursion, names (§4) |
+| `T_want_min` | 10 min | minimum interval between a follower's WANT frames, except an ask for what a manifest the follower asked for, or fetched on an excursion, names (§4); also how long a want its announcer lists may bring nothing before the follower asks it for proof (§5.2) |
 | `T_gossip`, `T_gossip_min` | 5 min, 30 s | announcer/source gossip cadence and its floor |
 | `control_reserve` | 10 % | share of the band budget kept free for control frames |
 | own share | `min(regulatory, occ_high_own / (announcers heard + 1))` | content pacing ceiling; derived, not configured |

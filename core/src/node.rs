@@ -151,8 +151,14 @@ pub struct Stats {
     pub conflict_reports_sent: u64,
     /// Manifest announcements sent to bring our announcer up to date.
     pub manifest_corrections: u64,
-    /// One-symbol NACKs sent to an announcer that had been silent, asking it to show it serves.
+    /// One-symbol NACKs sent to an announcer that had not sent what we wait for, asking it to
+    /// show it serves.
     pub probes: u64,
+    /// Announcers left as serving nothing: never one symbol for the ceiling, or no answer to a
+    /// proof NACK (PROTOCOL.md §5.2).
+    pub left_never_served: u64,
+    pub left_unanswered_listed: u64,
+    pub left_unanswered_ignored: u64,
     /// Want sets sent, and the pieces they asked for.
     pub want_sets: u64,
     pub want_set_pieces: u64,
@@ -186,7 +192,7 @@ struct Neighbor {
     /// Frames heard from it while it has been in the table: a node heard once may be a name
     /// someone made up (ABUSE.md), so it counts towards our score only from the second.
     heard_count: u16,
-    haves: BTreeSet<ShortId>,
+    haves: BTreeMap<ShortId, Millis>,
     /// HAVE sets of a manifest we do not hold yet: kept, and read once we adopt that manifest.
     /// A follower about to fetch from another cell often lacks the manifest the sets refer to.
     unread_sets: Vec<PieceSet>,
@@ -449,6 +455,11 @@ pub struct Node {
     last_probe: Millis,
     /// The want we ask our announcer for as proof, and since when (§5.2).
     probing: Option<(ShortId, Millis)>,
+    /// The announcer that answered our proof NACK since we began to follow it, and when (§5.2).
+    proven: Option<(NodeId, Millis)>,
+    /// The symbol our last proof NACK asked for, and when its answer came (§5.2).
+    probe_symbol: Option<(ShortId, u16)>,
+    probe_answered: Option<(ShortId, Millis)>,
     /// The pieces of every collection manifest we adopted, in the order it lists them: what a
     /// set's bitmap refers to (PROTOCOL.md §3.3).
     pieces: BTreeMap<ShortId, Vec<ShortId>>,
@@ -558,6 +569,9 @@ impl Node {
             following_since: now,
             last_probe: 0,
             probing: None,
+            proven: None,
+            probe_symbol: None,
+            probe_answered: None,
             ask_rest_at: None,
             pieces: BTreeMap::new(),
             unordered: BTreeSet::new(),
@@ -859,8 +873,8 @@ impl Node {
         let i = self.cell_carrier();
         let own = self.announcer_of(i);
         let heard: Vec<NodeId> = self.carriers.get(i).and_then(|c| c.election.as_ref()).map(|e| e.heard_ids(self.now, own).collect()).unwrap_or_default();
-        let a = heard.iter().map(|a| (*a, self.neighbors.get(a).map(|n| n.haves.contains(id)).unwrap_or(false), self.neighbors.get(a).map(|n| n.rssi).unwrap_or(0))).collect();
-        let h = self.neighbors.iter().filter(|(_, n)| n.haves.contains(id)).map(|(k, n)| (*k, n.announcer)).collect();
+        let a = heard.iter().map(|a| (*a, self.neighbors.get(a).map(|n| n.haves.contains_key(id)).unwrap_or(false), self.neighbors.get(a).map(|n| n.rssi).unwrap_or(0))).collect();
+        let h = self.neighbors.iter().filter(|(_, n)| n.haves.contains_key(id)).map(|(k, n)| (*k, n.announcer)).collect();
         (a, h)
     }
 
@@ -1259,7 +1273,7 @@ impl Node {
     fn best_holder(&self, id: &ShortId) -> NodeId {
         self.neighbors
             .iter()
-            .filter(|(n, nb)| nb.haves.contains(id) && nb.announcer != **n)
+            .filter(|(n, nb)| nb.haves.contains_key(id) && nb.announcer != **n)
             .max_by_key(|(_, nb)| nb.rssi)
             .map(|(n, _)| *n)
             .unwrap_or(NodeId::NONE)
@@ -1271,7 +1285,7 @@ impl Node {
         let own = self.announcer_of(self.cell_carrier());
         self.neighbors
             .iter()
-            .filter(|(n, nb)| nb.haves.contains(id) && nb.announcer != **n && nb.announcer != own)
+            .filter(|(n, nb)| nb.haves.contains_key(id) && nb.announcer != **n && nb.announcer != own)
             .max_by_key(|(_, nb)| nb.rssi)
             .map(|(n, _)| *n)
             .unwrap_or(NodeId::NONE)
@@ -1731,7 +1745,7 @@ impl Node {
             }
             // What we came for and it has: done when none is left, or when none of it moves.
             let haves = self.neighbors.get(&to).map(|n| n.haves.clone()).unwrap_or_default();
-            let left: Vec<Millis> = self.wants.iter().filter(|w| haves.contains(w)).map(|w| self.progress.get(w).map(since).unwrap_or(0)).collect();
+            let left: Vec<Millis> = self.wants.iter().filter(|w| haves.contains_key(w)).map(|w| self.progress.get(w).map(since).unwrap_or(0)).collect();
             if left.is_empty() || left.iter().all(|s| now >= *s + t) {
                 self.excursion = None;
                 // A visit that brought nothing at all: whatever that announcer lists, it does not
@@ -1761,22 +1775,40 @@ impl Node {
         let w = crate::carousel::longest_spacing(self.cfg.params.t_want_min_ms) + self.cfg.params.t_want_min_ms;
         let from = self.following_since;
         let own_haves = self.neighbors.get(&own).map(|n| n.haves.clone()).unwrap_or_default();
-        let claims_or_ignores = |x: &ShortId| own_haves.contains(x) || !self.ann_seeking(x);
+        let claims_or_ignores = |x: &ShortId| own_haves.contains_key(x) || !self.ann_seeking(x);
         let never_served = self.wants.iter().any(|x| claims_or_ignores(x) && self.progress.get(x).map(|p| p.last_progress == 0 && now >= p.wanted_at.max(from) + w).unwrap_or(false))
-            || self.pending_ack.iter().any(|(p, since)| own_haves.contains(p) && now >= *since + w);
-        // Sooner by asking: an announcer that lists what we wait for, or ignores it, and has not
-        // sent one symbol of it for `T_excursion`. Waiting alone proves nothing: an honest
-        // announcer whose repetitions a WANT flood holds back waits too, for up to its ceiling.
-        // So we ask it for one symbol of it, naming it to answer, every `T_nack_stall`; it answers
-        // from the front of its carousel at once, whatever the backoff. One that has sent not one
-        // symbol of it `T_want_min` after we first asked serves nothing. Asking only once nothing
-        // at all had been heard for `T_excursion` let any frame of anyone else's restart the wait,
-        // and in a busy band L network a false announcer kept its followers for 88 minutes once
-        // they held the manifests and wanted only what it claimed (FEASIBILITY.md §22).
-        let waiting = self.wants.iter().find(|x| claims_or_ignores(x) && self.progress.get(x).map(|p| now >= since(p).max(from) + t).unwrap_or(false)).copied();
+            || self.pending_ack.iter().any(|(p, since)| own_haves.contains_key(p) && now >= *since + w);
+        // Sooner by asking: an announcer that has listed what we wait for since we began to wait,
+        // and has not sent one symbol of it for `T_want_min`, the time after which we would ask for
+        // it again, or that ignores it for `T_excursion`. Waiting alone proves nothing: an honest announcer whose
+        // repetitions a WANT flood holds back waits too, for up to its ceiling. So we ask it for one
+        // symbol of it, naming it to answer, every `T_nack_stall`; it answers from the front of its
+        // carousel at once, whatever the backoff. One that has sent not one symbol of it
+        // `T_want_min` after we first asked serves nothing. Asking only once nothing at all had
+        // been heard for `T_excursion` let any frame of anyone else's restart the wait
+        // (FEASIBILITY.md §22); asking only after `T_excursion` let five false announcers hand
+        // followers on from one to the next, and playback began 21 minutes later than now. What an
+        // announcer ignores it cannot answer, so that is still asked after `T_excursion`: asked
+        // after `T_want_min`, honest announcers that had not yet asked for what their followers
+        // wanted were left by them, and a band O network had 72 % more role changes. And an announcer
+        // that has answered us once has shown that it serves: it too is asked only after
+        // `T_excursion` (FEASIBILITY.md §24).
+        let proven = self.proven.map(|(a, t)| a == own && t >= from).unwrap_or(false);
+        let waiting = self.wants.iter().find(|x| {
+            claims_or_ignores(x)
+                && self.progress.get(x).map(|p| {
+                    let start = since(p).max(from);
+                    // Listed since we began to wait: what it listed before, it may have dropped since.
+                    let claims = own_haves.get(x).map(|at| *at >= start).unwrap_or(false);
+                    now >= start + if claims && !proven { self.cfg.params.t_want_min_ms } else { t }
+                })
+                .unwrap_or(false)
+        }).copied();
         let mut silent = false;
+        let mut silent_listed = false;
         match waiting {
             Some(x) => {
+                silent_listed = own_haves.contains_key(&x);
                 let first = match self.probing {
                     Some((y, t0)) if y == x && t0 >= from => t0,
                     _ => {
@@ -1784,15 +1816,31 @@ impl Node {
                         now
                     }
                 };
-                let answered = self.progress.get(&x).map(|p| p.last_progress >= first).unwrap_or(false);
-                silent = !answered && now >= first + self.cfg.params.t_want_min_ms;
-                if !silent && now >= self.last_probe + self.cfg.params.t_nack_stall_ms {
-                    self.probe(x, own);
+                // Answered: it serves (the answer proves it, and is not counted as progress, so that
+                // we ask again for the rest as usual; counted, one symbol per answer kept a follower in
+                // a band L island from asking, and it held 24 of 216 symbols after four hours,
+                // FEASIBILITY.md §24).
+                let answered = self.probe_answered.map(|(o, t)| o == x && t >= first).unwrap_or(false) || self.progress.get(&x).map(|p| p.last_progress >= first).unwrap_or(false);
+                if answered {
+                    self.proven = Some((own, now));
+                    self.probing = None;
+                } else {
+                    silent = now >= first + self.cfg.params.t_want_min_ms;
+                    if !silent && now >= self.last_probe + self.cfg.params.t_nack_stall_ms {
+                        self.probe(x, own);
+                    }
                 }
             }
             None => self.probing = None,
         }
         if never_served || silent {
+            if never_served {
+                self.stats.left_never_served += 1;
+            } else if silent_listed {
+                self.stats.left_unanswered_listed += 1;
+            } else {
+                self.stats.left_unanswered_ignored += 1;
+            }
             let (score, caps) = (self.score, self.caps());
             let tr = self.carriers[i].election.as_mut().and_then(|e| e.shun(now, own, now + ttl, score, caps, &mut self.rng));
             if let Some(tr) = tr {
@@ -1809,7 +1857,7 @@ impl Node {
         // Stalled, and not merely waiting its turn: a busy cell delivers late; only a cell that
         // cannot get an object sends its followers out for it. An object our announcer lists, it
         // has: we wait for it, or find above that it lies.
-        let stalled: Vec<ShortId> = self.wants.iter().filter(|w| !own_haves.contains(w) && !self.ann_granted_within(w, t) && self.progress.get(w).map(|p| now >= since(p) + t).unwrap_or(false)).copied().collect();
+        let stalled: Vec<ShortId> = self.wants.iter().filter(|w| !own_haves.contains_key(w) && !self.ann_granted_within(w, t) && self.progress.get(w).map(|p| now >= since(p) + t).unwrap_or(false)).copied().collect();
         if stalled.is_empty() {
             return;
         }
@@ -1818,7 +1866,7 @@ impl Node {
             .iter()
             .filter(|a| !self.carriers[i].election.as_ref().map(|e| e.is_shunned(**a, now)).unwrap_or(false))
             .filter_map(|a| self.neighbors.get(a).map(|n| (*a, n)))
-            .filter(|(_, n)| stalled.iter().any(|w| n.haves.contains(w)))
+            .filter(|(_, n)| stalled.iter().any(|w| n.haves.contains_key(w)))
             .max_by_key(|(_, n)| n.rssi)
             .map(|(a, _)| a);
         if let Some(to) = best {
@@ -3186,7 +3234,7 @@ impl Node {
                 self.neighbors.remove(&gone);
             }
         }
-        let n = self.neighbors.entry(id).or_insert(Neighbor { last_heard: now, announcer: NodeId::NONE, score: 0, rssi, colour: 0, upload_phases: 1, granted_phases: 0, heard_count: 0, haves: BTreeSet::new(), unread_sets: Vec::new() });
+        let n = self.neighbors.entry(id).or_insert(Neighbor { last_heard: now, announcer: NodeId::NONE, score: 0, rssi, colour: 0, upload_phases: 1, granted_phases: 0, heard_count: 0, haves: BTreeMap::new(), unread_sets: Vec::new() });
         n.last_heard = now;
         n.heard_count = n.heard_count.saturating_add(1);
         n.rssi = ((n.rssi as i32 + rssi as i32) / 2) as i16;
@@ -3311,7 +3359,14 @@ impl Node {
                     self.stats.symbols_overheard += 1;
                 }
                 let now = self.now;
-                self.progress.entry(b.object).or_default().last_progress = now;
+                // The answer to our proof NACK proves that our announcer serves; it is no sign that
+                // the object is coming (§5.2).
+                if self.probe_symbol == Some((b.object, b.esi)) && b.block == 0 {
+                    self.probe_symbol = None;
+                    self.probe_answered = Some((b.object, now));
+                } else {
+                    self.progress.entry(b.object).or_default().last_progress = now;
+                }
             }
             Put::Complete => {
                 self.stats.symbols_new += 1;
@@ -3501,7 +3556,7 @@ impl Node {
             for p in nb.unread_sets.iter().filter(|p| p.manifest == short) {
                 for k in p.pieces() {
                     if let (Some(id), true) = (list.get(k as usize), nb.haves.len() < 512) {
-                        nb.haves.insert(*id);
+                        nb.haves.insert(*id, 0);
                     }
                 }
             }
@@ -3583,7 +3638,7 @@ impl Node {
     fn root_follow_ups(&self, root: &ShortId, ann: NodeId, i: usize) -> Vec<ShortId> {
         let Some(listed) = self.offered_with.get(root) else { return Vec::new() };
         let c = &self.carriers[i];
-        let held_there = |s: &ShortId| self.neighbors.get(&ann).map(|n| n.haves.contains(s)).unwrap_or(false);
+        let held_there = |s: &ShortId| self.neighbors.get(&ann).map(|n| n.haves.contains_key(s)).unwrap_or(false);
         let sending = |s: &ShortId| c.upload.iter().chain(c.upload_queue.iter()).any(|u| u.object == *s && u.to == ann);
         listed.iter().filter(|s| self.store.has_complete(s) && !held_there(s) && !sending(s)).copied().collect()
     }
@@ -3637,6 +3692,7 @@ impl Node {
         let me = self.cfg.id;
         // The phases an announcer gave other holders (§4): our uploads to anyone else keep out of
         // them while we hear it.
+        let heard_at = self.now;
         let granted: u16 = if g.announcer == g.node { g.want.iter().filter(|(_, h, _)| !h.is_none() && *h != me).fold(0, |m, (_, _, p)| m | 1 << (p & PHASE_MASK)) } else { 0 };
         {
             let n = self.touch(g.node, rssi);
@@ -3644,7 +3700,7 @@ impl Node {
             n.granted_phases = if g.announcer == g.node { n.granted_phases | granted } else { 0 };
             for h in &g.have {
                 if n.haves.len() < 512 {
-                    n.haves.insert(*h);
+                    n.haves.insert(*h, heard_at);
                 }
             }
             for p in unread {
@@ -4018,7 +4074,10 @@ impl Node {
     /// serves what it lists (PROTOCOL.md §5.2).
     fn probe(&mut self, x: ShortId, own: NodeId) {
         let Some(k) = self.store.block_k(&x, 0) else { return };
-        let esi = self.rng.below(k.max(1) as u64) as u16;
+        // A symbol we lack, so that its answer is news.
+        let missing = self.store.missing(&x, 0);
+        let esi = if missing.is_empty() { self.rng.below(k.max(1) as u64) as u16 } else { missing[self.rng.below(missing.len() as u64) as usize] };
+        self.probe_symbol = Some((x, esi));
         self.last_probe = self.now;
         self.stats.probes += 1;
         let cell = self.cell_carrier();
