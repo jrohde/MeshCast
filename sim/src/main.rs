@@ -1382,6 +1382,11 @@ fn run_dynamics(nodes: usize, area_km2: f64, stations: usize, channels: usize, f
                         let ch = &built.sources[c].channel;
                         eprintln!("  manifest: node {:?} (in store {:?}) ann {:?} role {:?} source {:?} (seq {})", eng.nodes[i].node.manifest_state(ch), eng.nodes[i].node.manifest_state(ch).map(|m| eng.nodes[i].node.store.entry(&m.1).is_some()), eng.nodes.get(aj).and_then(|n| n.node.manifest_state(ch)), eng.nodes.get(aj).map(|n| n.node.role(bulk_c_early)), eng.nodes[built.sources[c].node].node.manifest_state(ch), built.sources[c].seq);
                         eprintln!("MISSING node {} attacker {} obj {:?} kind {:?} len {} progress {:?} wants {} follows {:?} ann_has {:?} ann_wants {:?} source {} src_has {}", i, eng.attackers.iter().any(|a| a.node == i), id, o.kind, o.len, eng.nodes[i].node.object_progress(&id), eng.nodes[i].node.wants_object(&id), ann, ann_has, eng.nodes.get(aj).map(|n| n.node.wants_object(&id)), built.sources[c].node, eng.nodes[built.sources[c].node].node.holds(&id));
+                        let anns: Vec<String> = eng.nodes.iter().enumerate().filter(|(_, n)| n.alive && n.node.role(bulk_c_early) == meshcast_core::node::Role::Announcer).map(|(k, n)| format!("{}{}", k, if n.node.holds(&id) { "H" } else if n.node.wants_object(&id) { "w" } else { "-" })).collect();
+                        let holders = eng.nodes.iter().filter(|n| n.node.holds(&id)).count();
+                        let heard_holders = (0..eng.nodes.len()).filter(|&j| j != i && eng.nodes[j].node.holds(&id) && eng.hears(j, i, bulk_c_early)).count();
+                        let heard_any = (0..eng.nodes.len()).filter(|&j| j != i && eng.hears(j, i, bulk_c_early)).count();
+                        eprintln!("  ANNS {} holders {} heard_holders {} heard_nodes {} : {}", i, holders, heard_holders, heard_any, anns.join(" "));
                     }
                 }
             }

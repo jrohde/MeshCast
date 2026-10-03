@@ -717,6 +717,11 @@ impl Engine {
         }
     }
 
+    /// EXPERIMENT diagnostic: whether `to` can receive `from` on `carrier` at all.
+    pub fn hears(&self, from: usize, to: usize, carrier: usize) -> bool {
+        self.rx_dbm(from, to, carrier) >= self.phys[carrier].sensitivity_dbm
+    }
+
     fn rx_dbm(&self, from: usize, to: usize, carrier: usize) -> f64 {
         let n = self.nodes.len();
         self.phys[carrier].tx_dbm - self.phys[carrier].pl0_db - self.loss[from * n + to] as f64
