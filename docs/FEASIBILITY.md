@@ -2716,3 +2716,61 @@ cell asks for or what it can fetch from a holder in reach. What remains is a cho
 not a tuning: nodes that relay channels they do not follow (option 2 of §21), at the cost of
 carrying what nobody near them listens to, or pieces on the long-range control carrier, at four
 seconds a minute.
+
+## 24. A false announcer, found sooner
+
+Against five false announcers (lures that claim everything and serve nothing) the band L network
+over 15 km² started playback after 38.9 minutes before §22 and after 51.1 minutes with roots on
+the control carrier and one radio (§22.3, §23.3). A captured follower leaves a lure only on the
+evidence of PROTOCOL.md §5.2, and asked it for proof only once a want it listed had brought
+nothing for `T_excursion`, 40 minutes; then it often followed the next lure. An honest announcer
+answers a proof NACK at once from the front of its carousel, so asking sooner costs an honest
+one a symbol. Measured first with the rule as it stood, before the changes below:
+
+| Five lures, 15 km² band L, eight worlds | Delivered | Playback start | Band L town, start |
+|---|---|---|---|
+| Proof after 40 minutes (main) | 96.0 % | 51.1 min | 23.7 min |
+| after 20 minutes | 97.0 % | 33.7 min | 23.8 min |
+| after 10 minutes | 98.5 % | 28.9 min | 24.0 min |
+| after 5 minutes | 98.9 % | 27.2 min | 24.6 min, 2.3 % more frames |
+
+The draft takes `T_want_min`, 10 minutes: the interval after which a follower asks for what has
+not come anyway. Four things came out on the way:
+
+- **Only what the announcer lists.** Asked sooner for wants it ignores too, honest announcers
+  that had not yet asked for what their followers wanted could not answer, and were left: in the
+  band O network over 15 km² with 14 kB pieces, 513 role changes per world instead of 299, and
+  21 % more frames. What an announcer ignores is still asked after `T_excursion`.
+- **Once proven, trusted.** An announcer that has answered a follower is asked by it again only
+  after `T_excursion`. Without that, every waiting follower kept asking honest announcers with long
+  queues, and a lost answer now and then cost one: 346 role changes instead of 310, 5 % more
+  frames.
+- **An answer is proof, not progress.** Counted as progress, one symbol per answer kept the
+  follower from asking again: in the island of smoke test `a_lure_is_visited_once` a follower held
+  24 of 216 symbols of an object its announcer held, after four hours. Now the probe asks for a
+  symbol the follower lacks, its answer marks the announcer as serving, and the want goes on
+  stalling until the follower asks for it as usual.
+- **Listed since the wait began.** A follower keeps the ids its announcer listed; what it listed
+  before the follower began to wait it may have dropped since. Only a listing heard after that
+  counts for the quick proof. In the living band L network under one lure, every world then held
+  its current window at the end (one held 97.6 % without).
+
+| 15 km² band L, eight worlds | Before §22 | Main | Now |
+|---|---|---|---|
+| One lure: delivered, start, 90th percentile | 99.5 %, 20.4, 41.7 min | 99.4 %, 17.8, 43.7 min | 99.5 %, 17.3, 29.3 min |
+| Five lures | 97.1 %, 38.9, 89.0 min | 96.0 %, 51.1 min, never all | 98.4 %, 30.3, 61.1 min |
+| Five lures claiming the maximum | 96.4 %, 42.8, 103.7 min | 95.0 %, 47.8 min, never all | 98.2 %, 29.2, 63.9 min |
+| Five spoofers flooding WANTs | 100 %, 20.3, 33.1 min | 100 %, 18.0, 25.4 min | 100 %, 17.8, 24.9 min |
+
+("Never all": in some world a follower never had all of a programme, so there is no 90th
+percentile.) Under WANT floods, still no role changes after the first hour in the living network.
+The matrix, the living network and collections are unchanged within about a minute;
+in the size sweep band O over 15 km² needs up to 7 % more frames at 42 to 141 kB and 4 % fewer
+from 211 kB up. Sparse interests in band L delivered 87.6 % instead of 88.5 %: two worlds of eight
+lost 2.6 and 4.7 points, and with the quick proof switched off they did not. How it costs them is
+not found yet; no follower there left an announcer for not answering about something it listed.
+
+What the new counters show instead is older: in four of those sparse worlds, 126 to 389 times a
+follower left an honest announcer because the announcer ignored, for `T_excursion`, something
+the follower wanted, and could not answer for it. That is the case §21 already named: an
+announcer that cannot get what its follower wants is unable, not false.
