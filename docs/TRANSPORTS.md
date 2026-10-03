@@ -85,7 +85,9 @@ Two dongles 2 km apart across farmland, no internet, no phones after initial set
 - GFSK at 500 mW in band O (10 %) moves content: a 3-minute Opus track every 10 minutes
   (simulated: 3 tracks complete after 15, 25 and 36 minutes including election and gossip).
 - Beacons, gossip and NACKs also travel on the GFSK channel; LoRa carries the manifest
-  announcements and the manifests themselves.
+  announcements and the manifests themselves, in a 4-second window every minute: the dongle's
+  one SX1262 receives LoRa or GFSK, not both at once, so it listens on LoRa only then (PROTOCOL.md
+  §3).
 
 Two dongles 5 km apart: GFSK does not reach (about 2.7 km at 500 mW). The nodes then use **LoRa
 as the bulk carrier** (`lora-bulk`): SF7 at 10 % duty cycle moves about 0.5 kbit/s, a track every
