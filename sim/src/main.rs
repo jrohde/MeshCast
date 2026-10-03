@@ -842,8 +842,8 @@ fn simulate(spec: ScenarioSpec, verbose: bool, failover: Option<(f64, f64)>) -> 
             s2.sort_unstable();
             let med = s2.get(s2.len() / 2).copied().unwrap_or(0);
             let served = s.symbols_served + s.symbols_overheard;
-            let line = line + &format!(" holds={}/{} short_median={:.1}% served={:.0}% follow_ups={}/{}", done, known, med as f64 / 10.0,
-                if served > 0 { 100.0 * s.symbols_served as f64 / served as f64 } else { 0.0 }, s.follow_ups_granted, s.follow_ups_sent);
+            let line = line + &format!(" holds={}/{} short_median={:.1}% served={:.0}% follow_ups={}/{} ended_held={} foreign_phase_wait={}s", done, known, med as f64 / 10.0,
+                if served > 0 { 100.0 * s.symbols_served as f64 / served as f64 } else { 0.0 }, s.follow_ups_granted, s.follow_ups_sent, s.uploads_ended_held, s.foreign_phase_wait_ms / 1000);
             (i, line)
         })
         .collect();
@@ -1388,6 +1388,7 @@ fn run_dynamics(nodes: usize, area_km2: f64, stations: usize, channels: usize, f
     let useful: u64 = eng.nodes.iter().map(|n| n.node.stats.symbols_new + n.node.stats.symbols_dup).sum();
     let orphans: f64 = eng.nodes.iter().map(|n| n.node.orphaned_objects().len() as f64).sum::<f64>() / nodes as f64;
     let uploads: u64 = eng.nodes.iter().map(|n| n.node.stats.uploads_started).sum();
+    let ended_held: u64 = eng.nodes.iter().map(|n| n.node.stats.uploads_ended_held).sum();
     let bulk_c = eng.phys.iter().position(|p| p.kind != CarrierKind::LoraControl).unwrap_or(1);
     let announcers_final = eng.nodes.iter().filter(|n| n.alive && n.node.role(bulk_c) == meshcast_core::node::Role::Announcer).count();
     let hours = common.hours.max(1e-9);
@@ -1447,10 +1448,10 @@ fn run_dynamics(nodes: usize, area_km2: f64, stations: usize, channels: usize, f
         println!("cold start: announcers at 5/10/20/30/60 min: {}/{}/{}/{}/{}; role events in the first hour {}, after it {}",
             at(300_000), at(600_000), at(1_200_000), at(1_800_000), at(3_600_000), first, eng.metrics.role_events.len() - first);
     }
-    println!("uploads {}, announcers {}, role events {}, challenges {}, excursions {}", uploads, announcers_final, m.role_events.len(), eng.nodes.iter().map(|n| n.node.challenges()).sum::<u32>(), eng.nodes.iter().map(|n| n.node.stats.excursions).sum::<u64>());
+    println!("uploads {} ({} ended once their announcer held the object), announcers {}, role events {}, challenges {}, excursions {}", uploads, ended_held, announcers_final, m.role_events.len(), eng.nodes.iter().map(|n| n.node.challenges()).sum::<u32>(), eng.nodes.iter().map(|n| n.node.stats.excursions).sum::<u64>());
     let sum = |f: fn(&meshcast_core::node::Stats) -> u64| eng.nodes.iter().map(|n| f(&n.node.stats)).sum::<u64>();
     println!("  of the uploads, repair answers {}; grants given {}, lapsed {}", sum(|s| s.repairs_started), sum(|s| s.grants_given), sum(|s| s.grants_lapsed));
-    println!("  manifest corrections sent by followers to their announcer: {}; probes of a silent announcer: {}", sum(|s| s.manifest_corrections), sum(|s| s.probes));
+    println!("  manifest corrections sent by followers to their announcer: {}; announcers asked for proof (probes): {}", sum(|s| s.manifest_corrections), sum(|s| s.probes));
     {
         let mut n = 0;
         let mut kinds = std::collections::BTreeMap::new();
@@ -1494,6 +1495,12 @@ fn run_dynamics(nodes: usize, area_km2: f64, stations: usize, channels: usize, f
         println!("nodes offline at the end: {}", offline.len());
     }
     println!("bulk airtime share, busiest nodes: {}", airtime.iter().map(|(i, a)| format!("{i}:{:.1}%", a * 100.0)).collect::<Vec<_>>().join(" "));
+    if let Some(ctrl_c) = eng.phys.iter().position(|p| p.kind == CarrierKind::LoraControl).filter(|c| *c != bulk_c) {
+        let shares: Vec<f64> = eng.nodes.iter().map(|n| n.airtime_ms[ctrl_c] as f64 / (hours * 3.6e6)).collect();
+        let busiest = shares.iter().copied().fold(0.0, f64::max);
+        let mean = shares.iter().sum::<f64>() / shares.len().max(1) as f64;
+        println!("control carrier airtime share: mean {:.3} %, busiest node {:.3} %; symbols of roots pushed there: {}", mean * 100.0, busiest * 100.0, sum(|s| s.pushed_on_ctrl));
+    }
     println!("table peaks: {}", eng.metrics.table_peaks.iter().map(|(k, v)| format!("{k} {v}")).collect::<Vec<_>>().join(", "));
     if let Some(path) = &common.out {
         fs::write(path, serde_json::to_string_pretty(&report).unwrap()).expect("write report");

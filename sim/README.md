@@ -42,14 +42,17 @@ rural cells). `--verbose` prints role changes; `--out` writes the full report as
 
 Not modelled yet: terrain, buildings, antenna patterns, GFSK versus LoRa co-channel interference
 across carriers, clock drift, packet error rate below the sensitivity cliff, multiple bulk
-carriers per node.
+carriers per node. A node hears its control carrier and its bulk carrier at once, as if it had a
+radio for each; an SX1262 has one, and must divide its listening between LoRa and GFSK.
 
 ## Output
 
 The report prints per-object completion times over followers (p50, p90, max), collisions,
 announcers at the end, occupancy percentiles on the bulk channel, airtime share per transmitting
 node, and per-node core counters (frames by class, CCA deferrals, discipline waits, NACKs, WANTs,
-uploads). Results and their interpretation are in `docs/FEASIBILITY.md` §7.
+uploads, uploads ended because their announcer listed the object as held, and the time uploads
+waited out phases other announcers gave away). Results and their interpretation are in
+`docs/FEASIBILITY.md` §7.
 
 An ensemble (`--seeds N`) also reports **whole content**, what a listener of a programme split into
 pieces waits for: per follower and source, how long until the follower held the first of that
@@ -109,8 +112,13 @@ chosen against (`docs/ABUSE.md`, item 5).
   time it wanted to send, with the first and last minute; the cell report prints it as
   `busy blame`. It found an announcer whose carousel chained frames without a gap
   (`docs/FEASIBILITY.md` §14).
-- `MESHCAST_TRACE_RX=38` prints every symbol node index 38 receives (`RX`), with what it held of
-  the object before. Silence in it means the node heard nothing at all, not that it was off.
+- `MESHCAST_TRACE_RX=38` prints every symbol that reaches node index 38 above sensitivity (`RX`),
+  with what it held of the object before, and `lost=half-duplex` or `lost=collision with N` when
+  the frame did not arrive intact. Silence in it means the node heard nothing at all, not that it
+  was off.
+- `MESHCAST_TRACE_WANTS_AT_ROLE=38` prints node index 38's want list (progress, grant, timers)
+  at each of its role changes, what it waited for when it left an announcer, and with
+  `MESHCAST_TRACE_GRANTS=1` at each ask it sends as an announcer (`WANTS-AT-ASK`).
 - `MESHCAST_TRACE_NEWCOMERS=1` prints, in `dynamics`, each newcomer's node, when it joined, how
   long it took to hold everything that existed then, and the object that came last. The report
   gives that time twice: as it was, and counting only the time the newcomer was switched on.

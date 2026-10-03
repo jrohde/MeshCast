@@ -131,6 +131,13 @@ pub struct Stats {
     /// that never brought a symbol; grants a holder heard for the first time.
     pub grants_lapsed_foreign: u64,
     pub grants_lapsed_unstarted: u64,
+    /// Symbols of manifests pushed on the control carrier.
+    pub pushed_on_ctrl: u64,
+    /// Holder side: uploads ended, running or lined up, because their announcer listed the
+    /// object as held (PROTOCOL.md §4).
+    pub uploads_ended_held: u64,
+    /// Holder side: time an upload waited out a phase another announcer gave someone else (ms).
+    pub foreign_phase_wait_ms: u64,
     pub grants_received: u64,
     /// Renditions this node made on demand.
     pub renditions_made: u64,
@@ -173,6 +180,9 @@ struct Neighbor {
     colour: u8,
     /// Upload phases last announced (announcers only): how its listening time is divided.
     upload_phases: u8,
+    /// Phases it granted to holders other than us (announcers only, a bit per phase), from its
+    /// WANTs; those at or above its `upload_phases` have ended.
+    granted_phases: u16,
     /// Frames heard from it while it has been in the table: a node heard once may be a name
     /// someone made up (ABUSE.md), so it counts towards our score only from the second.
     heard_count: u16,
@@ -269,14 +279,22 @@ impl CarrierRt {
             (None, _) => self.upload = Some(u),
             (Some(_), true) => self.upload_queue.push_front(u),
             (Some(_), false) => {
-                // Repairs, then manifests, then our own announcer's grants, then other cells';
-                // within each, by `order`.
-                let rank = |q: &Upload| if q.list.is_some() { 0 } else if q.manifest { 1 } else if q.to == own { 2 } else { 3 };
-                let r = (rank(&u), u.order);
-                let at = self.upload_queue.iter().position(|q| (rank(q), q.order) > r).unwrap_or(self.upload_queue.len());
+                let r = Self::rank(&u, own);
+                let at = self.upload_queue.iter().position(|q| Self::rank(q, own) > r).unwrap_or(self.upload_queue.len());
                 self.upload_queue.insert(at, u);
             }
         }
+    }
+
+    /// Repairs, then manifests, then our own announcer's grants, then other cells'; within each,
+    /// by `order`.
+    fn rank(q: &Upload, own: NodeId) -> (u8, u64) {
+        (if q.list.is_some() { 0 } else if q.manifest { 1 } else if q.to == own { 2 } else { 3 }, q.order)
+    }
+
+    /// Our announcer is now `own`: what we lined up goes in its order for it.
+    fn rerank(&mut self, own: NodeId) {
+        self.upload_queue.make_contiguous().sort_by_key(|q| Self::rank(q, own));
     }
 
     /// Hold back frames of `class` until `until`: content waits on its own clock.
@@ -376,6 +394,9 @@ pub struct Node {
     /// booted together do not all ask at once.
     next_want_at: Millis,
     have_cursor: usize,
+    /// Announcer: what we completed in the last `T_grant`, with when, listed first in every HAVE
+    /// meanwhile, so that a holder still uploading one or about to learns we hold it (§4).
+    have_lead: Vec<(ShortId, Millis)>,
     announce_cursor: usize,
     progress: BTreeMap<ShortId, Progress>,
     /// Announcers reported to be heard together with us by some follower (or heard by us):
@@ -401,8 +422,6 @@ pub struct Node {
     ann_asks: BTreeMap<ShortId, Millis>,
     /// Objects our announcer was last heard granting to an uploader, and when: they are coming.
     ann_grants: BTreeMap<ShortId, Millis>,
-    /// When we last received a BULK frame of any object: a channel that carries nothing.
-    last_bulk_rx: Millis,
     /// When the announcer last heard an upload in each phase.
     phase_heard: [Millis; MAX_UPLOAD_PHASES as usize],
     /// Holder side: grants we received, with the time, so that we still answer the announcer's
@@ -425,6 +444,8 @@ pub struct Node {
     ask_rest_at: Option<Millis>,
     /// When we last asked our announcer for one symbol as proof that it serves (§5.2).
     last_probe: Millis,
+    /// The want we ask our announcer for as proof, and since when (§5.2).
+    probing: Option<(ShortId, Millis)>,
     /// The pieces of every collection manifest we adopted, in the order it lists them: what a
     /// set's bitmap refers to (PROTOCOL.md §3.3).
     pieces: BTreeMap<ShortId, Vec<ShortId>>,
@@ -434,6 +455,10 @@ pub struct Node {
     /// When a piece of each collection we adopted last arrived: a collection is in progress
     /// while its pieces arrive or are granted (PROTOCOL.md §4).
     moved: BTreeMap<ShortId, Millis>,
+    /// Manifests whose symbols we have pushed on the control carrier, and when the symbols of an
+    /// object were last heard there (PROTOCOL.md §2).
+    pushed_on_ctrl: BTreeSet<ShortId>,
+    heard_on_ctrl: BTreeMap<ShortId, Millis>,
     /// Holder: the collection manifests we last listed in a HAVE with each root manifest, which
     /// we upload after it when granted it (PROTOCOL.md §4).
     offered_with: BTreeMap<ShortId, Vec<ShortId>>,
@@ -506,6 +531,7 @@ impl Node {
             last_want_tx: 0,
             next_want_at: now + Rng::new(seed ^ 0x5eed).below(p.t_want_min_ms.max(1)),
             have_cursor: 0,
+            have_lead: Vec::new(),
             announce_cursor: 0,
             progress: BTreeMap::new(),
             conflicts: BTreeMap::new(),
@@ -519,7 +545,6 @@ impl Node {
             excursion: None,
             ann_asks: BTreeMap::new(),
             ann_grants: BTreeMap::new(),
-            last_bulk_rx: 0,
             granted_to_us: BTreeMap::new(),
             offers: Vec::new(),
             corrections: BTreeSet::new(),
@@ -528,10 +553,13 @@ impl Node {
             keep_until: 0,
             following_since: now,
             last_probe: 0,
+            probing: None,
             ask_rest_at: None,
             pieces: BTreeMap::new(),
             unordered: BTreeSet::new(),
             moved: BTreeMap::new(),
+            pushed_on_ctrl: BTreeSet::new(),
+            heard_on_ctrl: BTreeMap::new(),
             offered_with: BTreeMap::new(),
             relayed: BTreeSet::new(),
             relay_asks: BTreeMap::new(),
@@ -1648,7 +1676,12 @@ impl Node {
                 self.ann_asks.clear();
                 self.ann_grants.clear();
                 self.carriers[carrier].carousel = Some(Carousel::new(self.carousel_params()));
-                self.carriers[carrier].upload = None;
+                // What other announcers granted us is still theirs (§4): a running upload goes on,
+                // and only what we line up is ranked anew for our new announcer. Dropped with our
+                // own announcer's change, an upload to the next cell ended unfinished and unsaid,
+                // its grant ran idle for `T_grant`, and in a band O town the first piece of a
+                // programme came last.
+                self.carriers[carrier].rerank(to);
                 self.drop_grants_unless_announcing();
                 self.want_refresh = true;
                 out.push(Action::Role { carrier, role: Role::Follower, announcer: to, now: self.now });
@@ -1715,20 +1748,33 @@ impl Node {
         let claims_or_ignores = |x: &ShortId| own_haves.contains(x) || !self.ann_seeking(x);
         let never_served = self.wants.iter().any(|x| claims_or_ignores(x) && self.progress.get(x).map(|p| p.last_progress == 0 && now >= p.wanted_at.max(from) + w).unwrap_or(false))
             || self.pending_ack.iter().any(|(p, since)| own_haves.contains(p) && now >= *since + w);
-        // Sooner where the channel is silent: an announcer that lists what we wait for and has not
-        // put one symbol of anything on the air for `T_excursion`. Silence alone proves nothing:
-        // an honest announcer whose repetitions a WANT flood holds back is silent too, for up to
-        // its ceiling. So we ask it for one symbol of what we wait for, every `T_nack_stall`; it
-        // answers from the front of its next round whatever the backoff. One that has still sent
-        // nothing at all `T_want_min` later serves nothing.
-        let quiet_since = self.last_bulk_rx.max(from);
+        // Sooner by asking: an announcer that lists what we wait for, or ignores it, and has not
+        // sent one symbol of it for `T_excursion`. Waiting alone proves nothing: an honest
+        // announcer whose repetitions a WANT flood holds back waits too, for up to its ceiling.
+        // So we ask it for one symbol of it, naming it to answer, every `T_nack_stall`; it answers
+        // from the front of its carousel at once, whatever the backoff. One that has sent not one
+        // symbol of it `T_want_min` after we first asked serves nothing. Asking only once nothing
+        // at all had been heard for `T_excursion` let any frame of anyone else's restart the wait,
+        // and in a busy band L network a false announcer kept its followers for 88 minutes once
+        // they held the manifests and wanted only what it claimed (FEASIBILITY.md §22).
         let waiting = self.wants.iter().find(|x| claims_or_ignores(x) && self.progress.get(x).map(|p| now >= since(p).max(from) + t).unwrap_or(false)).copied();
         let mut silent = false;
-        if let (Some(x), true) = (waiting, now >= quiet_since + t) {
-            silent = now >= quiet_since + t + self.cfg.params.t_want_min_ms;
-            if !silent && now >= self.last_probe + self.cfg.params.t_nack_stall_ms {
-                self.probe(x, own);
+        match waiting {
+            Some(x) => {
+                let first = match self.probing {
+                    Some((y, t0)) if y == x && t0 >= from => t0,
+                    _ => {
+                        self.probing = Some((x, now));
+                        now
+                    }
+                };
+                let answered = self.progress.get(&x).map(|p| p.last_progress >= first).unwrap_or(false);
+                silent = !answered && now >= first + self.cfg.params.t_want_min_ms;
+                if !silent && now >= self.last_probe + self.cfg.params.t_nack_stall_ms {
+                    self.probe(x, own);
+                }
             }
+            None => self.probing = None,
         }
         if never_served || silent {
             let (score, caps) = (self.score, self.caps());
@@ -1837,6 +1883,9 @@ impl Node {
 
     /// `node` no longer announces: stop uploading to it and forget the grants it gave us.
     fn forget_announcer(&mut self, node: NodeId) {
+        if let Some(n) = self.neighbors.get_mut(&node) {
+            n.granted_phases = 0;
+        }
         for c in self.carriers.iter_mut() {
             c.drop_uploads_to(node);
         }
@@ -1854,6 +1903,43 @@ impl Node {
             self.repair_phases.clear();
             // What we wanted only to serve others goes too.
             self.prune_wants();
+        }
+    }
+
+    /// When an upload of ours to `to`, in phase `own.0` of `own.1`, must wait: in a slot that an
+    /// announcer we hear, listening on the channel we send on, gave a holder other than us
+    /// (§4). Phases are slots of one grid, `T_upload_phase` wide from time zero, so the slot
+    /// says which phase every announcer is in. A holder that cannot hear that other holder
+    /// collided with it there: in a band O world, 15 % of the upload frames at their own
+    /// announcer were lost to uploads to the next cell's. Returns the start of the next slot;
+    /// nothing when the slot is free, or when none of our next 64 slots would be.
+    fn foreign_phase_wait(&self, i: usize, to: NodeId, own: (u64, u64), now: Millis, airtime: Millis) -> Option<Millis> {
+        let width = self.cfg.params.t_upload_phase_ms.max(1);
+        let home = self.listens_with(to);
+        let recent = self.cfg.params.t_want_min_ms;
+        let others: Vec<(NodeId, u64, u16)> = self
+            .neighbors
+            .iter()
+            .filter(|(b, n)| **b != to && **b != home && n.announcer == **b && n.granted_phases != 0 && now < n.last_heard + recent)
+            // A grant heard after the beacon that counted the phases tells there are more.
+            .map(|(b, n)| (*b, (n.upload_phases as u64).max(16 - n.granted_phases.leading_zeros() as u64), n.granted_phases))
+            .collect();
+        if others.is_empty() {
+            return None;
+        }
+        let (phase, phases) = own;
+        let taken = |s: u64, b: &NodeId, k: u64, m: u16| m & (1 << (s % k)) != 0 && (b.is_none() || self.channel_for(i, *b, s * width) == self.channel_for(i, home, s * width));
+        let slot = now / width;
+        // Courtesy, not silence: we yield only where it leaves us a turn.
+        let free = (slot..slot + 64).any(|s| (phases <= 1 || s % phases == phase) && !others.iter().any(|(_, k, m)| taken(s, &NodeId::NONE, *k, *m)));
+        if !free {
+            return None;
+        }
+        let last = (now + airtime.max(1) - 1) / width;
+        if (slot..=last).any(|s| others.iter().any(|(b, k, m)| taken(s, b, *k, *m))) {
+            Some((slot + 1) * width)
+        } else {
+            None
         }
     }
 
@@ -1994,7 +2080,16 @@ impl Node {
         // fit; anyone else its own objects not yet carried. Pieces of a manifest go as sets.
         let (have, have_sets) = if announcing {
             let ids: Vec<ShortId> = self.store.complete_ids().copied().collect();
-            let (have, sets, taken) = self.pack_have(&ids, self.have_cursor);
+            // What we completed in the last `T_grant` goes first, the latest first, at most half
+            // of the list. A HAVE holds twelve ids, and in the rotation alone a holder that had
+            // missed the one HAVE after we completed its object uploaded it to us whole, minutes
+            // later; `T_grant` is as long as we would have waited for it (§4).
+            let now = self.now;
+            let t_grant = self.cfg.params.t_grant_ms;
+            let store = &self.store;
+            self.have_lead.retain(|(id, t)| now < *t + t_grant && store.has_complete(id));
+            let lead: Vec<ShortId> = self.have_lead.iter().rev().take(MAX_GOSSIP_IDS / 2).map(|(id, _)| *id).collect();
+            let (have, sets, taken) = self.pack_have_after(&lead, &ids, self.have_cursor);
             self.have_cursor = self.have_cursor.wrapping_add(taken.max(1));
             (have, sets)
         } else {
@@ -2040,7 +2135,56 @@ impl Node {
             let cell = self.cell_carrier();
             self.enqueue(cell, Frame::ManifestAnnounce(ManifestAnnounce { node: self.cfg.id, entries: entries.clone(), whole }));
             if self.ctrl != cell {
+                let push: Vec<ShortId> = entries.iter().map(|e| e.manifest).collect();
                 self.enqueue(self.ctrl, Frame::ManifestAnnounce(ManifestAnnounce { node: self.cfg.id, entries, whole }));
+                self.push_on_ctrl(&push);
+            }
+        }
+    }
+
+    /// A root travels with its announcement on the control carrier (PROTOCOL.md §2): the first time
+    /// we announce a root there, its symbols follow, and those of the collection manifests it flags
+    /// as changed, unless someone has sent them there in the last `T_want_min`. Every node in
+    /// range that follows the channel, and every announcer, keeps them. Otherwise a root crossed a
+    /// cell only through nodes that follow its channel, and where interests are sparse, many cells
+    /// never had it and their listeners never learned of the bulletin it named (FEASIBILITY.md §21).
+    fn push_on_ctrl(&mut self, roots: &[ShortId]) {
+        let now = self.now;
+        let quiet = self.cfg.params.t_want_min_ms;
+        let store = &self.store;
+        self.pushed_on_ctrl.retain(|id| store.is_known(id));
+        let mut objects: Vec<ShortId> = Vec::new();
+        for r in roots {
+            if self.pushed_on_ctrl.contains(r) || !self.store.has_complete(r) {
+                continue;
+            }
+            objects.push(*r);
+            if let Some(index) = self.roots.get(r) {
+                objects.extend(index.collections.iter().filter(|c| c.changed).map(|c| c.manifest.id.short()).filter(|s| self.store.has_complete(s)));
+            }
+        }
+        for id in objects {
+            if !self.pushed_on_ctrl.insert(id) {
+                continue;
+            }
+            if self.heard_on_ctrl.get(&id).map(|t| now < *t + quiet).unwrap_or(false) {
+                continue;
+            }
+            let Some(e) = self.store.entry(&id) else { continue };
+            let Some(len) = e.len() else { continue };
+            // What we published and pushed ourselves we have delivered: we sent its true bytes to
+            // everyone in range, our announcer included. Waiting to hear it sent in our cell made
+            // a source take an announcer that had it from the push for one that serves nothing.
+            self.pending_ack.remove(&id);
+            for block in 0..e.known_blocks() {
+                let k = self.store.block_k(&id, block).unwrap_or(0);
+                for esi in 0..k {
+                    let mut payload = alloc::vec![0u8; SYMBOL_SIZE];
+                    if self.store.get_symbol(&id, block, esi, &mut payload) {
+                        self.enqueue(self.ctrl, Frame::Bulk(Bulk { object: id, block, esi, len, payload }));
+                        self.stats.pushed_on_ctrl += 1;
+                    }
+                }
             }
         }
     }
@@ -2172,13 +2316,6 @@ impl Node {
         (want, sets)
     }
 
-    /// A HAVE list as ids and sets, from `skip` on in a rotation over `ids` when not all fit:
-    /// pieces of a manifest we hold go as sets, everything else by name. Returns how many of the
-    /// rotation's entries were taken.
-    fn pack_have(&self, ids: &[ShortId], skip: usize) -> (Vec<ShortId>, Vec<PieceSet>, usize) {
-        self.pack_have_after(&[], ids, skip)
-    }
-
     /// A holder's HAVE: each root manifest among `ids` first, each followed by the collection
     /// manifests new in it that we hold, then the rest. What we list with a root we upload after
     /// it if we are granted it, and an announcer that grants it on this list expects them
@@ -2206,7 +2343,9 @@ impl Node {
         (have, sets)
     }
 
-    /// `pack_have` behind `lead`, which goes first and by name.
+    /// A HAVE list as ids and sets: `lead` first and by name, then from `skip` on in a rotation
+    /// over the rest of `ids` when not all fit, pieces of a manifest we hold as sets and
+    /// everything else by name. Returns how many of the rotation's entries were taken.
     fn pack_have_after(&self, lead: &[ShortId], ids: &[ShortId], skip: usize) -> (Vec<ShortId>, Vec<PieceSet>, usize) {
         let index = if self.rounds_are_dear() { self.piece_index() } else { BTreeMap::new() };
         let mut groups: BTreeMap<ShortId, Vec<u16>> = BTreeMap::new();
@@ -2389,10 +2528,12 @@ impl Node {
         }
         let now = self.now;
         let stall = self.cfg.params.t_want_min_ms;
-        let stalled = self.wants.iter().all(|id| {
-            let p = self.progress.get(id).copied().unwrap_or_default();
-            now >= p.last_progress.max(p.last_want) + stall
-        });
+        // One want that has not moved for `T_want_min` is enough (§4, "one that caught little
+        // asks again"). Waiting until none moved let one object that trickled in from a
+        // neighbouring cell keep a follower silent for hours, holding 79.6 % of another, just
+        // short of a repair, in a band O town where the announcer had long stopped passing it.
+        let since = |id: &ShortId| self.progress.get(id).map(|p| p.last_progress.max(p.last_want)).unwrap_or(0);
+        let stalled = self.wants.iter().all(|id| now >= since(id) + stall) || self.wants.iter().any(|id| now >= since(id) + 2 * stall);
         let full = (self.want_refresh || stalled) && now >= self.next_want_at;
         // What a manifest we just adopted names is the rest of an ask already made, not a new
         // one: asked for soon, at most every `T_gossip_min`, and only what was never asked for.
@@ -2687,6 +2828,16 @@ impl Node {
                     phase_end = Some(from + width);
                 }
             }
+            // Nor in a phase that another announcer we hear gave someone else.
+            if let (Cand::Upload(..), Some(u), true) = (&cand, self.carriers[i].upload.as_ref(), divides) {
+                let announced = self.neighbors.get(&u.to).map(|n| n.upload_phases).unwrap_or(1).max(1) as u64;
+                let own = (u.phase as u64, announced.max(u.phase as u64 + 1));
+                if let Some(t) = self.foreign_phase_wait(i, u.to, own, now, airtime as Millis) {
+                    self.stats.foreign_phase_wait_ms += t.saturating_sub(now);
+                    self.carriers[i].content_until = t;
+                    return;
+                }
+            }
             // The announcer keeps quiet in a phase whose uploader it heard in the last two
             // cycles: it gave that time away, and a half-duplex radio that talks cannot listen.
             if let (Cand::Carousel(Item::Symbol { .. }), true) = (&cand, divides) {
@@ -2787,6 +2938,12 @@ impl Node {
                 }
             }
             if let Err(w) = self.carriers[i].fatsoen.take_airtime(now, airtime, budget, fresh) {
+                // Plus a random part of it (§5.4): the budget keeps accruing meanwhile, so the rate
+                // stays, and only the instant wanders. Paced exactly, two announcers that cannot
+                // hear each other and once started together sent every frame together from then
+                // on: a follower that heard both lost 2533 of 2615 frames in a band O town and
+                // never completed two objects in twelve hours.
+                let w = w + self.rng.below(w / 2 + 1);
                 self.carriers[i].content_until = now + w;
                 self.stats.defer_ms[3] += w;
                 return;
@@ -2835,7 +2992,19 @@ impl Node {
                     car.advance(&self.store, now);
                 }
             }
-            Cand::Upload(object, _, _, k) => {
+            Cand::Upload(object, block, esi, k) => {
+                // Whoever asked us to repair this symbol hears us, since we heard it ask: a repair
+                // answer lined up behind this upload leaves it out (§4). A granted uploader
+                // answers NACKs at once, behind the upload they came during, and in a band O town
+                // that upload had brought thirteen followers everything they listed before it
+                // answered them, 150 symbols each.
+                let c = &mut self.carriers[i];
+                for q in c.upload_queue.iter_mut().filter(|q| q.object == object) {
+                    if let Some(list) = q.list.as_mut() {
+                        list.retain(|(b, e)| !(*b == block && *e == esi));
+                    }
+                }
+                c.upload_queue.retain(|q| q.list.as_ref().map(|l| !l.is_empty()).unwrap_or(true));
                 let Some(u) = self.carriers[i].upload.as_mut() else { return };
                 match &mut u.list {
                     Some(list) => {
@@ -2911,7 +3080,7 @@ impl Node {
                 self.neighbors.remove(&gone);
             }
         }
-        let n = self.neighbors.entry(id).or_insert(Neighbor { last_heard: now, announcer: NodeId::NONE, score: 0, rssi, colour: 0, upload_phases: 1, heard_count: 0, haves: BTreeSet::new(), unread_sets: Vec::new() });
+        let n = self.neighbors.entry(id).or_insert(Neighbor { last_heard: now, announcer: NodeId::NONE, score: 0, rssi, colour: 0, upload_phases: 1, granted_phases: 0, heard_count: 0, haves: BTreeSet::new(), unread_sets: Vec::new() });
         n.last_heard = now;
         n.heard_count = n.heard_count.saturating_add(1);
         n.rssi = ((n.rssi as i32 + rssi as i32) / 2) as i16;
@@ -2972,6 +3141,7 @@ impl Node {
             n.announcer = b.announcer;
             n.colour = b.colour;
             n.upload_phases = b.upload_phases.max(1);
+            n.granted_phases &= below(n.upload_phases);
         }
         let me = self.cfg.id;
         let score = self.score;
@@ -2992,16 +3162,25 @@ impl Node {
         }
     }
 
-    fn rx_bulk(&mut self, _carrier: usize, b: &Bulk, out: &mut Vec<Action>) {
-        // Someone is sending this object: any offer of ours for it, and any answer we have not
-        // begun, is moot. This is what keeps an ungranted repair to one sender. And if it is one
-        // of ours, someone else carries it now.
-        self.offers.retain(|(o, _, _)| *o != b.object);
-        self.pending_ack.remove(&b.object);
-        self.last_bulk_rx = self.now;
+    fn rx_bulk(&mut self, carrier: usize, b: &Bulk, out: &mut Vec<Action>) {
         let now = self.now;
-        for c in self.carriers.iter_mut() {
-            c.cancel_pending(b.object, now);
+        if carrier == self.ctrl && self.ctrl != self.cell_carrier() {
+            // A manifest pushed on the control carrier (PROTOCOL.md §2): note it, so that we do
+            // not push it again, and keep it if we can. It says nothing about our cell: it ends
+            // no offer of ours and proves nothing about our announcer.
+            if self.store.is_known(&b.object) {
+                self.heard_on_ctrl.retain(|_, t| now < *t + self.cfg.params.t_want_min_ms);
+                self.heard_on_ctrl.insert(b.object, now);
+            }
+        } else {
+            // Someone is sending this object: any offer of ours for it, and any answer we have not
+            // begun, is moot. This is what keeps an ungranted repair to one sender. And if it is
+            // one of ours, someone else carries it now.
+            self.offers.retain(|(o, _, _)| *o != b.object);
+            self.pending_ack.remove(&b.object);
+            for c in self.carriers.iter_mut() {
+                c.cancel_pending(b.object, now);
+            }
         }
         let interested = self.wants.contains(&b.object) || self.store.is_known(&b.object) || self.is_announcing();
         if !interested {
@@ -3084,7 +3263,13 @@ impl Node {
             self.ask_rest();
         }
         if self.is_announcing() {
-            // Tell sources we have it, and ask for what we still lack, soon.
+            // Tell sources we have it, and ask for what we still lack, soon. Whoever still
+            // uploads it to us stops when it hears our HAVE (§4).
+            self.have_lead.retain(|(x, _)| *x != id);
+            if self.have_lead.len() >= MAX_GOSSIP_IDS {
+                self.have_lead.remove(0);
+            }
+            self.have_lead.push((id, self.now));
             self.gossip_soon();
         }
     }
@@ -3341,9 +3526,14 @@ impl Node {
         if g.announcer != g.node {
             self.forget_announcer(g.node);
         }
+        let me = self.cfg.id;
+        // The phases an announcer gave other holders (§4): our uploads to anyone else keep out of
+        // them while we hear it.
+        let granted: u16 = if g.announcer == g.node { g.want.iter().filter(|(_, h, _)| !h.is_none() && *h != me).fold(0, |m, (_, _, p)| m | 1 << (p & PHASE_MASK)) } else { 0 };
         {
             let n = self.touch(g.node, rssi);
             n.announcer = g.announcer;
+            n.granted_phases = if g.announcer == g.node { n.granted_phases | granted } else { 0 };
             for h in &g.have {
                 if n.haves.len() < 512 {
                     n.haves.insert(*h);
@@ -3357,7 +3547,6 @@ impl Node {
             }
         }
         self.bound_offered();
-        let me = self.cfg.id;
         let now = self.now;
         // An announcer's HAVE lists what its carousel serves; it is not an offer, since
         // announcers do not upload. Only a follower's HAVE is one.
@@ -3468,6 +3657,21 @@ impl Node {
                         self.pending_ack.remove(h);
                     }
                 }
+            }
+            // An upload ends when its announcer holds the object, running or lined up (§4). An
+            // announcer often completes an object before our upload of it does: from symbols it
+            // overheard us or others send to another cell's announcer, or from another holder.
+            // Without this rule a quarter of the upload frames of a band O town went to announcers
+            // that already held the object (FEASIBILITY.md §22).
+            if from_announcer {
+                let c = &mut self.carriers[i];
+                let held = |u: &Upload| u.to == g.node && g.have.contains(&u.object);
+                let before = c.upload_queue.len() + c.upload.is_some() as usize;
+                if c.upload.as_ref().map(held).unwrap_or(false) {
+                    c.upload = None;
+                }
+                c.upload_queue.retain(|u| !held(u));
+                self.stats.uploads_ended_held += (before - c.upload_queue.len() - c.upload.is_some() as usize) as u64;
             }
             if own {
                 // Only what we know of: what our announcer asks for matters to us only for objects
@@ -3840,6 +4044,15 @@ pub fn hop_channel(announcer: NodeId, dwell_index: u64, n: u64) -> u8 {
     z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
     z ^= z >> 31;
     (z % n.max(1)) as u8
+}
+
+/// The bits of the phases below `k`.
+fn below(k: u8) -> u16 {
+    if k >= 16 {
+        u16::MAX
+    } else {
+        (1u16 << k) - 1
+    }
 }
 
 fn compress_ranges(missing: &[u16]) -> Vec<(u16, u16)> {
