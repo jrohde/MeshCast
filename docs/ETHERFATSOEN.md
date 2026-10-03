@@ -26,7 +26,15 @@ threshold. On a busy channel it waits `rand(0, B × 2^attempt)` with `B` draft 5
 attempt 8 (12.8 s), then listens again. There is no maximum number of attempts: a MeshCast frame can
 wait forever. Control and metadata frames additionally wait a random 0–500 ms even on a clear
 channel: CCA cannot see a transmitter at the edge of range, and timers aligned to the same
-boundaries (dwell starts, 10-minute WANT intervals) would otherwise collide every time.
+boundaries (dwell starts, 10-minute WANT intervals) would otherwise collide every time. Content
+frames, paced at the rate of mechanism 4, wait a random part of each wait for budget again, up
+to half of it: the budget accrues meanwhile, so the rate stays and only the instant
+wanders. Paced exactly, two announcers that cannot hear each other, once in step, stayed in step
+frame for frame at the followers between them (PROTOCOL.md §5.4).
+
+An upload also keeps out of the upload phases that announcers it hears gave other holders,
+wherever that still leaves it a turn (PROTOCOL.md §4): the holder it would collide with there is
+one it cannot hear.
 
 The CCA threshold is set as close to the sensitivity as the radio allows (LoRa channel activity
 detection reaches the sensitivity; averaged RSSI on GFSK gets within about 3 dB), not at the

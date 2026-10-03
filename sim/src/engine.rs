@@ -454,6 +454,9 @@ impl Engine {
                         eprintln!("[{:>9.2} h] node {} carrier {} -> {:?} (announcer {:?})", now as f64 / 3.6e6, i, carrier, role, announcer);
                     }
                     self.metrics.role(now, nid, carrier, role, announcer);
+                    if std::env::var("MESHCAST_TRACE_WANTS_AT_ROLE").ok().and_then(|v| v.parse::<usize>().ok()) == Some(i) {
+                        eprintln!("WANTS-AT-ROLE {:.3} h node {} -> {:?} (announcer {:?}): {}", now as f64 / 3.6e6, i, role, announcer, self.nodes[i].node.want_report());
+                    }
                 }
             }
         }
@@ -539,6 +542,9 @@ impl Engine {
                 Ok(Frame::Gossip(g)) if g.announcer == g.node => {
                     let meet = self.nodes[from].node.in_meeting(carrier, now);
                     eprintln!("GS {} {} want={} have={} meet={} wants_len={}", now, from, g.want.len(), g.have.len(), meet, self.nodes[from].node.wants_len());
+                    if std::env::var("MESHCAST_TRACE_WANTS_AT_ROLE").ok().and_then(|v| v.parse::<usize>().ok()) == Some(from) {
+                        eprintln!("WANTS-AT-ASK {:.3} h node {}: {}", now as f64 / 3_600_000.0, from, self.nodes[from].node.want_report());
+                    }
                     for (o, h, p) in &g.want {
                         if !h.is_none() {
                             eprintln!("GT {} {} {} {:?} {} meet={}", now, from, h.0 - 1, o, p, meet);
@@ -676,10 +682,12 @@ impl Engine {
                     self.lose.remove(k);
                     continue;
                 }
-                if self.trace_rx == Some(j) {
-                    eprintln!("RX {} {} from {} {:?} esi={} before={:?}", now, j, tx.from, b.object, b.esi, self.nodes[j].node.object_progress(&b.object));
-                }
             }
+            // The symbol trace says what became of each frame that reached the node.
+            let rx_trace = match (&decoded, self.trace_rx == Some(j)) {
+                (Some(Frame::Bulk(b)), true) => Some(format!("RX {} {} from {} {:?} esi={} before={:?}", now, j, tx.from, b.object, b.esi, self.nodes[j].node.object_progress(&b.object))),
+                _ => None,
+            };
             // Half-duplex: receiver was transmitting on this carrier during the frame.
             let hd = self.nodes[j].own_tx[tx.carrier].iter().any(|&(s, e)| s < tx.end && e > tx.start);
             if hd {
@@ -693,6 +701,9 @@ impl Engine {
                     }
                 }
                 self.trace_offer(&tx, &offered, j, "hd", usize::MAX);
+                if let Some(t) = &rx_trace {
+                    eprintln!("{} lost=half-duplex", t);
+                }
                 continue;
             }
             let mut worst = f64::NEG_INFINITY;
@@ -766,10 +777,16 @@ impl Engine {
                     self.metrics.per_node_bulk[j].1 += 1;
                 }
                 self.trace_offer(&tx, &offered, j, "col", worst_from);
+                if let Some(t) = &rx_trace {
+                    eprintln!("{} lost=collision with {}", t, worst_from);
+                }
                 continue;
             }
             delivered += 1;
             self.trace_offer(&tx, &offered, j, "ok", usize::MAX);
+            if let Some(t) = &rx_trace {
+                eprintln!("{}", t);
+            }
             if tx.upload_to == Some(j) {
                 self.metrics.upload_outcome[0] += 1;
                 if self.trace_grants {

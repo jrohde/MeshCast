@@ -2431,3 +2431,164 @@ and in them the listener did not know the bulletin existed: its announcer had ne
 channel's newest root nor any announcer in reach that had it. Roots travel only through nodes
 that follow the channel or announcers that fetched them, and in a sparse band L network neither
 reaches every cell. Whatever comes next has to carry the roots, not only the pieces.
+
+## 22. Roots on the control carrier, and what they exposed
+
+§21 ended on roots: a listener whose cell never had a channel's newest root does not know the
+bulletin exists. The long-range control carrier already reaches every cell with
+`MANIFEST_ANNOUNCE`, and a root manifest is a symbol or two. So the first time a node announces a
+root it holds there, the root's symbols follow on the control carrier, with those of the
+collection manifests the root flags as changed, unless someone sent them there in the last
+`T_want_min` (PROTOCOL.md §2). Every node in range that follows the channel keeps them, and every
+announcer.
+
+The simulator lets a node hear its control carrier and its bulk carrier at once; an SX1262 has one
+radio and has to divide its listening between LoRa and GFSK (sim/README.md). The numbers below
+assume it hears both.
+
+### 22.1 Sparse interests
+
+The network of §21 (100 nodes over 15 km², 2 stations, 24 channels of which each node follows 2,
+48 hours), now on eight worlds:
+
+| 15 km², 24 channels, 2 followed, eight worlds | Main, band L | Now, band L | Main, band O | Now, band O |
+|---|---|---|---|---|
+| Bulletins delivered within one publication period | 69.7 to 85.8 % (mean 79.2) | 82.2 to 92.6 % (mean 88.0) | 99.6 to 99.9 % | 99.6 to 99.9 % |
+| Uploads | 4,121 to 6,635 | 2,862 to 4,359 | 804 to 1,064 | 529 to 703 |
+| Excursions | 300 to 329 | 151 to 191 | 0 to 9 | 0 to 6 |
+| Role changes after the first hour | 688 to 2,069 | 362 to 1,040 | 0 to 23 | 0 to 10 |
+
+Every world delivers more, by 2.7 to 15.4 points; the oracle of §21, a perfect backbone handing
+every announcer whatever a neighbour held, reached 85.4 to 90.2 % on four worlds. The control
+carrier carries 1,142 to 1,687 root symbols per band L world in 48 hours and is no busier for
+it: in two worlds its mean airtime share fell from 0.028 and 0.031 % to 0.019 and 0.022 %, and the
+busiest node's from 0.27 and 0.26 % to 0.13 %, because fewer role changes mean fewer
+announcements; in band O it stayed at 0.15 % for the busiest node. Band L
+still loses a bulletin in eight; the rest of §21 (a backbone for pieces, relaying channels not
+followed, no shun for an announcer that is asking) remains to try.
+
+### 22.2 What every cell asking at once exposed
+
+With roots everywhere at once, every cell asked the sources for their pieces at once, and a band O
+network over 15 km² took longer for large pieces: the first piece 0.8 to 6.8 minutes later from
+70 kB up. Traced world by world, the cause was not the roots but faults on main that the
+simultaneous asking made bigger. Each is fixed as a rule (PROTOCOL.md §4, §5.4), each also helps
+without the roots:
+
+- **An upload ends when its announcer holds the object.** In one world with 211 kB pieces, 13.5 %
+  of all upload frames on main went to announcers that already held the object, 24 % once roots
+  travelled: an announcer completes an object from what it overhears of uploads to another cell's
+  announcer, and the holder uploads it whole anyway. The holder now ends the upload on the
+  announcer's HAVE, and the announcer lists what it completed in the last `T_grant` first in every
+  HAVE, at most half of it: in the rotation alone, a holder that missed the one HAVE after the
+  completion uploaded 1,081 frames to an announcer that had held the object for four minutes.
+  With this rule and the next, 3.0 % of the upload frames went to an announcer that held the
+  object.
+- **A repair answer leaves out what its holder sent since.** A granted uploader answers NACKs at
+  once, but behind the upload they came during. In that world the upload brought thirteen
+  followers everything they had listed before the answers began, and each answer still sent its
+  150 symbols.
+- **An upload keeps out of the phases other announcers gave away.** In a world with 846 kB pieces,
+  7.5 % of the upload frames on main were lost at their own announcer to an upload to another
+  cell's announcer, by a holder they could not hear; 15.4 % once all three sources were granted at
+  once. A holder that hears another announcer's grants now keeps its own uploads out of those
+  phases: 6.9 %, and the first piece of that world came after 25.2 minutes instead of 32.4 on main
+  and 44.3 before the rule.
+- **A holder's own change of announcer ends nothing.** A holder that began uploading the first
+  piece of a programme to the next cell and then followed a new announcer of its own, during the
+  first election, dropped the upload and never said so; the grant ran idle for `T_grant`, the new
+  announcer did not ask for the piece it had overheard part of, and the first piece reached
+  listeners last, after 29.0 minutes. Now the upload goes on, and in that world playback starts
+  after 14.9 minutes (17.1 on main).
+
+Tried and not taken: *no offer to another cell while our own announcer still asks for the object*,
+on the reasoning that every cell asking a source at once made the source serve the others first.
+It did not make the band O network faster at 141 or 211 kB, cost 13 % more frames at 423 kB, and
+made band L over 15 km² start up to 5.7 minutes later (141 kB pieces: 32.1 minutes with the rule,
+26.4 without).
+
+Removing it exposed two older faults:
+
+- **A follower asks again when one want has stalled.** It asked again only when nothing it wanted
+  had moved for `T_want_min`. In one band O world a follower held 79.6 % of one object, just short
+  of a repair, while another trickled in from a neighbouring cell a few symbols every ten
+  minutes, and it stayed silent for hours; its announcer had long stopped passing the object, and
+  three announcers' carousels ran at the full duty cycle for twelve hours, 540,000 frames instead
+  of 110,000, with the 90th percentile of playback at 571 minutes. A follower now asks again when
+  nothing has moved for `T_want_min`, or one want has not for twice that: 60 minutes and 150,000
+  frames in that world. Asking whenever one want had waited `T_want_min` was about as fast and cost up
+  to 8 % more frames (band O, 423 kB; band O neighbourhood, 14 kB).
+- **Content is paced with jitter.** Two announcers that cannot hear each other sent every frame
+  together, 222 ms apart: in one band O world a follower between them lost 2,533 of the 2,615
+  frames of one object its announcer sent after the first hour, and two followers still lacked
+  objects after twelve hours (99.93 % delivered). The pacing wait now gets a random part of itself
+  added, up to half; the budget accrues meanwhile, so the rate stays. That world delivered 100 %.
+
+### 22.3 The false announcer, again
+
+Against five false announcers (lures that claim everything and serve nothing; ABUSE.md), the roots
+made the band L network worse: playback started after 48.7 minutes instead of 38.9. On main a
+captured follower lacked the roots, which the lure did not list, and an excursion for them took
+it to an honest announcer after 40 to 61 minutes (traced in one world: at 61 minutes it wanted
+three roots and nothing else); with the roots it holds the manifests and
+wants only pieces, which the lure claims, so only the evidence of PROTOCOL.md §5.2 frees it, and
+that evidence waited for a channel on which nobody at all had sent for `T_excursion`. In a busy
+network any frame of anyone else restarted that wait, and followers stayed 88 minutes. A follower
+now asks its announcer for one symbol of a claimed want as soon as it has stalled for
+`T_excursion`, and judges it by whether a symbol of that object arrives within `T_want_min`; only
+the named announcer answers, so the answer is attributable. Captures now end mostly after 40 to
+59 minutes. But a follower that leaves one lure follows the best announcer it hears next, which is
+often another lure, and the attack still costs more than on main:
+
+| 15 km² band L, eight worlds | Main | Roots, before the probe rule | Now |
+|---|---|---|---|
+| One lure: delivered, playback start, 90th percentile, frames | 99.5 %, 20.4, 41.7 min, 126,262 | 99.5 %, 18.0, 51.2 min, 124,395 | 99.2 %, 18.0, 41.3 min, 120,989 |
+| Five lures | 97.1 %, 38.9, 89.0 min, 131,044 | 97.1 %, 48.7, 133.7 min, 162,739 | 97.1 %, 49.4, 126.6 min, 149,189 |
+| Five lures claiming the maximum | 96.4 %, 42.8, 103.7 min, 130,873 | 96.5 %, 51.6, 204.0 min, 168,829 | 96.2 %, 50.1, 161.9 min, 149,326 |
+| Five spoofers flooding WANTs | 100 %, 20.3, 33.1 min, 279,664 | 100 %, 18.0, 26.0 min, 262,150 | 100 %, 18.0, 26.0 min, 262,150 |
+
+Under a WANT flood the probe rule took no honest announcer for a false one: no role changes after
+the first hour in any world of the living network, as before (§12).
+
+### 22.4 Everything else
+
+The nine scenarios, eight worlds each (minutes; frames are bulk frames per world):
+
+| Scenario | Playback start | 90th percentile | Frames |
+|---|---|---|---|
+| Neighbourhood, band O | 5.2 → 4.2 | 5.2 → 4.2 | −4.9 % |
+| Neighbourhood, band L | 9.5 → 6.9 | 14.0 → 10.8 | −0.4 % |
+| 15 km², band O | 5.9 → 5.9 | 13.7 → 12.3 | −13.2 % |
+| 15 km², band L | 19.7 → 16.5 | 32.0 → 23.2 | −6.4 % |
+| ESP-NOW neighbourhood | 12.1 → 7.6 | 15.4 → 11.9 | −0.7 % |
+| Two clusters, band L | 16.6 → 14.5 | 19.8 → 17.1 | 0.0 % |
+| LoRa only, 5 km | 69.3 → 69.4 | 69.3 → 69.4 | +0.2 % |
+| Town, band O | 16.2 → 14.2 | 33.0 → 27.1 | −4.6 % |
+| Town, band L | 26.6 → 23.6 | 36.5 → 35.4 | +0.9 % |
+
+The size sweep of §13 (an hour of music per source in pieces of 7 to 846 kB, four scenarios):
+playback starts sooner at every size in every scenario, by up to 7.2 minutes (band L over 15 km²,
+7 kB), and the 90th percentile is lower everywhere but one point (band L neighbourhood, 141 kB:
+16.8 → 17.2). The band O network over 15 km² needs 12 to 14 % fewer frames from 42 kB up. The
+costs: with 7 and 14 kB pieces there, holding all of a programme takes 3 to 4 minutes longer
+(48.3 → 52.5, 43.6 → 47.0) and 8 and 3 % more frames, though playback starts sooner and the 90th
+percentile halves at 7 kB (42.1 → 20.7); band L with pieces of 211 kB and more needs up to 8 % more
+frames.
+
+The living network of §7.6 (eight worlds, 72 hours): the median bulletin after 4.2 minutes instead
+of 5.4 in band L and 1.2 instead of 1.8 in band O with nodes switched off and on, 26 to 48 % fewer
+uploads, and the slowest newcomer of eight worlds caught up after 18.6 minutes instead of 62.4 in
+band L. With one WANT flooder, one spoofer or one lure, the same or better on every line.
+
+Collections (§16): playback starts sooner in sixteen of twenty variants and as soon in one. Over
+15 km² in band O, a programme in four collections starts 1.2 minutes later (18.8 → 20.0), with
+covers 0.4 minutes later, and one collection followed of four, with covers, 2.2 minutes later
+(17.7 → 19.9), each in fewer frames (−15, −20 and −9 %).
+
+### 22.5 Open
+
+- A follower that shuns a lure follows the next best announcer it hears, often another lure:
+  against five lures, playback still starts ten minutes later than on main.
+- The SX1262's one radio: what the root push costs in missed GFSK frames while a node listens to
+  LoRa has to be measured on hardware (Phase 1).
+- Band L with sparse interests still delivers 82 to 93 % within a period.

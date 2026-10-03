@@ -242,6 +242,16 @@ Rules:
   real announcement and refuse the real manifest, announcers passed the claim on to their cells,
   and every honest announcement made a follower evict the window it held while it waited for the
   new manifest (FEASIBILITY.md §13).
+- **A root travels with its announcement.** The first time a node announces a root manifest it
+  holds on the long-range control carrier, the root's symbols follow there, and those of the
+  collection manifests the root flags as changed, unless someone has sent them there in the last
+  `T_want_min`. Every node in range that follows the channel, and every announcer, keeps them; a
+  source that pushed its own counts it as delivered, since it sent the true bytes to everyone in
+  range, its announcer included. Symbols heard on the control carrier say nothing about a node's
+  own cell: they end no offer of its own and prove nothing about its announcer (§5.2). A root is
+  a symbol or two; without this it crossed a cell only through a node that followed its channel,
+  and where interests are sparse many cells never had it and their listeners never learned of the
+  bulletin it named (FEASIBILITY.md §21, §22).
 - **Followers keep their announcer current.** An announcer announces its manifests in ascending
   channel order: all of them in one frame, flagged as its whole list, when they fit, otherwise
   from a cursor that steps one entry less than a frame holds, so that any two neighbours on the
@@ -277,7 +287,7 @@ Frame types:
 | Type | Name | Who sends | Carrier | Purpose |
 |---|---|---|---|---|
 | 0x1 | `BEACON` | announcer only | the bulk carrier it announces on | heartbeat, election, time, spectrum weather |
-| 0x2 | `BULK` | announcer, or a source uploading to the announcer | bulk carriers | one symbol of one object |
+| 0x2 | `BULK` | announcer, or a source uploading to the announcer; a node that announces a root on the control carrier for the first time (§2) | bulk carriers; the symbols of a root and of the collection manifests new in it also on the control carrier | one symbol of one object |
 | 0x3 | `GOSSIP` | sources, the announcer, and followers with unserved wants | bulk carrier | HAVE / WANT summaries |
 | 0x4 | `MANIFEST_ANNOUNCE` | sources, the announcer, and followers whose announcer is behind (§2) | bulk carrier; a source's or announcer's copy **also** on the long-range control carrier | newest manifest id per channel; the control-carrier copy is discovery for other cells |
 | 0x5 | `NACK` | any node that is nearly complete on an object and sees no progress; a follower asking a silent announcer for proof (§5.2) | bulk carrier, rare | compact repair request, answered by the carousel or by the uploading source |
@@ -366,7 +376,8 @@ had (FEASIBILITY.md §14).
 Draft cap: 3 heard; HAVE ids and have sets within 96 bytes (8 × n_have + 18 × n_have_sets); wants
 and want sets within 104 bytes (13 × n_want + 23 × n_sets); at most 234 bytes, as before sets
 existed. For larger libraries a node rotates through its list across gossip rounds, most recently
-completed and most wanted first. Which want sets go first when not all fit is in §4: one for
+completed and most wanted first; an announcer lists what it completed in the last `T_grant` first
+in every HAVE, at most half the list (§4, "An upload ends when its announcer holds the object"). Which want sets go first when not all fit is in §4: one for
 every collection before a second for any, collections in progress first. Followers that are not
 sources send GOSSIP only when they have something new to offer that the announcer lacks (the
 "upload" case) or, rarely, a WANT for an object the announcer has never included; the default is
@@ -394,7 +405,7 @@ knows no manifest sends an empty whole list, so that its followers tell it their
 
 Draft cap 40 ranges, 183 bytes. Sent by a node that is nearly complete on an object (draft 80 %,
 or all of it but one symbol, §4) and has seen no progress for `T_nack_stall`. A follower's NACK
-goes to its announcer, whose carousel puts the missing symbols at the front of the next round;
+goes to its announcer, whose carousel sends the missing symbols first, before the rest of its round;
 but if that announcer is itself asking for the object (its WANT lists it) and has granted it to
 nobody for `T_grant`, nobody in
 the cell can repair it, and the follower names instead the holder it hears best among those that
@@ -433,8 +444,8 @@ the cell wants, as learned from GOSSIP and MANIFEST_ANNOUNCE, that the announcer
    because it plays first. Passing the earlier place first whatever its size was tried as well:
    listeners in band L could start up to a minute sooner, and a band O town needed 7 % more
    frames (FEASIBILITY.md §19).
-3. Merge NACKs received during the round; symbols named in NACKs are queued at the front of the
-   next round.
+3. Symbols named in NACKs go to a front queue that is sent before anything else, at once, in
+   the middle of a round as well.
 4. Objects that every heard follower reports complete leave the set.
 
 The round never waits for anyone. A follower that joins mid-round starts collecting and completes
@@ -445,7 +456,11 @@ everyone is done. Each object gets one full pass (`max_passes` = 1) and then lea
 unless a new WANT arrives after that pass: a follower that caught most of it repairs the rest
 with a NACK, one that caught little asks again. Three passes per object, the earlier draft, cost
 35 to 49 % more airtime in every scenario and bought no speed; the repair does the work of the
-repeated passes, aimed (FEASIBILITY.md §9.8).
+repeated passes, aimed (FEASIBILITY.md §9.8). A follower asks again when nothing it wants has
+arrived for `T_want_min`, or one thing it wants has not for twice that. Waiting until nothing
+arrived let one object that trickled in from a neighbouring cell keep a follower silent for
+hours, holding 79.6 % of another, just short of a repair; asking again whenever one want had
+waited `T_want_min` was about as fast and cost up to 8 % more frames (FEASIBILITY.md §22).
 
 **Repetition that does not help is repeated ever more slowly.** The first time an object is asked
 for again it is passed again at once; each further repetition waits longer after the pass before:
@@ -506,6 +521,12 @@ the granted uploader at once, and by any other holder after a wait: the wait gro
 of its own neighbours the holder hears better than the asker, so **whoever hears the asker best
 answers first**, and hearing anyone send those symbols cancels an answer that has not begun.
 No absolute signal level enters into it; the rank is relative to the holder's own neighbourhood.
+**An answer leaves out what its holder sent since.** A holder that heard a NACK heard its asker,
+so the asker hears the holder: every symbol the holder sends, in an upload or in another answer,
+leaves the answers it has lined up for that object, and an answer left with nothing ends. A
+granted uploader answers at once, but behind the upload the NACK came during, and in one band O
+town that upload brought thirteen followers everything they had listed before the answers began,
+150 symbols each (FEASIBILITY.md §22).
 
 **Who uploads: ask, offer, grant, send.** An announcer's WANT entry is either an *open ask*
 (`grant = NONE`) or a *grant* naming one uploader. Any node that holds the object, in the
@@ -526,6 +547,18 @@ grant another announcer, which never sent, and the followers that would have off
 because they had heard the other announcer's HAVE; FEASIBILITY.md §9.6. This is the DHCP pattern, and it replaced "any holder answers after a random wait",
 which the simulator showed producing fourteen uploads per object per cell among holders that
 could not hear each other's suppression.
+
+**An upload ends when its announcer holds the object.** A holder ends an upload, running or lined
+up, as soon as the announcer it uploads to lists the object in a HAVE. An announcer often
+completes an object before an upload of it ends, from symbols it overheard the same holder or
+another send to a neighbouring cell's announcer, or from another holder, and the holder cannot
+tell otherwise. So an announcer lists first in every HAVE, for `T_grant` after it completed them,
+the objects it completed, the latest first and at most half the list: a HAVE holds twelve ids
+(§3.3), and in the rotation alone a holder that had missed the one HAVE after the completion
+uploaded the object whole, minutes later. Without the rule, 13.5 % of the upload frames in one
+band O town went to announcers that already held the object, and a quarter once roots travelled on
+the control carrier (FEASIBILITY.md §22). Anyone can send a HAVE in an announcer's name;
+ABUSE.md lists what a forged name can do.
 
 **The receiver divides its listening time.** Holders on opposite sides of a cell cannot hear
 each other, so carrier sensing cannot make them take turns, and their uploads collide at the
@@ -580,12 +613,30 @@ without a symbol. Answers that
 nobody named, from holders that cannot hear each other, were nearly all the collisions left in
 band L after grants had phases; FEASIBILITY.md §9.6.
 
+**An upload keeps out of the phases other announcers gave away.** Phases are slots of one grid,
+`T_upload_phase` wide from time zero, so the slot tells which phase every announcer is in. A
+holder that hears another announcer grant a phase to a holder other than itself, in a WANT, keeps
+its uploads to anyone else out of that phase while it hears that announcer, wherever that
+announcer listens on the channel it sends on. The phase counts until that announcer's beacon
+counts fewer phases or it stops announcing. A holder in range of the next cell's announcer
+otherwise collides there with that cell's uploaders, which it cannot hear: in one band O world 7.5 %
+of the upload frames were lost at their own announcer to an upload to another, and 15 % once
+roots travelled on the control carrier (FEASIBILITY.md §22). The holder yields only where
+that leaves it a turn: when none of its next 64 slots would be free, it ignores the other
+announcers' phases. Under a duty cycle that is rare, since the cycle holds a holder to a tenth of
+the time and the phases leave it more.
+
 **A grant ends with the announcer's role.** Grants belong to the announcer role: a node that
 stops announcing drops them, and it never names a holder in the WANT it sends as a follower. A
 holder stops every upload to a node, and forgets that node's grants, as soon as it hears that
 node say it follows someone else (any GOSSIP whose `announcer_id` is not its sender). Before this
 rule, a third of all upload frames in a living band L network went to nodes that had stopped
-announcing; FEASIBILITY.md §9.6.
+announcing; FEASIBILITY.md §9.6. **A holder's own change of announcer ends nothing.** What another
+cell's announcer granted a holder is still that announcer's when the holder follows someone new:
+a running upload goes on, and what is lined up is ranked anew, the new announcer's grants first.
+Dropped then, an upload to the next cell ended unfinished and unsaid, its grant ran idle for
+`T_grant`, and in one band O world the first piece of a programme reached its listeners last
+(FEASIBILITY.md §22).
 
 **Ask only for what is not coming.** An announcer's WANT lists objects that have received no
 symbol for `T_nack_stall`; an object whose symbols are arriving is not asked for again.
@@ -883,14 +934,18 @@ persist and EtherFatsoen shares the channel between them.
   is no evidence against this one. Whether listed or not, because a false announcer that lists only
   what a follower cannot want yet (the objects of a manifest the follower lacks) held followers that
   wanted only that manifest for good once manifests were no longer repeated (FEASIBILITY.md §13).
-  **Sooner, where the channel is silent, the follower asks for proof.** When a want the announcer
-  lists or ignores has stalled for `T_excursion` and not one `BULK` frame of anything has arrived
-  in that time, the follower sends its announcer a `NACK` for one symbol of it, naming the
+  **Sooner, the follower asks for proof.** When a want the announcer lists or ignores has stalled
+  for `T_excursion`, the follower sends its announcer a `NACK` for one symbol of it, naming the
   announcer as the one to answer, every `T_nack_stall`. An honest announcer answers it from the
-  front of its next round, whatever its repetition backoff; one that has still sent nothing
-  `T_want_min` later serves nothing. Silence alone is no evidence: an honest announcer whose
-  repetitions a WANT flood holds back is silent too, for up to its ceiling, and the manifest
-  repetition that used to fill that silence is gone (§4). A source's own object stops being
+  front of its carousel at once, whatever its repetition backoff; one that has sent not one
+  symbol of that object `T_want_min` after the first `NACK` serves nothing. Waiting alone is no
+  evidence: an honest announcer whose repetitions a WANT flood holds back is silent on that
+  object too, for up to its ceiling. Only the named announcer answers such a `NACK`, so a symbol
+  of the object is its answer even on a channel the follower shares with other cells. The rule
+  first asked only once not one `BULK` frame of anything had arrived for `T_excursion`; any frame
+  of anyone else restarted that wait, and in a busy band L network a false announcer kept its
+  followers for 88 minutes once they held the manifests and wanted only what it claimed
+  (FEASIBILITY.md §22). A source's own object stops being
   pending, as in the upload rule of §4, when the source hears anyone send it, passes it itself as
   announcer, or sees an announcer it uploaded the object to list it, its own or a neighbouring
   cell's; otherwise a source that had announced its own objects, or uploaded them to a neighbouring
@@ -960,6 +1015,13 @@ Every control or metadata frame on a bulk carrier waits a random `0..T_jitter` (
 before transmission, beacons excepted. CCA cannot see a transmitter at the edge of range (a few
 dB above sensitivity), and without jitter two nodes whose timers are both aligned to dwell
 boundaries collide every single time.
+
+Content frames are paced by the EtherFatsoen budget (ETHERFATSOEN.md), and a node that waits for
+budget waits a random part of that wait again, up to half of it. The budget keeps accruing
+meanwhile, so the rate stays and only the instant wanders. Paced exactly, two announcers that
+cannot hear each other, once in step, stayed in step frame for frame: in a band O town a follower
+that heard both lost 2533 of the 2615 frames of one object that its announcer sent it after the
+first hour, and never completed two objects in twelve hours (FEASIBILITY.md §22).
 
 ### 5.5 What a listener experiences
 

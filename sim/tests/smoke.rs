@@ -983,3 +983,85 @@ fn made_up_names_are_kept_within_bounds() {
         }
     }
 }
+
+fn have_frame(announcer: meshcast_core::ids::NodeId, ids: &[meshcast_core::ids::ShortId]) -> meshcast_core::frame::Frame {
+    use meshcast_core::frame::{Frame, Gossip};
+    Frame::Gossip(Gossip { node: announcer, announcer, announcer_colour: 0, announcer_colours: 1, heard: Vec::new(), have: ids.to_vec(), have_sets: Vec::new(), want: Vec::new(), sets: Vec::new() })
+}
+
+#[test]
+fn a_holder_stops_uploading_what_its_announcer_holds() {
+    // An announcer often completes an object before an upload of it ends, from symbols it
+    // overheard or from another holder, and lists it in its next HAVE. The holder ends that
+    // upload, running or lined up; before, a quarter of the upload frames of a band O town went to
+    // announcers that already held the object (FEASIBILITY.md §22). Another announcer's HAVE
+    // ends nothing of ours to this one.
+    let (mut b, p) = granted_world(4, "snac-music:42", false);
+    let station = b.engine.nodes[2].node.id();
+    let other = meshcast_core::ids::NodeId(0x6666);
+    let src = &mut b.engine.nodes[0].node;
+    let me = src.id();
+    let now = b.engine.now;
+    src.handle_frame(now, 1, &grant_frame(station, me, &[p[0], p[1], p[2]]), -60);
+    assert_eq!(src.uploads(1).len(), 3, "three grants should line up three uploads");
+    src.handle_frame(now + 10, 1, &have_frame(other, &[p[0], p[1]]), -60);
+    assert_eq!(src.uploads(1).len(), 3, "another announcer's HAVE should end nothing");
+    src.handle_frame(now + 20, 1, &have_frame(station, &[p[0], p[1]]), -60);
+    let left: Vec<_> = src.uploads(1).iter().map(|(id, _)| *id).collect();
+    assert_eq!(left, vec![p[2]], "only the object the announcer does not hold should be left");
+    assert_eq!(src.stats.uploads_ended_held, 2);
+}
+
+#[test]
+fn a_repair_answer_leaves_out_what_an_upload_just_sent() {
+    // A granted uploader answers a NACK behind the upload it came during. That upload sends the
+    // symbols the asker lacked, and the asker, which we heard, hears them: the answer leaves them
+    // out. In a band O town thirteen followers were sent 150 symbols each that the upload ahead of
+    // the answers had already brought them (FEASIBILITY.md §22).
+    use meshcast_core::frame::{Frame, Nack};
+    let (mut b, p) = granted_world(4, "snac-music:42", false);
+    // Another cell's announcer that never speaks again: nothing ends the upload to it early.
+    let other = meshcast_core::ids::NodeId(0x6666);
+    let asker = meshcast_core::ids::NodeId(0x7777);
+    let now = b.engine.now;
+    {
+        let src = &mut b.engine.nodes[0].node;
+        let me = src.id();
+        src.handle_frame(now, 1, &grant_frame(other, me, &[p[0]]), -60);
+        src.handle_frame(now + 10, 1, &Frame::Nack(Nack { node: asker, object: p[0], block: 0, answerer: me, phase: 0, missing: vec![(0, 40)] }), -60);
+        assert_eq!(src.uploads(1), vec![(p[0], other), (p[0], asker)], "the answer should wait behind the upload");
+    }
+    b.engine.poke(0);
+    let mut t = now;
+    while b.engine.nodes[0].node.uploads(1).contains(&(p[0], other)) {
+        t += 5_000;
+        assert!(t < now + 20 * 60_000, "the upload should end within 20 minutes");
+        b.engine.run(t, 600_000);
+    }
+    let up = b.engine.nodes[0].node.stats.uploads_started;
+    assert!(!b.engine.nodes[0].node.uploads(1).contains(&(p[0], asker)), "the answer should be left with nothing to send");
+    b.engine.run(t + 60_000, 600_000);
+    assert_eq!(b.engine.nodes[0].node.stats.uploads_started, up, "no answer should have gone out");
+}
+
+#[test]
+fn an_upload_to_another_cell_outlives_a_change_of_announcer() {
+    // What another cell's announcer granted a holder is still that announcer's when the holder
+    // follows someone new. Dropped then, the upload ended unfinished and unsaid, its grant ran idle
+    // for `T_grant`, and in a band O town the first piece of a programme came last
+    // (FEASIBILITY.md §22).
+    use meshcast_core::frame::{Beacon, CarrierKind, Frame};
+    let (mut b, p) = granted_world(4, "snac-music:42", false);
+    let other = meshcast_core::ids::NodeId(0x6666);
+    let louder = meshcast_core::ids::NodeId(0x5555);
+    let now = b.engine.now;
+    let src = &mut b.engine.nodes[0].node;
+    let me = src.id();
+    let before = src.announcer_of(1);
+    src.handle_frame(now, 1, &grant_frame(other, me, &[p[0]]), -60);
+    assert_eq!(src.uploads(1), vec![(p[0], other)]);
+    let beacon = Beacon { carrier: CarrierKind::GfskBulk, announcer: louder, score: 1000, caps: 0, next_ms: 30_000, round: 0, utc: 0, time_quality: 0, colour: 0, colours: 1, upload_phases: 1, occupancy: [0; 4] };
+    src.handle_frame(now + 10, 1, &Frame::Beacon(beacon), -20);
+    assert!(src.announcer_of(1) == louder && before != louder, "the source should now follow the louder announcer");
+    assert_eq!(src.uploads(1), vec![(p[0], other)], "the upload to another cell should go on");
+}
