@@ -2592,3 +2592,110 @@ covers 0.4 minutes later, and one collection followed of four, with covers, 2.2 
 - The SX1262's one radio: what the root push costs in missed GFSK frames while a node listens to
   LoRa has to be measured on hardware (Phase 1).
 - Band L with sparse interests still delivers 82 to 93 % within a period.
+
+## 23. One radio for two carriers
+
+Until now the simulator let a node hear the LoRa control carrier and the GFSK bulk carrier at
+once. An SX1262 cannot: it receives LoRa or (G)FSK, the packet type changes only in standby, and
+the other mode's settings are lost on the way (SX1261/2 datasheet rev 1.2, §13.4.2); the change
+is quick, standby to receive taking 83 µs (Table 8-2), and LoRa channel activity detection lasts
+1 to 16 symbols plus about half a symbol (§6.1.5). The baseline network is made of such nodes, so
+the two-receiver numbers of §21 and §22 were an upper bound. The lower bound: nobody hears the
+control carrier at all.
+
+| Eight worlds each | Two receivers (§22) | Control carrier never heard |
+|---|---|---|
+| Band L neighbourhood: playback start, 90th percentile | 6.9, 10.8 min | 9.4, 23.8 min |
+| Band L over 15 km² | 16.5, 23.2 min | 22.5, 56.8 min |
+| ESP-NOW neighbourhood | 7.6, 11.9 min | 12.5, 44.4 min |
+| Two band L clusters | 14.5, 17.1 min | 28.0, 36.6 min |
+| Band L town | 23.6, 35.4 min | 34.7, 72.0 min |
+| Sparse interests, band L: delivered within a period (mean) | 88.0 % | 78.8 % |
+
+So the control carrier matters even within one cell, where it brings every node the roots at
+once, and a one-radio node has to divide its time between the two.
+
+### 23.1 The control window
+
+Listening for LoRa briefly and often would cut into GFSK frames of 20 ms, so the window is common
+instead: every node sends control-carrier frames only in a window of `T_ctrl_window` every
+`T_ctrl_period`, a one-radio node listens on the control carrier only then and on the bulk carrier
+otherwise, and a bulk carrier on the same radio is silent in the window (PROTOCOL.md §3). ESP-NOW
+and IP run on another radio and are not held. Four settings, eight worlds each, measured before the
+changes of §23.2:
+
+| Window | Time held | Sparse band L, mean delivered | Band L over 15 km²: start, p90 | Band O town: start, p90 |
+|---|---|---|---|---|
+| 1 s every 30 s | 3.3 % | 88.0 % | 17.6, 25.1 min | 15.8, 30.5 min |
+| 2 s every 30 s | 6.7 % | 86.8 % | 16.9, 24.3 min | 15.5, 32.0 min |
+| 2 s every 60 s | 3.3 % | 88.4 % | 17.2, 24.0 min | 15.5, 29.6 min |
+| 4 s every 60 s | 6.7 % | 88.8 % | 17.8, 24.4 min | 15.5, 31.6 min |
+
+All four keep nearly everything the control carrier brings. The draft takes 4 s every 60 s: the
+most room for clocks that disagree and for a window shared by many nodes. With it the busiest
+node of a sparse band L world spent 0.13 % of its time on the control carrier, as with two
+receivers; with 1 s every 30 s, 0.16 %. Where the window falls did not matter either: windows every
+50 or 100 s placed so that they never meet the meeting dwell of band L were no better than the
+draft, whose window meets one in five.
+
+### 23.2 What the window exposed
+
+- **A root's push fits one window.** The push of §22 sent a root's collection manifests whole.
+  With 7 kB pieces a programme of 120 pieces has a collection manifest of many symbols, and
+  pushed at 4 s a minute it reached a band L neighbourhood after 12 to 14 minutes instead of 4.2;
+  its source counted it delivered when it pushed it and no longer offered it in its own cell.
+  Now a push carries the root and only as many of the collection manifests as fit one window (about
+  ten symbols at SF7); the rest go the usual way: 5.4 to 5.6 minutes in that world, and playback
+  in band L neighbourhoods with 7 kB pieces starts after 10.8 minutes instead of 16.9 (8.3 with
+  two receivers).
+- **The phase count an announcer gives out counts only grants it has named.** In the ring of
+  six hidden uploaders (smoke test `hidden_uploaders_take_turns_at_their_announcer`), the shifted
+  timing exposed a fault latent on main: an announcer whose asks were full held a grant it had
+  not yet sent, counted its phase in the beacon's `upload_phases`, and the uploaders that had
+  heard that beacon and one that had not divided the time into six and five phases and collided,
+  frame for frame: 5.3 % of the upload frames, against 2 % allowed. Counting only grants named
+  in a WANT, and letting an uploader take the count also from the grants and repair phases it
+  hears its announcer give out, 1.6 %.
+
+### 23.3 Against main
+
+Main before §22 assumed two receivers too; it is the row a user of main would have seen.
+
+| Eight worlds each: playback start, 90th percentile (min) | Before §22 | §22, two receivers | Now, one radio |
+|---|---|---|---|
+| Neighbourhood, band O | 5.2, 5.2 | 4.2, 4.2 | 4.1, 4.3 |
+| Neighbourhood, band L | 9.5, 14.0 | 6.9, 10.8 | 7.5, 11.3 |
+| 15 km², band O | 5.9, 13.7 | 5.9, 12.3 | 5.1, 12.2 |
+| 15 km², band L | 19.7, 32.0 | 16.5, 23.2 | 17.4, 24.3 |
+| ESP-NOW neighbourhood | 12.1, 15.4 | 7.6, 11.9 | 7.8, 12.9 |
+| Two band L clusters | 16.6, 19.8 | 14.5, 17.1 | 14.8, 16.8 |
+| LoRa only, 5 km | 69.3, 69.3 | 69.4, 69.4 | 69.4, 69.4 |
+| Town, band O | 16.2, 33.0 | 14.2, 27.1 | 14.8, 29.3 |
+| Town, band L | 26.6, 36.5 | 23.6, 35.4 | 23.7, 32.8 |
+| Sparse interests, band L: delivered within a period (mean) | 79.2 % | 88.0 % | 88.5 % |
+
+The one radio costs at most a minute in the matrix, and the sparse band L network keeps all of
+§22's gain. The size sweep shows the cost more clearly: playback in band L over 15 km² starts 1
+to 5 minutes later at every size (7 kB: 37.8 → 42.9 minutes), in band L neighbourhoods up to 2.8
+minutes later with pieces of 14 kB and less, and band O over 15 km² needs 10 to 14 % more frames
+with pieces of 211 kB and more. Collections cost up to 2.8 minutes in band L. In the living
+network with nodes switched off and on, band L is unchanged (median 4.2 minutes, 263 uploads)
+and band O back where it was before §22 (1.8 minutes instead of 1.2), since a root now waits up
+to a minute for its window.
+
+Under five lures 96.0 % was delivered instead of 97.1 %. The simulated lure ignores the window,
+so followers miss some of its beacons, leave it after three, and are taken back by the next
+one: in the living band L network under one lure that made 136 to 499 role changes after the
+first hour per world instead of 4 to 88, with the slowest bulletin earlier (42.6 minutes against
+51.0). Under WANT floods and spoofed names, no role changes, as before.
+
+### 23.4 Open
+
+- **Clocks.** The window needs the time base the hop sequences already use (PROTOCOL.md §5.3,
+  §6), to well within its 4 s; the simulator's clocks are perfect. How far apart offline cells
+  drift is a Phase 1 measurement.
+- **Window jamming.** A transmitter that fills every window blocks the control carrier at
+  6.7 % airtime (ABUSE.md); before, that took all of it.
+- **Stations with a concentrator.** An SX1302 receives LoRa and FSK at once and could listen to
+  the control carrier always, relaying into its cell what it hears; the window rule keeps it
+  silent there outside the window for the sake of the others.
