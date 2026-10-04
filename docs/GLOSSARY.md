@@ -95,8 +95,9 @@ by it, the earlier place first (PROTOCOL.md §2, §4).
 100 s per hour per 200 kHz, more with frequency agility (AFA).
 
 **Relay.** Fetching, in one's own cell, what another cell's announcer has asked for its listeners
-and nobody met for `T_relay_wait`, to hand it on; any node does it for any channel, for what it
-can name, within its carry budget (PROTOCOL.md §4).
+and others are unlikely to bring soon, to hand it on; any node does it for any channel, for what
+it can name, within its carry budget, and it ends when the cell that asked holds the object
+(PROTOCOL.md §4).
 
 **Repair symbol.** A RaptorQ-encoded symbol (v1) that lets a receiver reconstruct a block from any
 sufficiently large subset of symbols.

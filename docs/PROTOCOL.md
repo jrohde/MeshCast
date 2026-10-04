@@ -34,7 +34,14 @@ all objects.
   before its announcement). It keeps their payloads, not just a count, and the object completes
   when its metadata arrives: once, with the same consequences as completing by a symbol (a
   manifest is adopted, the want is dropped). Only an object too large for the node to keep at
-  all is tracked by count alone, as every large object is.
+  all is tracked by count alone, as every large object is. An announcement (§2) is metadata
+  enough: the kind it names is taken for an object whose kind is not yet known, and what was
+  counted without its payload is fetched again if the node must read it. A root manifest needs
+  none: its bytes name its channel and carry the channel's signature, so a node that completes
+  an object nobody has named reads it as a root and, if it is one, adopts it (§2). An announcer
+  that overheard a neighbouring cell's upload of a new root, and heard no announcement of it,
+  otherwise held the root without reading it, and its cell stayed a seq behind
+  (FEASIBILITY.md §28).
 - **Integrity**: v0 verifies the full object hash on completion and discards the object on
   mismatch, so one wrong symbol per pass can keep an object from completing. v1 verifies an object
   in pieces as they arrive against its id, using the BLAKE3 tree the id already is the root of
@@ -388,7 +395,7 @@ it, and a want for such an object was granted and answered over and over; FEASIB
 | 14 | 6 × n_heard | other announcers this node hears: id (4), colour (1), colours (1); the conflict report (§5) |
 | … | 8 × n_have | short ids the node has completely |
 | … | 18 × n_have_sets | have sets: manifest short id (8), first piece (2), bitmap (8) |
-| … | 13 × n_want | wants: short id (8), granted holder (4; 0 = open ask), phase byte (1): the upload phase of the grant in its low four bits (§4), and in bit 7 an announcer's mark that one of its own followers asked for the object |
+| … | 13 × n_want | wants: short id (8), granted holder (4; 0 = open ask), phase byte (1): the upload phase of the grant in its low four bits (§4), and in bit 7 an announcer's mark that it, or one of its own followers, listens to the object |
 | … | 23 × n_sets | want sets: manifest short id (8), first piece (2), bitmap (8), granted holder (4; 0 = open ask), phase byte (1) as for a want |
 | … | 2 | CRC-16 |
 
@@ -799,26 +806,54 @@ that hear each other. Each kind of pair has its own way across:
 - *A follower of one cell hears the other cell's announcer, and holds what it asks for*: it
   answers the open ask with an offer in the rendezvous, and uploads when granted (above).
 - *It hears the other cell ask, for its listeners, for something it does not hold*: it relays.
-  An announcer marks in its asks what its own followers asked for (§3.3). Once such an ask
-  has gone unmet for `T_relay_wait`, a follower that hears it and can name the object, because
-  a collection manifest or root it holds names it (its own, or the menu it keeps, §2), wants
-  the piece or cover itself, fetches it in its own cell like anything it wants, keeps it, and
-  answers the next ask with an offer. A set it cannot read names a collection manifest of a
-  channel it does not follow: it fetches that manifest first, from its own announcer, which
-  holds the manifests of every channel it hears of (§2) and answers only for names it knows,
-  and relays the pieces once it can name them; they have waited as long as the asks for the
-  manifest. It relays for listeners, not to fill another announcer's library, and only what
-  nobody met, since most asks are answered by a holder within a round. Followers of single
-  collections carry less than followers of whole channels, and with every listener of a
-  15 km² band L network following one album of four the chain of carriers of an album broke: in
-  one world 14 % of its listeners never had it. With relaying every listener had its album, and
-  where nothing was missing it cost 6 % more frames at most (FEASIBILITY.md §17). Relaying only
-  for channels it follows left a sparse network without a chain: where a channel has a handful
-  of followers in the whole network, most cells between its source and a listener have none,
-  and a band L network over 15 km² delivered 92.0 % of its bulletins in their period; relaying
-  for any channel, 99.7 %, with 22 % fewer frames (FEASIBILITY.md §27). What a follower relays
-  it keeps while it is asked for or used and `want_ttl` longer, within its carry budget (below);
-  kept for good, a long-lived node would have kept everything it ever relayed.
+  An announcer marks in its asks what its own followers asked for, and what it listens to itself
+  (§3.3): an announcer is a listener too. Marking only its followers' asks, an announcer that
+  followed a channel nobody else in its cell followed asked for its bulletins unmarked for ten
+  hours, and nobody relayed them (FEASIBILITY.md §28). Once such an ask has gone unmet long
+  enough (below), a follower that hears it and can name the object, because a
+  collection manifest or root it holds names it (its own, or the menu it keeps, §2), wants the
+  piece or cover itself, fetches it in its own cell like anything it wants, keeps it, and answers
+  the next ask with an offer. A set it cannot read names a collection manifest of a channel it
+  does not follow: it fetches that manifest first, from its own announcer, which holds the
+  manifests of every channel it hears of (§2) and answers only for names it knows, and relays
+  the pieces once it can name them; they have waited as long as the asks for the manifest. It
+  relays for listeners, not to fill another announcer's library, and only what nobody met,
+  since most asks are answered by a holder within a round. Followers of single collections
+  carry less than followers of whole channels, and with every listener of a 15 km² band L
+  network following one album of four the chain of carriers of an album broke: in one world
+  14 % of its listeners never had it. With relaying every listener had its album, and where
+  nothing was missing it cost 6 % more frames at most (FEASIBILITY.md §17). Relaying only for
+  channels it follows left a sparse network without a chain: where a channel has a handful of
+  followers in the whole network, most cells between its source and a listener have none, and a
+  band L network over 15 km² delivered 92.0 % of its bulletins in their period; relaying for
+  any channel, 99.7 %, with 22 % fewer frames (FEASIBILITY.md §27). What a follower relays it
+  keeps while it is asked for or used and `want_ttl` longer, within its carry budget (below);
+  kept for good, a long-lived node would have kept everything it ever relayed. **A relay ends
+  when the cell that asked for it holds the object:** once the asking announcer lists it, a
+  follower that has not fetched it yet no longer wants it. Kept until `want_ttl` instead, relays
+  passed the ask on from cell to cell: a relayer's own announcer asked for the object, marked for
+  its listeners, the next cell relayed that, and so on, long after the listeners had it. More
+  than half of all asks marked for listeners came from cells with no listener of the object, and
+  a bulletin with a handful of listeners was fetched by some forty nodes. Withdrawing also when
+  the asking announcer granted the object to someone else, delivery fell: a grant is not yet
+  delivery (FEASIBILITY.md §28). How long is enough, a node learns from the asks it hears: **a
+  relay waits as long as others would likely have met the ask.** For every age bucket (under 1,
+  2, 4 and so on up to 64 minutes, and over) it counts the other cells' asks it heard reach that
+  age, and those of them that someone else met before they were twice as old: the asking
+  announcer granted the object to a holder, or lists it as held. An ask that it relayed itself,
+  or forgot, counts by half and as not met, in the bucket where it left. It relays an ask once
+  fewer than `relay_risk` of the asks of its age were met so, and at the latest after
+  `want_ttl`. Before it has heard any it expects what `T_relay_wait` says: asks met half the
+  time in a bucket that ends within it and never after, with the weight of four asks; and what
+  it learned halves whenever 512 asks have reached the first bucket, so that what the
+  neighbourhood does now counts most. In band O a holder or a follower in a neighbouring cell
+  meets most asks within half an hour, and nodes wait longer than before; in a sparse band L
+  network nobody else meets most of them, and nodes relay within the first minutes. Waiting a
+  fixed number of the asking announcer's rounds instead made band O send 10 to 28 % more
+  frames: where rounds of asking are cheap they say little about how soon holders answer. With
+  both rules a sparse band L network delivered as much as before, 99.8 % of its bulletins in
+  their period, with 4 % fewer frames, and its median bulletin arrived after 10 minutes instead
+  of 19 (FEASIBILITY.md §28).
 - *A follower hears another cell's announcer that has what it wants, which its own cannot get*:
   it goes there. A follower whose want has brought no symbol for `T_excursion` (draft 40 min),
   whose announcer has not granted the object to any uploader in that time and does not list it
@@ -872,16 +907,20 @@ node holds what it relays and, as announcer, what its followers asked for. Of th
 most `carry_budget` bytes, chosen per device from what it can spare, and the menu it keeps of
 channels it neither follows nor serves (§2) counts too; the manifests of what it follows or
 serves do not, being small and how it knows what it plays and serves. An object is *of use*
-while it arrives, is asked for or is sent, and for `want_ttl` after. When the budget is full,
-what has not been of use gives way, least recently used first, and keeps its metadata, so that
-it can be fetched again by name; what is of use stays, even over the budget, and the node takes
-on no more relays until there is room. Evicting whatever was least recently used made a small
-budget evict what had just been fetched for another cell before it was handed on, and fetch
-it again: at 64 kB per node a sparse band L network delivered 77.8 % of its bulletins, against
-99.5 % without a budget, and sent 7.7 times the frames. Declining instead, it delivered
-98.0 % against 99.7 %, with 3 % fewer frames (FEASIBILITY.md §27). A budget of 0 relays nothing; an
-announcer still fetches what its followers ask for, and lets it go once it has not been of use
-for `want_ttl`.
+while it arrives, is asked for or is sent, and for `want_ttl` after; the menu of a channel a
+node neither follows nor serves is of use while it names another cell's ask, not when it
+arrives. When the budget is full, what has not been of use gives way, and so does a relay
+another cell's announcer lists as held; each keeps its metadata, so that it can be fetched again
+by name: **first the menu, then relays another cell's announcer lists, then the least recently
+used.** The menu comes by again for free, and a relay an announcer listed was needed again far
+less often than other content; ordered by use alone, the menu filled small budgets and kept
+relays out (FEASIBILITY.md §28). What is of use stays, even over the budget, and the node takes on
+no more relays until there is room. Evicting
+whatever was least recently used made a small budget evict what had just been fetched for
+another cell before it was handed on, and fetch it again: at 64 kB per node a sparse band L
+network delivered 77.8 % of its bulletins, against 99.5 % without a budget, and sent 7.7 times
+the frames (FEASIBILITY.md §27). A budget of 0 relays nothing; an announcer still fetches what
+its followers ask for, and lets it go once it has not been of use for `want_ttl`.
 
 **Fresh before repeated.** The first copy of an object into a cell (an upload, or the carousel's
 first pass) is worth more than its second and third pass. Fresh content is paced at the full
@@ -1287,8 +1326,9 @@ simulator has no node with one.
 | repetition spacing | 0, then `T_want_min` × 1, 2, 4, 8 | wait before an object is passed again; the level climbs with each repetition and resets after a rest of twice the wait |
 | `T_nack_stall` | 60 s | no progress on a nearly complete object (≥ 80 %, or all but one symbol) before a NACK |
 | `T_want_min` | 10 min | minimum interval between a follower's WANT frames, except an ask for what a new manifest names (§4); also how long a want its announcer lists may bring nothing before the follower asks it for proof (§5.2) |
-| `T_relay_wait` | 10 min | how long another cell's ask for its listeners goes unmet before a node that hears it relays it (§4) |
-| `carry_budget` | per device | bytes a node keeps for others, beyond what it listens to; what has not been of use for `want_ttl` gives way, and a full budget takes on no more relays (§4). The simulator's default is no limit |
+| `T_relay_wait` | 10 min | what a node expects of other cells' asks before it has heard any: met half the time within it, never after (§4) |
+| `relay_risk` | 5 % | a node relays another cell's ask once fewer than this share of the asks of its age were met by others before twice that age, as it learned from the asks it heard (§4) |
+| `carry_budget` | per device | bytes a node keeps for others, beyond what it listens to; what has not been of use for `want_ttl` gives way, the menu first, then relays another cell's announcer lists, then the least recently used, and a full budget takes on no more relays (§4). The simulator's default is no limit |
 | `T_gossip`, `T_gossip_min` | 5 min, 30 s | announcer/source gossip cadence and its floor |
 | `control_reserve` | 10 % | share of the band budget kept free for control frames |
 | own share | `min(regulatory, occ_high_own / (announcers heard + 1))` | content pacing ceiling; derived, not configured |
