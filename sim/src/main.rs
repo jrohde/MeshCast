@@ -1021,6 +1021,18 @@ fn params() -> Params {
     if let Some(s) = std::env::var("MESHCAST_T_ACQUIRE_S").ok().and_then(|v| v.parse::<u64>().ok()) {
         p.t_acquire_ms = s * 1000;
     }
+    if let Ok(v) = std::env::var("MESHCAST_PROACTIVE") {
+        p.proactive = v != "0";
+    }
+    if let Ok(v) = std::env::var("MESHCAST_RELAY_ANY") {
+        p.relay_unfollowed = v != "0";
+    }
+    if let Some(s) = std::env::var("MESHCAST_T_RELAY_WAIT_S").ok().and_then(|v| v.parse::<u64>().ok()) {
+        p.t_relay_wait_ms = s * 1000;
+    }
+    if let Some(k) = std::env::var("MESHCAST_CARRY_BUDGET_KB").ok().and_then(|v| v.parse::<u64>().ok()) {
+        p.carry_budget_bytes = k * 1000;
+    }
     p
 }
 
@@ -1565,6 +1577,16 @@ fn run_dynamics(nodes: usize, area_km2: f64, stations: usize, channels: usize, f
     println!("of the {} follower nodes on at the end, {} hold the current window of every channel they follow ({:.1} %)", online, up_to_date, if online > 0 { 100.0 * up_to_date as f64 / online as f64 } else { 0.0 });
     if !offline.is_empty() {
         println!("nodes offline at the end: {}", offline.len());
+    }
+    {
+        // What carrying costs: frames sent, and what the nodes on at the end hold.
+        let held: Vec<u64> = eng.nodes.iter().filter(|n| n.alive).map(|n| n.node.held_bytes()).collect();
+        let mean = held.iter().sum::<u64>() as f64 / held.len().max(1) as f64;
+        let max = held.iter().copied().max().unwrap_or(0);
+        let relayed: u64 = eng.nodes.iter().map(|n| n.node.stats.relay_wants).sum();
+        let evicted: u64 = eng.nodes.iter().map(|n| n.node.stats.cache_evictions).sum();
+        let declined: u64 = eng.nodes.iter().map(|n| n.node.stats.relays_declined).sum();
+        println!("carrying: frames sent {}, bulk {}; held per node at the end: mean {:.0} kB, most {:.0} kB; relay wants {}; evicted {}; relays declined {}", eng.metrics.frames_sent, eng.metrics.bulk_sent, mean / 1000.0, max as f64 / 1000.0, relayed, evicted, declined);
     }
     println!("bulk airtime share, busiest nodes: {}", airtime.iter().map(|(i, a)| format!("{i}:{:.1}%", a * 100.0)).collect::<Vec<_>>().join(" "));
     if let Some(ctrl_c) = eng.phys.iter().position(|p| p.kind == CarrierKind::LoraControl).filter(|c| *c != bulk_c) {

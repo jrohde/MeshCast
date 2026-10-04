@@ -154,6 +154,21 @@ impl MemStore {
         self.entries.remove(id).is_some()
     }
 
+    /// Drop what we hold of `id` but keep what we know of it: a cache gives way, and the object
+    /// can be fetched again by name (FEASIBILITY.md §27).
+    pub fn forget_content(&mut self, id: &ShortId) {
+        if let Some(e) = self.entries.get_mut(id) {
+            for b in e.blocks.iter_mut() {
+                *b = None;
+            }
+            if let Some(bytes) = e.bytes.as_mut() {
+                bytes.iter_mut().for_each(|x| *x = 0);
+            }
+            e.complete = false;
+            e.verified = false;
+        }
+    }
+
     /// Register an object whose length and content type are known (from a manifest).
     /// Register an object with full metadata (from a manifest). Returns true if that completed
     /// it: every symbol had already arrived before we knew what the object was.

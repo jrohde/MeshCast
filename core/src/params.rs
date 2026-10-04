@@ -100,6 +100,8 @@ pub struct Params {
     pub max_offered_ids: usize,
     pub max_conflicts: usize,
     pub max_askers_per_object: usize,
+    /// Another cell's asks a node keeps to relay (PROTOCOL.md §4).
+    pub max_relay_asks: usize,
     /// Share of the regulatory budget (permille) kept free for control frames when the control
     /// and bulk carriers share a band.
     pub control_reserve: u16,
@@ -154,6 +156,19 @@ pub struct Params {
     /// How far a frame keeps from the edges of a hop dwell and of the control window: room for
     /// clocks a little apart (PROTOCOL.md §6).
     pub t_guard_ms: Millis,
+    /// An announcer fetches every piece of every channel it hears of, asked for or not. Off: it
+    /// fetches what a follower asks for (PROTOCOL.md §2, FEASIBILITY.md §27); kept to measure against.
+    pub proactive: bool,
+    /// A node relays for another cell's listeners what it does not follow too, and keeps the menu it
+    /// hears of channels it does not follow, to name what they ask for (PROTOCOL.md §4).
+    pub relay_unfollowed: bool,
+    /// How long another cell's ask for its listeners goes unmet before a node relays it
+    /// (PROTOCOL.md §4, `T_relay_wait`).
+    pub t_relay_wait_ms: Millis,
+    /// Bytes a node keeps of what it does not listen to, for others (PROTOCOL.md §4, `carry_budget`):
+    /// what has not been of use for `want_ttl` gives way, least recently used first, and a full
+    /// budget takes on no more relays. `u64::MAX`: no limit; 0: no relays.
+    pub carry_budget_bytes: u64,
 }
 
 impl Default for Params {
@@ -173,6 +188,7 @@ impl Default for Params {
             max_offered_ids: 8192,
             max_conflicts: 64,
             max_askers_per_object: 32,
+            max_relay_asks: 1024,
             control_reserve: 100,
             max_passes: 1,
             t_nack_stall_ms: 60_000,
@@ -194,6 +210,10 @@ impl Default for Params {
             t_watch_ms: 1_800_000,
             t_tell_ms: 60_000,
             t_guard_ms: 50,
+            proactive: false,
+            relay_unfollowed: true,
+            t_relay_wait_ms: 600_000,
+            carry_budget_bytes: u64::MAX,
         }
     }
 }

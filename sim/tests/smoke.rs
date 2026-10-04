@@ -413,25 +413,30 @@ fn a_false_announcer_is_left() {
 
 #[test]
 fn a_channel_followed_again_is_fetched_again() {
-    // A follower that stops following a channel forgets its objects and its manifest's bytes but
-    // remembers the manifest's seq, so announcers that list that seq tell it nothing new. When it
-    // follows the channel again it must ask for the manifest itself: nobody repeats manifests
-    // unasked (PROTOCOL.md §4). Before, it waited for a seq that would not come.
-    let s = spec(BulkPreset::GfskO, vec![(0.0, 0.0), (1000.0, 0.0), (500.0, 0.0)], vec![0], vec![2], 4.0);
-    let mut b = build(&s, Params::default());
-    let chan = b.sources[0].channel;
-    b.engine.run(3_600_000, 600_000);
-    let holds_all = |b: &meshcast_sim::scenario::Built| b.tracks.keys().all(|id| b.engine.nodes[1].node.holds(id));
-    assert!(holds_all(&b), "the follower should hold everything after an hour");
-    b.engine.nodes[1].node.unfollow(chan);
-    b.engine.run(3_600_000 + 600_000, 600_000);
-    let m = b.engine.nodes[1].node.manifest_state(&chan).expect("the seq is remembered");
-    assert!(!m.3 && b.tracks.keys().all(|id| !b.engine.nodes[1].node.holds(id)), "unfollowing should evict the channel");
-    b.engine.nodes[1].node.follow(chan);
-    b.engine.poke(1);
-    b.engine.run(2 * 3_600_000, 600_000);
-    assert!(b.engine.nodes[1].node.manifest_state(&chan).map(|m| m.3).unwrap_or(false), "the manifest should be fetched again");
-    assert!(holds_all(&b), "the channel's objects should be fetched again");
+    // A follower that stops following a channel forgets its objects. A node that keeps no menu of
+    // channels it does not follow (one whose menu gave way to its carry budget, or with relaying
+    // for other channels off) forgets its manifest's bytes too but remembers the manifest's seq, so
+    // announcers that list that seq tell it nothing new. When it follows the channel again it must
+    // ask for the manifest itself: nobody repeats manifests unasked (PROTOCOL.md §4). Before, it
+    // waited for a seq that would not come. A node that keeps the menu holds the manifest still.
+    for keeps_menu in [false, true] {
+        let s = spec(BulkPreset::GfskO, vec![(0.0, 0.0), (1000.0, 0.0), (500.0, 0.0)], vec![0], vec![2], 4.0);
+        let mut b = build(&s, Params { relay_unfollowed: keeps_menu, ..Params::default() });
+        let chan = b.sources[0].channel;
+        b.engine.run(3_600_000, 600_000);
+        let holds_all = |b: &meshcast_sim::scenario::Built| b.tracks.keys().all(|id| b.engine.nodes[1].node.holds(id));
+        assert!(holds_all(&b), "the follower should hold everything after an hour");
+        b.engine.nodes[1].node.unfollow(chan);
+        b.engine.run(3_600_000 + 600_000, 600_000);
+        let m = b.engine.nodes[1].node.manifest_state(&chan).expect("the seq is remembered");
+        assert!(b.tracks.keys().all(|id| !b.engine.nodes[1].node.holds(id)), "unfollowing should evict the channel's objects");
+        assert_eq!(m.3, keeps_menu, "the manifest's bytes should stay exactly when the node keeps the menu");
+        b.engine.nodes[1].node.follow(chan);
+        b.engine.poke(1);
+        b.engine.run(2 * 3_600_000, 600_000);
+        assert!(b.engine.nodes[1].node.manifest_state(&chan).map(|m| m.3).unwrap_or(false), "the manifest should be held again");
+        assert!(holds_all(&b), "the channel's objects should be fetched again");
+    }
 }
 
 #[test]
@@ -622,9 +627,11 @@ fn a_holder_serves_its_own_announcer_first() {
 
 #[test]
 fn a_follower_of_one_collection_carries_only_that_collection() {
-    // A provider publishes two collections, each with a cover; the follower follows one of them
-    // and the station serves both. You carry what you listen to: the follower fetches, collects
-    // and keeps the pieces and cover of its collection, and nothing of the other (PROTOCOL.md §2).
+    // A provider publishes two collections, each with a cover; the follower follows one of them.
+    // The follower fetches, collects and keeps the pieces and cover of its collection, and nothing
+    // of the other (PROTOCOL.md §2). The station knows both from their manifests, and fetches what
+    // its follower asks for: the pieces of the other collection nobody asked for (§4, FEASIBILITY.md
+    // §27).
     let mut s = spec(BulkPreset::GfskO, vec![(0.0, 0.0), (1000.0, 0.0), (500.0, 0.0)], vec![0], vec![2], 3.0);
     s.tracks = 4;
     s.collections = meshcast_sim::scenario::CollectionSpec { per_source: 2, follow: 1, cover_kb: 4, singles: false };
@@ -635,7 +642,8 @@ fn a_follower_of_one_collection_carries_only_that_collection() {
     assert_eq!((mine.len(), other.len()), (3, 3), "two pieces and a cover each");
     assert!(mine.iter().all(|(id, _)| b.engine.nodes[1].node.holds(id)), "the follower should hold its collection");
     assert!(other.iter().all(|(id, _)| !b.engine.nodes[1].node.holds(id)), "the follower should hold nothing of the other collection");
-    assert!(b.tracks.keys().all(|id| b.engine.nodes[2].node.holds(id)), "the station should serve both");
+    assert!(mine.iter().all(|(id, _)| b.engine.nodes[2].node.holds(id)), "the station should serve what its follower asked for");
+    assert!(other.iter().all(|(id, _)| !b.engine.nodes[2].node.holds(id)), "the station should not fetch what nobody asked for");
 }
 
 #[test]
@@ -958,11 +966,12 @@ fn a_small_object_short_of_one_symbol_is_repaired() {
     // fraction alone an object of two to four symbols, a collection manifest, could never be
     // repaired, and one that had lost one of its two symbols waited for the next round of asking
     // (FEASIBILITY.md §20). Here a follower fetching its channel again loses the second symbol of
-    // the collection manifest, and repairs it from its announcer.
+    // the collection manifest, and repairs it from its announcer. It keeps no menu of channels it
+    // does not follow, so unfollowing evicts the collection manifest (PROTOCOL.md §4).
     let mut s = spec(BulkPreset::GfskO, vec![(0.0, 0.0), (1000.0, 0.0), (500.0, 0.0)], vec![0], vec![2], 3.0);
     s.tracks = 4;
     s.track_kb = 20;
-    let mut b = build(&s, Params::default());
+    let mut b = build(&s, Params { relay_unfollowed: false, ..Params::default() });
     let chan = b.sources[0].channel;
     let manifest = b.sources[0].collections[0].as_object().0;
     let id = manifest.id.short();
@@ -1164,4 +1173,127 @@ fn a_follower_that_missed_the_first_pass_asks_again() {
         }
     }
     assert_eq!(missing, 0, "{missing} follower-object pairs never completed");
+}
+
+fn bystander_bridge(params: Params) -> (usize, usize, u64) {
+    // Station A with the source, station B with two listeners 1.35 km away in band L (range about
+    // 985 m), and one node between them that hears both and follows A by signal. Only B's two
+    // listeners follow the channel: nobody in A's cell asks for it, and the node between follows
+    // nothing.
+    let positions = vec![(-400.0, 0.0), (0.0, 0.0), (450.0, 0.0), (1350.0, 0.0), (1500.0, 100.0), (1550.0, -100.0)];
+    let mut s = spec(BulkPreset::GfskL, positions, vec![0], vec![1, 3], 6.0);
+    s.mix = meshcast_sim::scenario::parse_mix("snac-music:42,snac-speech:22").unwrap();
+    let mut b = build(&s, params);
+    let chan = b.sources[0].channel;
+    for i in [1, 2, 3] {
+        b.engine.nodes[i].node.unfollow(chan);
+    }
+    b.engine.run((s.hours * 3.6e6) as u64, 600_000);
+    let mut missing = 0;
+    for id in b.tracks.keys() {
+        for f in [4, 5] {
+            if !b.engine.metrics.completions.contains_key(&(f, *id)) {
+                missing += 1;
+            }
+        }
+    }
+    let bridge = &b.engine.nodes[2].node;
+    (missing, b.tracks.len() * 2, bridge.stats.relays_declined)
+}
+
+#[test]
+fn a_bystander_relays_for_another_cell() {
+    // Content crosses a cell nobody in which follows its channel: the node between hears B ask for
+    // its listeners, fetches the collection manifest the ask names from its own announcer, which
+    // holds the manifests of every channel it hears of, then the pieces, which A fetches from the
+    // source only because the node asked, and hands them on to B (PROTOCOL.md §2, §4).
+    let (missing, pairs, _) = bystander_bridge(Params::default());
+    assert_eq!(missing, 0, "{missing} of {pairs} listener-piece pairs never completed");
+    // Relaying only for channels it follows, the node between does nothing, and B's listeners hear
+    // nobody else.
+    let (missing, pairs, _) = bystander_bridge(Params { relay_unfollowed: false, ..Params::default() });
+    assert_eq!(missing, pairs, "B's listeners should get nothing without a relay");
+    // A node with no carry budget relays nothing for others.
+    let (missing, pairs, declined) = bystander_bridge(Params { carry_budget_bytes: 0, ..Params::default() });
+    assert!(missing == pairs && declined > 0, "a node without a carry budget should decline: {missing} of {pairs} missing, {declined} declined");
+}
+
+#[test]
+fn made_up_relay_asks_are_kept_within_bounds() {
+    // An ask names its object by an id nobody checks, and relaying is for any channel. A follower
+    // relays only what a manifest it holds names, or fetches first the collection manifest that a
+    // set names, from its own announcer; and what it keeps of such asks is capped
+    // (PROTOCOL.md §4, docs/ABUSE.md item 5).
+    use meshcast_core::frame::{Frame, Gossip, PieceSet, WantSet, ASK_LISTENED};
+    use meshcast_core::ids::{NodeId, ShortId};
+    let s = spec(BulkPreset::GfskO, vec![(0.0, 0.0), (300.0, 0.0), (600.0, 0.0)], vec![0], vec![1], 2.0);
+    let cap = 8;
+    let mut b = build(&s, Params { max_relay_asks: cap, ..Params::default() });
+    b.engine.run(3_600_000, 600_000);
+    let made_up = |i: u32| {
+        let mut x = [0xAB; 8];
+        x[..4].copy_from_slice(&i.to_le_bytes());
+        ShortId(x)
+    };
+    // Another cell's announcer asks, for listeners, for the same twelve made-up pieces every minute
+    // for twenty minutes, past `T_relay_wait`, and for twelve sets of new made-up collections.
+    let foreign = NodeId(9_999);
+    for k in 0..20u32 {
+        let ask = Frame::Gossip(Gossip {
+            node: foreign,
+            announcer: foreign,
+            announcer_colour: 0,
+            announcer_colours: 1,
+            heard: Vec::new(),
+            have: Vec::new(),
+            have_sets: Vec::new(),
+            want: (0..12).map(|i| (made_up(i), NodeId::NONE, ASK_LISTENED)).collect(),
+            sets: (0..12).map(|i| WantSet { set: PieceSet { manifest: made_up(1_000 + 12 * k + i), first: 0, bits: 0b111 }, grant: NodeId::NONE, phase: ASK_LISTENED }).collect(),
+        });
+        let now = b.engine.now;
+        b.engine.nodes[2].node.handle_frame(now, 1, &ask, -60);
+        b.engine.run(now + 60_000, 600_000);
+    }
+    let node = &b.engine.nodes[2].node;
+    assert!((0..12).all(|i| !node.wants_object(&made_up(i))), "a made-up piece should not be relayed");
+    let kept = node.table_sizes().into_iter().find(|(n, _)| *n == "relay asks").map(|(_, v)| v).unwrap_or(0);
+    assert!(kept <= cap, "{kept} relay asks kept, cap {cap}");
+    for id in b.tracks.keys() {
+        assert!(node.holds(id), "the follower should still hold {id:?}");
+    }
+}
+
+#[test]
+fn a_station_that_fetches_on_request_hears_of_a_new_episode_soon() {
+    // A station fetches what its followers ask for (PROTOCOL.md §2), and a follower asks at most
+    // every `T_want_min`. A new episode whose manifest comes just after the follower asked for the
+    // one before waited until its next ask; now, once the station's next GOSSIP shows it neither
+    // has the episode nor asks for it, the follower asks for it (PROTOCOL.md §4).
+    use meshcast_core::manifest::{Collection, CollectionKind, Manifest};
+    use meshcast_core::object::ContentType;
+    let s = spec(BulkPreset::GfskO, vec![(0.0, 0.0), (1000.0, 0.0), (500.0, 0.0)], vec![0], vec![2], 2.0);
+    let mut b = build(&s, Params::default());
+    let chan = b.sources[0].channel;
+    b.engine.nodes[2].node.unfollow(chan);
+    b.engine.run(3_600_000, 600_000);
+    let publish = |b: &mut meshcast_sim::scenario::Built| {
+        let src = &mut b.sources[0];
+        let o = meshcast_sim::scenario::track_object(s.seed, src.node, src.objects.len(), 20_000, ContentType::Speech);
+        src.objects.push(o.clone());
+        src.seq += 1;
+        let series = Collection { cid: 1, kind: CollectionKind::Series, title: "Series".into(), pieces: src.objects.clone(), schedule: Vec::new() };
+        let root = Manifest::sign(&src.key, src.seq, "Channel", vec![series.reference(None, true)], None, None);
+        let node = src.node;
+        b.engine.nodes[node].node.publish(&root, std::slice::from_ref(&series), &[(o.meta(), None)]);
+        b.engine.poke(node);
+        (o.id.short(), b.engine.now)
+    };
+    let (first, _) = publish(&mut b);
+    b.engine.run(3_600_000 + 2 * 60_000, 600_000);
+    let (second, at) = publish(&mut b);
+    b.engine.run(3_600_000 + 30 * 60_000, 600_000);
+    let done = |id| b.engine.metrics.completions.get(&(1, id)).copied();
+    assert!(done(first).is_some(), "the follower should have the first episode");
+    let got = done(second).expect("the follower should have the second episode");
+    assert!(got <= at + 5 * 60_000, "the second episode arrived {:.1} min after it was published", (got - at) as f64 / 60_000.0);
 }
