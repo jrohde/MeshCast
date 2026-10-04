@@ -2399,7 +2399,8 @@ Tried so far:
 - *An announcer carries only what its cell asked for* (ABUSE.md item 4, bounded generosity): band L
   delivered less (66.2 to 79.9 %) and band O needed 37 % more uploads. The announcer's generosity is
   what lets an excursion find content in a cell that does not follow it; without it there was
-  nothing to visit. Not taken.
+  nothing to visit. Not taken. (Taken in §27, with relaying for any channel, which brings content
+  where it is asked for without it.)
 - *Shorter excursions*: with `T_excursion` at 20 minutes band L delivered 79.5 to 92.5 %, at 10
   minutes 83.7 to 88.5 %, with up to 36 % more uploads. Better, and still far from band O.
 
@@ -2414,7 +2415,8 @@ Not tried yet, in the order they look worth trying:
 2. **Relaying for channels a node does not follow**: a follower near a cell border that hears
    another cell's marked ask could fetch the collection manifest the ask's set names from its
    own announcer, which carries it, and relay as for a followed channel (§17), at the cost of
-   battery-powered nodes carrying what they do not listen to.
+   battery-powered nodes carrying what they do not listen to. (Done in §27: band L delivered 99.7 %
+   instead of 92.0 %, with a carry budget for what nodes hold for others.)
 3. **No shun for an announcer that is asking**: an announcer that lacks what its follower wants
    but asks for it, or for the manifest that names it, is honest and unable, not false; the
    follower should go on an excursion, not leave its cell leaderless for an hour. This needs care,
@@ -3015,3 +3017,186 @@ minutes instead of 41.
   them without timing); LongShoT reached under 2 µs over LoRaWAN with hardware timestamps (Ramirez,
   Sergeyev, Dyussenova, Iannucci, IPSN 2019). Agreement to within `T_guard` needs far less, but it
   is measured only on hardware (ROADMAP Phase 1).
+
+## 27. Carrying on demand, and relaying for any channel
+
+§21 left sparse interests open: across 15 km² of band L, with each node following 2 channels
+of 24, 92.0 % of the bulletins arrived in their period (§26.3). Two things decide who carries
+what across a cell nobody in which follows a channel. An announcer fetched every piece of
+every channel it heard of, asked for or not (its *generosity*), and a follower relayed only
+for channels it followed (§17). The world here is §21's: 100 nodes and 2 stations on 15 km²,
+24 channels, each node following 2, a daily 22 kB bulletin per channel, nodes changing what they
+follow every 6 hours, 48 hours, eight worlds per band, one clock.
+
+### 27.1 Who fetches what
+
+Delivered within one publication period, mean (worst world); followers that hold the current
+window of every channel they follow at the end; frames sent; what a node holds at the end, mean;
+role changes after the first hour; and the median, over the hours, of the median latency of the
+bulletins published in that hour. In band O the median bulletin arrived within two minutes in
+every variant.
+
+| Variant | Band L | Band O |
+|---|---|---|
+| Main (§26): generous announcers, relaying for followed channels | 92.0 % (88.6), 78.4 %, 840,892, 396 kB, 2,172, 43 min | 99.8 % (99.6), 100 %, 152,630, 221 kB, 14 |
+| Announcers fetch only what is asked for | 88.4 % (83.7), 73.3 %, 532,612, 241 kB, 2,464, 49 min | 99.8 % (99.6), 100 %, 147,277, 218 kB, 22 |
+| Generous announcers, relaying for any channel | 99.3 % (98.4), 99.7 %, 708,482, 1,050 kB, 436, 31 min | 99.8 % (99.6), 100 %, 150,767, 268 kB, 4 |
+| Both, relaying by name what it cannot name | 99.5 % (98.6), 99.4 %, 683,979, 1,218 kB, 918, 29 min | 99.8 % (99.6), 100 %, 150,270, 313 kB, 3 |
+| Both, relaying what it can name, while it is of use | 99.4 % (98.4), 99.0 %, 681,494, 328 kB, 222, 29 min | 99.8 % (99.6), 100 %, 147,277, 218 kB, 22 |
+| ... and every node keeps the menu it hears | 99.6 % (99.3), 98.9 %, 660,342, 340 kB, 89, 19 min | 99.8 % (99.6), 100 %, 149,560, 229 kB, 1 |
+| **... and followers tell their announcer what a new manifest names (27.4)** | **99.7 % (99.4), 99.5 %, 658,432, 343 kB, 90, 19 min** | **99.8 % (99.6), 100 %, 153,172, 230 kB, 0** |
+
+With all of it, band L delivered 99.7 % of its bulletins in their period instead of 92.0 %, a
+median 19 minutes after publication instead of 43, with 22 % fewer frames and 90 role changes
+instead of 2,172; band O delivered as before, with no role changes.
+
+- **Fetching only what is asked for, alone, is worse**, as §21 found: the generous announcers
+  were how content crossed a cell without followers of its channel, for an excursion to find.
+- **Relaying for any channel is what fixes sparse interests.** A node that hears another cell's
+  announcer ask for its listeners, and that cannot read the collection the ask names, fetches its
+  collection manifest from its own announcer first, which holds the manifests of every channel it
+  hears of, and then the pieces (PROTOCOL.md §4). With generous announcers it delivered 99.3 %.
+- **With both, nothing is fetched that nobody asks for.** Announcers that fetch on request send
+  3.5 % fewer frames than generous ones once nodes relay for any channel, at the same delivery.
+- **Only what it can name, and only while it is of use.** The first version relayed by name
+  what it could not name, a piece whose collection manifest it did not hold, and kept what it
+  relayed for good: nodes held 1.2 MB each after two days, and followers left their announcers
+  for want of an uploader (§25) 398 times per band L world. Relaying by name also let anyone
+  make every node in reach want made-up names (ABUSE.md, "Relay ask"). A node now relays only
+  a piece or cover a manifest it holds names, or fetches first the collection manifest a set
+  names, and keeps what it relayed while it is asked for or used, and `want_ttl` longer: the
+  same delivery and frames, a quarter of the storage, a quarter of the role changes, and 41
+  such departures per world.
+- **What a node relays still counts against its own announcer.** Leaving it out of the evidence
+  that sends a follower on an excursion or away from its announcer (§25) was tried: excursions
+  for what a node relays carry content across too, they fell from 77 to 45 per band L world, and
+  delivery fell to 98.8 % (worst world 95.0).
+- **Every node keeps the menu it hears.** In band O nothing was relayed for channels a node did
+  not follow: where rounds of asking are cheap an announcer asks for pieces by name, not in sets
+  (§14), and a name does not say which collection manifest to fetch to read it. Followers there
+  waited for what nobody brought and left their announcers instead: with real clocks, over
+  sixteen band O worlds, 10.6 times per world against main's 1.9, and 157 role changes against
+  108, at the same delivery. A node now collects and keeps the roots and collection manifests of
+  channels it does not follow when they come by, without asking for them and within its carry
+  budget (27.3), and can name what is asked. Band O relays, and its followers left 3.3 times per
+  world with 81 role changes; band L delivered more, sooner (a median of 19 minutes instead of
+  29), with 3 % fewer frames and 89 role changes instead of 222. What a node holds rose by 12 kB.
+
+### 27.2 How long a relay waits
+
+A node relays an ask only once it has gone unmet for `T_relay_wait`, since most asks are met by a
+holder within a round (§17). Delivered, frames and the median latency of 27.1:
+
+| `T_relay_wait` | Band L | Band O |
+|---|---|---|
+| 10 min | 99.7 % (99.4), 658,432 frames, 19 min | 99.8 % (99.6), 153,172 frames |
+| 2 min | 99.8 % (99.6), 668,136 (+1 %), 14 min | 99.8 % (99.7), 183,418 (+20 %) |
+| 0 | 99.9 % (99.6), 661,048 (+0.4 %), 9 min | 99.9 % (99.9), 195,938 (+28 %) |
+
+In band L relaying at once halved the median latency for almost no frames. In band O it cost a
+fifth to over a quarter more frames, for asks that a holder would have met within a round, as in
+§17. `T_relay_wait` stays 10 minutes; a wait that depends on the carrier is left open (27.6).
+
+### 27.3 A budget for what a node carries for others
+
+A node that relays holds what it does not listen to, and so does an announcer that fetched what
+its followers asked for, and every node the menu of channels it does not follow. On a device that
+is bounded by its storage, so each node has a carry budget (PROTOCOL.md §4). The first version
+let the least recently used give way whenever the budget was full. A small budget then evicted
+what had just been fetched for another cell before it was handed on, and fetched it again:
+
+| Budget per node | Band L | Band O |
+|---|---|---|
+| None (first version of 27.1) | 99.5 % (98.6), 683,979 frames | 99.8 %, 150,270 |
+| 1 MB, least recently used gives way | 99.4 % (98.9), 692,927 (+1 %) | 99.8 %, 155,735 |
+| 256 kB, least recently used gives way | 99.6 % (99.1), 1,564,157 (2.3 times) | 99.8 %, 169,207 |
+| 64 kB, least recently used gives way | 77.8 % (73.7), 5,281,872 (7.7 times) | 99.8 %, 191,282 |
+
+At 64 kB band L delivered less than without relaying at all (88.4 %, 27.1). Now only what has not
+been of use for `want_ttl` gives way, and a full budget takes on no more relays; with the final
+rules of 27.1:
+
+| Budget per node | Band L | Band O |
+|---|---|---|
+| None | 99.7 % (99.4), 658,432 frames, 343 kB | 99.8 % (99.6), 153,172, 230 kB |
+| 256 kB | 98.9 % (98.3), 680,434 (+3 %), 210 kB | 99.8 % (99.6), 167,878 (+10 %), 182 kB |
+| 64 kB | 98.0 % (97.0), 640,846 (−3 %), 184 kB | 99.8 % (99.6), 170,692 (+11 %), 173 kB |
+
+A small budget now costs a point or two of delivery in band L, where a node that is full declines
+to relay and a listener waits for what nobody brings, and no flood of frames. Protecting what was
+of use for `T_want_min` (10 minutes) instead of `want_ttl`, measured before nodes kept the menu,
+delivered 99.3 % at 256 kB with 19 % more frames than without a budget, and 98.6 % at 64 kB with
+4 % more: what gave way after ten minutes was asked for again later. In band O a budget costs frames
+even where little is relayed: it bounds what an announcer holds of the channels its followers asked
+for, and what gave way is fetched again for the next follower who asks.
+
+### 27.4 Telling the announcer what a new manifest names
+
+The rest of the validation (27.5) found one cost of fetching on request. In the living band O
+network (§13) with real clocks, three of the five scenarios had one hour each in which a bulletin
+reached its listeners after 11 minutes instead of 2. Traced in one world: at the hour the bulletin
+was published, its listeners had just switched to channels they now followed and asked for those;
+the bulletin's root and collection manifest reached them on the control carrier a minute later;
+a follower asks at most every `T_want_min` except for what a manifest it asked for names, and
+nobody had asked for this one. Its station, which fetches on request, learned that anyone wanted
+the bulletin ten minutes later. Generous, it had fetched the bulletin itself, and its listeners
+had overheard the upload. Newcomers to the band O cell, too, caught up 1.7 minutes later than on
+main.
+
+| A follower asks for what a new manifest names | Living band O, real clocks: slowest hour of three scenarios | Newcomers, band O / band L | ESP-NOW neighbourhood: start, slowest tenth, frames | Two band L clusters: start, frames |
+|---|---|---|---|---|
+| Main (generous announcers) | 1.8, 2.4, 3.0 min | 8.2 / 9.5 min | 7.8, 11.7 min, 23,265 | 9.4 min, 6,161 |
+| On its usual cadence | 10.8, 10.8, 12.0 | 9.9 / 10.1 | 7.8, 11.7, 23,265 | 9.4, 6,161 |
+| At once, after up to `T_offer` | 1.8, 3.0, 3.0 | 8.2 / 8.6 | 8.8, 16.7, 26,801 (+15 %) | 10.1, 6,910 (+12 %) |
+| After `T_gossip_min`, what the announcer neither has nor asks for | | | 9.1, 16.8, 26,607 | 10.1, 6,939 |
+| **After the announcer's next GOSSIP, what it neither has nor asks for** | **1.8, 3.0, 3.0** | **8.6 / 9.4** | **7.7, 12.8, 23,620** | **9.4, 6,175** |
+
+Asking at once brought the living network back, and cost the neighbourhoods where cells overlap:
+every cell's announcer passed what its followers would otherwise have overheard from a
+neighbour's pass, 17 % more first passes in ESP-NOW. That was §15's finding while announcers were
+generous. Asking only for what the announcer neither has nor asks for itself is the rule, but
+after `T_gossip_min` the announcer's own ask, which it sends at most every `T_gossip_min` and on
+a hopping carrier only in the rendezvous, had often not yet been heard. Waiting for its next
+GOSSIP, the follower knows: an announcer that fetches the object anyway, because it follows the
+channel or another follower asked, asks for it there, and its followers ask for nothing
+(PROTOCOL.md §4).
+
+### 27.5 The whole validation
+
+Against main (§26), eight worlds each; "one clock" and "real clocks" as in §26.3.
+
+- **Scenario matrix and false announcers**: within the spread of main. With one clock ESP-NOW
+  started playback after 7.7 minutes against 7.8, two band L clusters after 9.4 against 9.4, the
+  band O town after 15.3 against 16.0 with 3 % fewer frames, and the rest within 0.5 minutes
+  and 2 % of frames; with real clocks within 0.6 minutes, the band L town and the two band L
+  clusters with 3 % more frames. Five lures that claim the maximum score: 97.8 % delivered,
+  start 28.6 minutes, against 97.8 % and 29.2; with real clocks 97.3 % and 32.8 against
+  97.4 % and 31.5.
+- **Collections**: whole channels within 2 minutes and 4 % of frames. One collection per
+  listener across 15 km² is faster and cheaper (band L 35.8 minutes to start against 39.7, 7 %
+  fewer frames; with covers 46.9 against 50.9), and within one cell about a minute slower to
+  start (band L 11.5 against 10.3, band O 5.6 against 5.1): the station fetches what is asked
+  for, and is asked once it has shown, in its GOSSIP, that it does not have it.
+- **Living network**: bulletins as fast (band L median 4.2 minutes, band O 1.8), newcomers
+  8.6 / 9.4 minutes against 8.2 / 9.5, a fifth to a quarter fewer uploads; under a lure in band L
+  the slowest tenth after 42.6 minutes as on main.
+- **Sparse**: with real clocks band L delivered 99.8 % (worst world 99.4) against 92.9 % (86.9),
+  with 82 role changes after the first hour against 1,848, and band O over sixteen worlds
+  99.6 % as main, with 58 role changes against 108.
+- **Size sweep**: playback started within 2 minutes of main at every size and in every
+  scenario but one, band L over 15 km² in 14 kB pieces, 3.1 minutes later with one clock and 2.5
+  minutes sooner with real clocks; frames between 11 % fewer and 9 % more.
+
+### 27.6 Open
+
+- **The menu at scale.** An announcer holds the manifests of every channel it hears of, and
+  every node what comes by of them within its budget; with tens of thousands of providers that
+  is neither storable on a small node nor cheap to keep current (PROTOCOL.md §9, question 14).
+- **What budget a device sets.** The simulator's default is none; a node with storage to spare
+  loses nothing by a large one.
+- **One collection per listener in one cell** starts about a minute later than when the station
+  fetched everything (27.5).
+- **A relay wait that depends on the carrier.** In band L relaying at once halved the sparse
+  median for 0.4 % more frames; in band O it cost 28 % more (27.2). No wait where a round of asking
+  is dear (§14) and `T_relay_wait` where it is cheap is a candidate, to be measured across the
+  whole validation.

@@ -214,8 +214,20 @@ Rules:
   that channel now and later, or a channel id and a `cid`, meaning that collection. The node then
   wants the channel's root manifest and all its collection manifests, which are small and tell it
   what another cell asks for (§4), and the pieces and covers of what it follows; of the other
-  collections it fetches only what it relays (§4). An announcer serves every collection of every
-  channel it serves, as it serves every channel.
+  collections it fetches only what it relays (§4).
+- **An announcer holds the menu and fetches on request.** It serves every channel it hears of,
+  and keeps the root and every collection manifest of each, so that it can name every piece and
+  cover a follower may ask for. Of pieces and covers it fetches what a follower asks for (§4), and
+  keeps what it holds while it announces, within its carry budget (§4). It does not fetch a
+  channel because it heard of it: once nodes relay for any channel (§4), content reaches the cells
+  whose listeners ask for it, and announcers that fetched everything they heard of sent more
+  frames for the same delivery (FEASIBILITY.md §27).
+- **Every node keeps the menu it hears.** Of a channel it neither follows nor serves, a node
+  collects and keeps the root and collection manifests that come by, announced and pushed on the
+  control carrier or passed by its announcer when new, without asking for them, and within its
+  carry budget (§4). They let it name what another cell asks for, so that it can relay it (§4).
+  Where asks name pieces one by one (§3.3), a node without them could not relay for a channel it
+  did not follow (FEASIBILITY.md §27).
 - **A new root alone does not cost a collection its pieces.** A node keeps, per collection, the
   collection manifest it adopted, and with it its pieces, until it holds the one a newer root
   names; a collection that a newer root no longer names has left the channel. This is the rule
@@ -224,7 +236,7 @@ Rules:
 - **Encrypted channels**: object payloads are encrypted with XChaCha20-Poly1305 under a key derived
   from the channel secret and the object id; titles in the manifest may be encrypted too. The
   channel secret is shared out of band (QR code from the phone app). Non-subscribers can still
-  relay the objects, which is intended: relaying costs them nothing and helps subscribers.
+  relay the objects, which is intended: relaying needs no key and helps subscribers.
 - Manifests, root and collection, are ordinary objects: they travel through the same carousel
   and gossip as pieces. The special-casing: a `MANIFEST_ANNOUNCE` control frame names the newest
   root manifest id per channel so that nodes know what to want; a carousel passes a manifest once
@@ -484,6 +496,22 @@ And a trickle is not coming: what has not completed `T_excursion` after the foll
 it is asked for again, whatever arrived meanwhile. A follower that missed an announcer's first
 pass of four objects took one or two symbols from each repetition, each counted as having
 arrived, and it never asked again: it held 64 of 113 symbols after six hours (FEASIBILITY.md §26).
+
+**What a new manifest names, the announcer is told.** A follower that adopts a manifest of what it
+listens to, root or collection, waits for its announcer's next GOSSIP, or `T_gossip` if it hears
+none, and then, after a random wait of up to `T_offer` and whatever its usual cadence, asks for
+what the manifest names that its announcer neither lists in its HAVE nor asks for itself and that
+is not arriving, asking only for what it never asked for. Its announcer fetches only what its
+followers ask for (§2): on the usual cadence alone, a bulletin whose manifest came on the control
+carrier just after the followers had asked for something else waited up to `T_want_min` before its
+station knew that anyone wanted it, newcomers to a band O cell caught up 1.7 minutes later, and,
+with clocks apart, the slowest hour of a living band O network's bulletins took 11 minutes
+instead of 2. Asking at once for all of it
+made cells that would have overheard a neighbour's pass have their own announcer pass it too: an
+ESP-NOW neighbourhood sent 15 % more frames and its slowest tenth of listeners started 5 minutes
+later, as asking soon at home had cost while announcers fetched everything they heard of
+(FEASIBILITY.md §15, §27). An announcer that fetches the object anyway asks for it in that GOSSIP,
+and its followers then ask for nothing.
 
 **Repetition that does not help is repeated ever more slowly.** The first time an object is asked
 for again it is passed again at once; each further repetition waits longer after the pass before:
@@ -770,38 +798,47 @@ that hear each other. Each kind of pair has its own way across:
 
 - *A follower of one cell hears the other cell's announcer, and holds what it asks for*: it
   answers the open ask with an offer in the rendezvous, and uploads when granted (above).
-- *It hears the other cell ask, for its listeners, for something of a channel it follows that it
-  does not hold*: it relays. An announcer marks in its asks what its own followers asked for
-  (§3.3). Once such an ask has gone unmet for `T_want_min`, a follower that hears it and follows
-  the channel, whatever collections of it it listens to, wants the piece or cover itself, fetches
-  it in its own cell like anything it wants, keeps it, and answers the next ask with an offer. It
-  relays for listeners, not to fill another announcer's library, and only what nobody met, since
-  most asks are answered by a holder within a round. Followers of single collections carry less
-  than followers of whole channels, and with every listener of a 15 km² band L network following
-  one album of four the chain of carriers of an album broke: in one world 14 % of its listeners
-  never had it. With relaying every listener had its album, and where nothing was missing it cost
-  6 % more frames at most (FEASIBILITY.md §17).
-- *A follower hears another cell's announcer that has what it wants, which its own cannot get*: it
-  goes there. A follower whose want has brought no symbol for `T_excursion` (draft 40 min), whose
-  announcer has not granted the object to any uploader in that time and does not list it itself (a
-  busy cell delivers late; only a cell that cannot get an object sends its followers out for it, and
-  an announcer that lists an object either serves it or is not followed, §5.2), and that has heard
-  another announcer list the object in its HAVE, follows that announcer, for what it has rather than
-  for how well it is heard, until it holds everything it wanted that the announcer has, or until the
-  visit brings nothing for `T_excursion`. Then it follows by signal again, and is back in its own
-  cell as a holder, where its announcer's ask finds it. This is an **excursion**. On a visit the
-  follower asks for what a manifest it fetched there names soon, after a random wait of up to
-  `T_offer` and at most every `T_gossip_min`, asking only for what it never asked for; at home its
-  announcer passes a new manifest unasked and the follower asks on its usual cadence, but on a
-  visit only the visitor asks, and waiting `T_want_min` to ask for what the manifest just fetched
-  named kept one two-cluster world waiting nine minutes longer (FEASIBILITY.md §15). An excursion is
-  the last way in, not a shortcut: at 20 minutes, followers in slow but working multi-cell networks
-  went out dozens of times a day and every visit cost the visited carousel a repeated pass (11 %
-  more airtime for a minute of median); at 40 minutes they go only where their cell cannot get the
-  object at all (FEASIBILITY.md §12). A visit that brought not one symbol means the announcer lists
-  what it does not serve, and the follower ignores it for `want_ttl` (§5.2). Without excursions, a
-  cell whose only link to the rest was its own announcer, which never uploads, kept a source's
-  content to itself for twelve hours (FEASIBILITY.md §12).
+- *It hears the other cell ask, for its listeners, for something it does not hold*: it relays.
+  An announcer marks in its asks what its own followers asked for (§3.3). Once such an ask
+  has gone unmet for `T_relay_wait`, a follower that hears it and can name the object, because
+  a collection manifest or root it holds names it (its own, or the menu it keeps, §2), wants
+  the piece or cover itself, fetches it in its own cell like anything it wants, keeps it, and
+  answers the next ask with an offer. A set it cannot read names a collection manifest of a
+  channel it does not follow: it fetches that manifest first, from its own announcer, which
+  holds the manifests of every channel it hears of (§2) and answers only for names it knows,
+  and relays the pieces once it can name them; they have waited as long as the asks for the
+  manifest. It relays for listeners, not to fill another announcer's library, and only what
+  nobody met, since most asks are answered by a holder within a round. Followers of single
+  collections carry less than followers of whole channels, and with every listener of a
+  15 km² band L network following one album of four the chain of carriers of an album broke: in
+  one world 14 % of its listeners never had it. With relaying every listener had its album, and
+  where nothing was missing it cost 6 % more frames at most (FEASIBILITY.md §17). Relaying only
+  for channels it follows left a sparse network without a chain: where a channel has a handful
+  of followers in the whole network, most cells between its source and a listener have none,
+  and a band L network over 15 km² delivered 92.0 % of its bulletins in their period; relaying
+  for any channel, 99.7 %, with 22 % fewer frames (FEASIBILITY.md §27). What a follower relays
+  it keeps while it is asked for or used and `want_ttl` longer, within its carry budget (below);
+  kept for good, a long-lived node would have kept everything it ever relayed.
+- *A follower hears another cell's announcer that has what it wants, which its own cannot get*:
+  it goes there. A follower whose want has brought no symbol for `T_excursion` (draft 40 min),
+  whose announcer has not granted the object to any uploader in that time and does not list it
+  itself (a busy cell delivers late; only a cell that cannot get an object sends its followers
+  out for it, and an announcer that lists an object either serves it or is not followed, §5.2),
+  and that has heard another announcer list the object in its HAVE, follows that announcer, for
+  what it has rather than for how well it is heard, until it holds everything it wanted that the
+  announcer has, or until the visit brings nothing for `T_excursion`. Then it follows by signal
+  again, and is back in its own cell as a holder, where its announcer's ask finds it. This is
+  an **excursion**. On a visit the follower asks for what a new manifest names soon, after a
+  random wait of up to `T_offer`: on a visit only the visitor asks (at home, see above), and
+  waiting `T_want_min` to ask for what the manifest just fetched named kept one two-cluster
+  world waiting nine minutes longer (FEASIBILITY.md §15). An excursion is the last way in,
+  not a shortcut: at 20 minutes, followers in slow but working multi-cell networks went out
+  dozens of times a day and every visit cost the visited carousel a repeated pass (11 % more
+  airtime for a minute of median); at 40 minutes they go only where their cell cannot get the
+  object at all (FEASIBILITY.md §12). A visit that brought not one symbol means the announcer
+  lists what it does not serve, and the follower ignores it for `want_ttl` (§5.2). Without
+  excursions, a cell whose only link to the rest was its own announcer, which never uploads,
+  kept a source's content to itself for twelve hours (FEASIBILITY.md §12).
 - *Two followers hear each other, neither announcer hears the other cell*: the cells are not in
   conflict, so they usually share a colour and a channel, and the follower overhears the other
   cell's uploads. What it misses it repairs from the holder it heard, by name (§3.5); the holder
@@ -815,20 +852,36 @@ excursions. Two announcers that hear each other merge when they share a cell (§
 joined by nothing but their announcers' link are the case left open (§9, question 11).
 
 **You carry what you listen to.** A node registers, collects and keeps the objects of the
-channels it follows (and, as announcer, of every channel it serves). Objects that no manifest of
-interest references any more, because the channel was unfollowed or the object left the
-channel's window, are evicted, and offers and uploads of them dropped; own objects are kept, and
-offered and uploaded, whether a source follows its own channel or not (a source that did not
-dropped its queued uploads whenever it adopted another channel's manifest; FEASIBILITY.md §15).
-An object leaves the window when the
-manifest that drops it is held, not when it is announced (§2). A node that restarts, or stops
-announcing, evicts nothing for `want_ttl`: a station back from a power cut, or an announcer that
-steps down for minutes, would otherwise drop the library of every channel it does not follow
-itself and fetch it again when it announces once more, which in a living band L network with
-nodes coming and going was most of what was fetched twice (FEASIBILITY.md §13). Content crosses
-cells through nodes that follow the channel, never through bystanders. A node that follows a channel again
-asks for its manifest if it no longer holds it: its announcer announces nothing it does not
-already know of.
+channels it follows (and, as announcer, what it holds of every channel it serves, §2). Objects
+that no manifest of interest references any more, because the channel was unfollowed or the
+object left the channel's window, are evicted, and offers and uploads of them dropped; own
+objects are kept, and offered and uploaded, whether a source follows its own channel or not (a
+source that did not dropped its queued uploads whenever it adopted another channel's manifest;
+FEASIBILITY.md §15). An object leaves the window when the manifest that drops it is held,
+not when it is announced (§2). A node that restarts, or stops announcing, evicts nothing
+for `want_ttl`: a station back from a power cut, or an announcer that steps down for minutes,
+would otherwise drop the library of every channel it does not follow itself and fetch it again
+when it announces once more, which in a living band L network with nodes coming and going was
+most of what was fetched twice (FEASIBILITY.md §13). Content crosses cells through nodes that
+follow the channel and through nodes that relay it for listeners (above). A node that follows
+a channel again asks for its manifest if it no longer holds it: its announcer announces nothing
+it does not already know of.
+
+**What you carry for others has a budget.** Besides its own objects and what it listens to, a
+node holds what it relays and, as announcer, what its followers asked for. Of that it keeps at
+most `carry_budget` bytes, chosen per device from what it can spare, and the menu it keeps of
+channels it neither follows nor serves (§2) counts too; the manifests of what it follows or
+serves do not, being small and how it knows what it plays and serves. An object is *of use*
+while it arrives, is asked for or is sent, and for `want_ttl` after. When the budget is full,
+what has not been of use gives way, least recently used first, and keeps its metadata, so that
+it can be fetched again by name; what is of use stays, even over the budget, and the node takes
+on no more relays until there is room. Evicting whatever was least recently used made a small
+budget evict what had just been fetched for another cell before it was handed on, and fetch
+it again: at 64 kB per node a sparse band L network delivered 77.8 % of its bulletins, against
+99.5 % without a budget, and sent 7.7 times the frames. Declining instead, it delivered
+98.0 % against 99.7 %, with 3 % fewer frames (FEASIBILITY.md §27). A budget of 0 relays nothing; an
+announcer still fetches what its followers ask for, and lets it go once it has not been of use
+for `want_ttl`.
 
 **Fresh before repeated.** The first copy of an object into a cell (an upload, or the carousel's
 first pass) is worth more than its second and third pass. Fresh content is paced at the full
@@ -1206,10 +1259,10 @@ simulator has no node with one.
 - What a node keeps of what it hears is bounded. It keeps what it can use only: an ask for an
   object it cannot name, by id or as a rendition it knows of, is not recorded by a carousel, a
   follower notes only those of its announcer's asks that concern objects it knows, and only asks
-  for objects of a channel it follows count towards relaying. Tables keyed by names nobody checks
-  have caps (§8) and give way evidence first: a name heard once before one heard twice, then the
-  oldest. What a node carries is bounded by what it follows and serves, the bounded generosity of
-  ABUSE.md item 4.
+  for objects it can name, or for a collection manifest a set names, count towards relaying.
+  Tables keyed by names nobody checks have caps (§8) and give way evidence first: a name heard
+  once before one heard twice, then the oldest. What a node carries is what it follows, and for
+  others no more than its carry budget (§4).
 - Node ids are not authenticated either, and anyone can build a node that keeps none of these
   rules. What such a node can do beyond requests (poisoned symbols, names it does not own, time,
   ignoring the regulations, malformed frames, firmware images, what listeners give away) and what
@@ -1233,7 +1286,9 @@ simulator has no node with one.
 | `max_passes` | 1 | carousel passes per object unless re-wanted |
 | repetition spacing | 0, then `T_want_min` × 1, 2, 4, 8 | wait before an object is passed again; the level climbs with each repetition and resets after a rest of twice the wait |
 | `T_nack_stall` | 60 s | no progress on a nearly complete object (≥ 80 %, or all but one symbol) before a NACK |
-| `T_want_min` | 10 min | minimum interval between a follower's WANT frames, except an ask for what a manifest the follower asked for, or fetched on an excursion, names (§4); also how long a want its announcer lists may bring nothing before the follower asks it for proof (§5.2) |
+| `T_want_min` | 10 min | minimum interval between a follower's WANT frames, except an ask for what a new manifest names (§4); also how long a want its announcer lists may bring nothing before the follower asks it for proof (§5.2) |
+| `T_relay_wait` | 10 min | how long another cell's ask for its listeners goes unmet before a node that hears it relays it (§4) |
+| `carry_budget` | per device | bytes a node keeps for others, beyond what it listens to; what has not been of use for `want_ttl` gives way, and a full budget takes on no more relays (§4). The simulator's default is no limit |
 | `T_gossip`, `T_gossip_min` | 5 min, 30 s | announcer/source gossip cadence and its floor |
 | `control_reserve` | 10 % | share of the band budget kept free for control frames |
 | own share | `min(regulatory, occ_high_own / (announcers heard + 1))` | content pacing ceiling; derived, not configured |
@@ -1258,6 +1313,7 @@ simulator has no node with one.
 | `max_offered_ids` | 8192 | ids offered by all neighbours together; what the neighbour heard longest ago offered goes first |
 | `max_conflicts` | 64 | announcers reported in conflict; the report heard longest ago goes first |
 | `max_askers_per_object` | 32 | askers a carousel keeps per object for its order; the one that asked longest ago goes first |
+| `max_relay_asks` | 1024 | other cells' asks a node keeps to relay (§4); one heard once gives way first, then the one heard longest ago |
 
 ## 9. Open questions
 
@@ -1320,8 +1376,8 @@ simulator has no node with one.
     a schedule), each with a collection manifest that lists its pieces in order and a cover of
     content type 6 (JPEG); a node follows a whole channel or single collections. The second level
     is nearly free where it matters: a root brings the collection manifests new in it in the same
-    round of asking (§4), a holder uploads manifests first, and a follower that had to ask for a
-    manifest asks for what it names at once (§4). What it still costs, a few tenths of a minute
+    round of asking (§4), a holder uploads manifests first, and a follower asks for what a new
+    manifest names at once (§4). What it still costs, a few tenths of a minute
     across networks of many cells, is in FEASIBILITY.md §16. Size needs no rule (FEASIBILITY.md
     §13): the carousel serves the most listeners per byte first, so a large object only arrives
     later, and abuse through size is the channel flood and store exhaustion of ABUSE.md. Retention
@@ -1331,3 +1387,13 @@ simulator has no node with one.
     manifest lists, the earlier place first (§2, §4), and listeners in a band O town could start
     playing a programme 7.9 minutes sooner than when it went by size (FEASIBILITY.md §19). Open:
     the `integrity` slot of a piece (reserved, §1).
+14. **A menu that scales.** An announcer holds the root and every collection manifest of every
+    channel it hears of (§2), so that its followers can ask for anything and other cells' asks can
+    be relayed (§4). With a few dozen channels that is a few kilobytes; with tens of thousands of
+    providers of millions of pieces it is neither storable on a small node nor cheap to keep
+    current over the air, since every new episode changes a collection manifest and a root.
+    Candidates, to be specified here before they are simulated: directory channels (signed
+    channels whose content is a catalogue of other channels, followed like any channel, with a
+    default one known to the firmware and others added by QR code), roots that name collections
+    by a Merkle root so that a node can hold part of a catalogue and verify what it holds, deltas
+    between successive manifests, and compression of titles (hashes do not compress).

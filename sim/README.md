@@ -91,6 +91,10 @@ what it hears (neighbours, ids they offered, asks recorded, store entries and so
 any honest node, sampled with the occupancy. They are what the caps of `docs/PROTOCOL.md` §8 were
 chosen against (`docs/ABUSE.md`, item 5).
 
+`dynamics` also reports a `carrying` line: frames sent in all, bulk frames, what a node holds at
+the end (mean and most, in kB), relay wants taken on, objects that gave way to the carry budget,
+and relays declined because the budget was full (`docs/PROTOCOL.md` §4).
+
 ## Looking inside one world
 
 `--seeds N` runs N worlds and reports their spread; compare designs on that, not on one run
@@ -128,6 +132,10 @@ chosen against (`docs/ABUSE.md`, item 5).
   doubles. `MESHCAST_CTRL_WINDOW_MS=4000 MESHCAST_CTRL_PERIOD_MS=60000` set the
   control window (a window of 0 turns it off: a node then hears both carriers at once), and
   `MESHCAST_NO_CTRL_RX=1` makes nobody receive on a separate control carrier at all.
+- `MESHCAST_CARRY_BUDGET_KB=256` gives every node a carry budget, in kB (0: no relays);
+  `MESHCAST_T_RELAY_WAIT_S` overrides `T_relay_wait`. `MESHCAST_PROACTIVE=1` makes announcers fetch
+  every piece of every channel they hear of, and `MESHCAST_RELAY_ANY=0` makes nodes relay only for
+  channels they follow and keep no menu of the others, as before `docs/FEASIBILITY.md` §27.
 - `MESHCAST_TRACE_BUSY=0` counts, for node index 0, which transmitter kept its channel busy each
   time it wanted to send, with the first and last minute; the cell report prints it as
   `busy blame`. It found an announcer whose carousel chained frames without a gap

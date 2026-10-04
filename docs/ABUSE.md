@@ -20,8 +20,10 @@ of yours can spend. Anything above one is a lever.
   discarded when the object completes, the object is dropped and collected again. You cannot
   change what people hear this way, but you can keep it from arriving (Someone else's firmware,
   below).
-- **You cannot make the audience relay for you.** Followers never transmit unless they hold
-  something an announcer asked for, so there is no reflection through the crowd.
+- **You cannot make the audience transmit for you.** Followers never transmit unless they hold
+  something an announcer asked for, so there is no reflection through the crowd. They do fetch in
+  their own cell what another cell asks for its listeners and nobody met: the relay ask below,
+  bounded by each node's carry budget.
 - **You cannot replay.** Manifest sequence numbers only go up, and only a signed manifest moves a
   node's sequence number; an announced one does not (below).
 
@@ -29,7 +31,7 @@ of yours can spend. Anything above one is a lever.
 
 | Attack | What you send | What it costs us | Amplification |
 |---|---|---|---|
-| **Channel flood** | Many signed channels with large catalogues | An announcer serves every channel it learns of, so it tries to carry all of them | Unbounded |
+| **Channel flood** | Many signed channels with large catalogues | An announcer keeps the root and collection manifests of every channel it learns of, and every other node what comes by of them (PROTOCOL.md §2); pieces and covers an announcer fetches only when a follower asks for them | At an announcer, unbounded in manifests (PROTOCOL.md §9, question 14); at any other node, its carry budget. Content only on a listener's ask, which is the WANT flood. Before, an announcer fetched every piece of every channel it heard of |
 | **WANT flood** | One 50-byte gossip asking for an object, or one 23-byte set asking for up to 64 pieces where sets are used (PROTOCOL.md §3.3) | The announcer puts a 42 kB track in its carousel (540 kB before the codec change), or every piece of a collection | ~800× per object; a set asks for more per frame, but the repetition backoff still applies per piece |
 | **Rendition flood** | WANTs, as a device that cannot decode, for the rendition of every object a channel lists | The cell's carousel carries each as Opus (PROTOCOL.md §1.2): 367 kB for a 3-minute song at 16 kbit/s | ~7 000× |
 | **NACK amplification** | One 30-byte NACK, claiming to be an announcer, or naming a holder as a follower whose announcer cannot repair | The holder named (or, unnamed, the best-placed one) sends up to 40 symbols | ~300× |
@@ -39,7 +41,7 @@ of yours can spend. Anything above one is a lever.
 | **Conflict poisoning** | A report naming announcers with a high colour count | Everyone's slot cycle grows to that count and each announcer idles all but one slot of it | Was measured at 8/9 idle by accident alone |
 | **Store exhaustion** | A huge catalogue on a channel someone follows | Followers fetch and keep it | Bounded by what they follow |
 | **Changed collections** | A root of your own channel that flags every collection manifest as changed (PROTOCOL.md §2) | Every holder of the root lists them with it and uploads them after it, up to a HAVE frame of them per root | Bounded by your own channel: the channel flood |
-| **Relay ask** | As an announcer, asks marked as for listeners (PROTOCOL.md §3.3), for every piece of a channel, repeated for `T_want_min` | Every follower of that channel that hears you fetches what you asked for in its own cell and keeps it | Bounded by the channels each follower follows: at most what following them whole costs, once per object |
+| **Relay ask** | As an announcer, asks marked as for listeners (PROTOCOL.md §3.3), for every piece of every channel, repeated for `T_relay_wait` | Every follower that hears you and can name the pieces, or fetch the collection manifest a set of them names from its own announcer, fetches what you asked for in its own cell, and keeps it while you ask and `want_ttl` longer | Bounded by each node's carry budget, once per object and node: a full budget takes on no more relays (PROTOCOL.md §4). Without a budget, by every channel a follower's announcer holds. A made-up piece is not relayed; a made-up collection manifest in a set costs a table entry, at most `max_relay_asks` of them, and an ask to the follower's own announcer, which does not know it and does not record it |
 | **Window jamming** | Any signal on the control carrier through every control window, 4 s a minute (PROTOCOL.md §3) | No root or announcement crosses between cells while it lasts, and cells learn of new content later: as if nobody listened on the control carrier (FEASIBILITY.md §23) | 15 times: 6.7 % airtime blocks what continuous jamming used to |
 | **Time pulled ahead** | Beacons, as announcer, that tell a later shared time than everyone else's (PROTOCOL.md §6) | Every announcer that hears one takes the later time at its next beacon, and its cell with it; cells that have not heard it yet no longer share a rendezvous or a window with those that have, until an announcer's watch, every `T_watch`, or a node that knows no time carries it across. Repeated, it splits a hopping network into groups of different times. Maximum consensus has this weakness in general (He et al. 2014, Remark 3.8). Not measured | One beacon per jump |
 
@@ -227,17 +229,20 @@ nodes kept at most 155 neighbours, 5,437 ids offered by them, 23 announcers in c
 raised the neighbours a node kept to 2,362 and the askers in one carousel to 22,296, and each
 made-up name stayed for an hour, so a node on its own firmware sending faster fills them without
 end. A node now keeps only what it can use (PROTOCOL.md §7): an ask for an object it cannot name
-is not recorded, nor an announcer's ask for one, and only asks for objects of a followed channel
-count towards relaying. And the tables keyed by names have caps that give way evidence first
-(PROTOCOL.md §8): 256 neighbours, 8,192 offered ids, 64 announcers in conflict, 32 askers per
-object. Under the same five attackers a node kept 256 neighbours and the carousel 870 askers, and
-everything was still delivered, with 0.4 % more frames; without them, the smoke test
-`made_up_names_are_kept_within_bounds` shows the same flood filling both tables past their caps.
+is not recorded, nor an announcer's ask for one, and only asks for objects it can name, or for a
+collection manifest a set names, count towards relaying. And the tables keyed by names have
+caps that give way evidence first (PROTOCOL.md §8): 256 neighbours, 8,192 offered ids, 64
+announcers in conflict, 32 askers per object, 1,024 relay asks (smoke test
+`made_up_relay_asks_are_kept_within_bounds`). Under the same five attackers a node kept 256
+neighbours and the carousel 870 askers, and everything was still delivered, with 0.4 % more
+frames; without them, the smoke test `made_up_names_are_kept_within_bounds` shows the same flood
+filling both tables past their caps.
 The nine scenarios, the collections, the size sweep, the living network and the false announcers
 moved within the spread of their worlds (band O 15 km² over sixteen worlds with 14 and 42 kB
 pieces: playback start 9.7 and 12.8 minutes against 9.7 and 12.6). What a node carries (its wants,
 its store, its grants) grows with what it follows and serves, up to 366 entries for an hour of
-music in 360 pieces, and is bounded by item 4, bounded generosity.
+music in 360 pieces, and is bounded by item 4, bounded generosity; what it holds for others, by
+its carry budget (PROTOCOL.md §4).
 
 **6. Firmware images.** An object can be a firmware image (PROTOCOL.md §1), and updates over the
 carousel are planned (ROADMAP.md).
@@ -277,6 +282,10 @@ object; whether an encrypted channel's objects need names only its listeners can
    the request budget of item 1 with a limit that follows from what renditions are for.
 4. **Bounded generosity.** An announcer serves at most so many channels and collections, chosen
    by how many distinct followers asked and for how long, rather than everything it hears of.
+   *Partly done:* an announcer fetches pieces and covers only when a follower asks for them
+   (PROTOCOL.md §2), and what a node holds for others, the menu of channels it does not follow
+   included, is bounded by its carry budget (§4). An announcer still keeps the manifests of every
+   channel it hears of (PROTOCOL.md §9, question 14).
 5. **Someone else's firmware.** The rest of the requirements above, cheapest first: signed
    firmware images, verification in chunks, ids that change, airtime as evidence, and
    authenticated announcer frames with the bound on time they need. The decoders and the tables
