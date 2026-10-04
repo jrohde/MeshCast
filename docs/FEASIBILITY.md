@@ -3446,9 +3446,131 @@ from 826,345 frames to 783,561 at 256 kB (99.6 %) and changed nothing at 64 kB; 
   `want_ttl`. A table per asking announcer, starting from the pooled one, is a candidate.
 - **Time islands.** An announcer whose shared time differs from its neighbours' by more than a
   control window hears them on the control carrier only while it watches (§26), and missed every
-  announcement of a channel's root for 21 hours (28.5).
+  announcement of a channel's root for 21 hours (28.5). (Done in §29: the windows wander, the time
+  is told in every one of them, and nobody watches.)
 - **A wait that weighs what it pushes out.** Below 1 MB relaying as soon as an ask is heard cost
   15 to 23 % more frames than main, and the fixed wait none but twice the time (28.6). The life
   table weighs only how likely others are to meet an ask; a relay that has to push out something
   the node may need again should wait longer. Relaying early only into free room went part of
   the way. Which budget a device sets is still open (§27).
+
+## 29. Windows that wander: the time across cells that meet only on the control carrier
+
+§26 gave the mesh a shared time and carried it on the control carrier where the cell's carrier
+hops; on a carrier that does not hop, it said, every node hears every announcer's beacon on the
+cell's channel. That holds within reach of the bulk carrier. The control carrier reaches further
+(LoRa SF7 down to −124 dBm against about −107 dBm for GFSK at 100 kbit/s, §2), and joins cells
+whose bulk carriers do not reach each other, but only in the control windows they share (§23),
+and the shared time places the windows. §28.5 traced a band O announcer that ran 196
+seconds off its neighbours' time and missed a channel's new root for 21 hours.
+
+### 29.1 How often
+
+The simulator now reports, every hour, the pairs of announcers that hear each other on the
+control carrier and not on the bulk carrier, and how many of their control windows in the coming
+hour they share (sim/README.md). In §27's sparse world, sixteen worlds per band:
+
+| | Band L | Band O |
+|---|---|---|
+| Announcer pairs that hear each other only on the control carrier | 80 to 86 | 6 |
+| ... sharing no window, one clock | 0 | 0 |
+| ... sharing no window, real clocks | 0 | 4.6, in every world, 750 of 752 hours |
+
+Band L tells the time on the control carrier and watches for others (§26), and its pairs share
+their windows. Band O did neither, and four in five of its pairs never shared a window: the
+control carrier did not join those cells at all. Delivery hid it, since band O's 500 mW bulk
+carrier joins most cells anyway.
+
+### 29.2 Telling and watching everywhere
+
+Telling the time on the control carrier and watching for others wherever nodes listen there only
+in the window, whether the carrier hops or not, joined them: in band O with real clocks pairs that
+shared no window fell from 4.6 per world to 0.01, delivery rose from 99.6 % (worst world 99.2) to
+99.7 % (99.4), every follower held its window at the end instead of 99.7 %, role changes fell from
+67 to 40 and uploads from 856 to 773. Telling alone did not: 4.4 pairs per world still shared no
+window. The watch did it, and the watch had a price. An announcer listened on the control carrier
+through a whole period every 30 minutes, deaf on its bulk carrier for that minute, also where it
+had no one to find: in the living band O neighbourhood (§13) with real clocks newcomers caught up
+after 10.2 minutes instead of 9.2 over sixteen worlds (worst 28.8 instead of 24.6), and under a
+lure the slowest tenth of the bulletins took 7.2 minutes instead of 3.0.
+
+### 29.3 Windows that wander
+
+The window had sat in the middle of every period. Placed instead where the period's number puts
+it, pseudo-randomly as a hop sequence is (PROTOCOL.md §3), it is the same for everyone who shares a
+time, and two groups whose times differ share one now and then: about one period in ten, an
+estimate, since two windows of 4 seconds placed at random in 60 overlap by a second or more about
+that often. An announcer that tells its time in every window then meets the
+other group's within minutes, and the later time spreads as any later time does (§26). No one
+listens longer than before, and the watch goes. Over the same worlds:
+
+| | Before (§28) | Telling and watching | Windows that wander |
+|---|---|---|---|
+| Band O, real clocks, 16 worlds: announcer pairs sharing no window | 4.6 | 0.01 | 0 |
+| ... delivered (worst world), windows held at the end | 99.6 % (99.2), 99.7 % | 99.7 % (99.4), 100 % | 99.7 % (99.4), 100 % |
+| ... role changes after the first hour, frames | 67, 154,686 | 40, 167,385 | 50, 161,203 |
+| Living band O neighbourhood, real clocks, 16 worlds: newcomers caught up | 9.2 min (worst 24.6) | 10.2 (28.8) | 8.8 (20.4) |
+| Band L at 256 kB (§28.6): delivered, frames, role changes | 99.4 % (98.7), 826,345, 307 | as before | 99.9 % (99.4), 775,724, 140 |
+
+Band L told and watched before, so telling and watching everywhere changed nothing there. Without
+the watch, band L under a small budget delivered more with fewer frames, and role changes halved.
+
+Placed anywhere in the period, a window now and then took the start of a meeting dwell, where
+candidates step up and announcers beacon: over 24 band L neighbourhoods with one clock, playback
+started after 8.3 minutes instead of 7.9, and several worlds a whole meeting cycle (100 seconds)
+later. Kept inside one dwell and clear of its first tenth, it started after 7.9.
+
+Two rules had assumed windows a period apart. An announcer told its time once every 60 seconds,
+which with windows apart by up to two periods skipped a window now and then; it now tells in every
+window. And a node that knows no time listened for `T_acquire`, a period and its window, before
+starting a time of its own: a station back from a power cut sometimes heard none in that span and
+started one, instead of challenging the node that had taken over (smoke test
+`a_station_back_from_a_power_cut_takes_over_once`). `T_acquire` is now two periods and a window,
+the longest a node can wait for a whole window. At a network's birth, where nobody has a time yet,
+that is a minute more before the first announcer: over 24 band L neighbourhoods with real clocks
+the median start was the same (10.4 minutes against 10.3), the slowest tenth 1.2 minutes later.
+
+### 29.4 The whole validation
+
+Against §28, with all of 29.2 and 29.3; "one clock" and "real clocks" as in §26.3.
+
+- **Sparse**: band L with one clock over sixteen worlds delivered 99.8 % (worst world 99.2)
+  against 99.8 % (99.5), with 3 % fewer frames and 69 role changes after the first hour against
+  85; over 24 more worlds 99.84 % against 99.83 %, worst 99.2 against 99.4, with 5 % fewer frames.
+  With real clocks 99.9 % (99.7) against 99.9 % (99.6), with 6 % fewer frames and 54 role changes
+  against 73. Band O delivered as much, with real clocks more (99.7 % against 99.6 %, every
+  follower holding its window at the end), and sent 4 % (real clocks) to 10 % (one clock) more
+  frames: the time told in every window, one LoRa beacon a minute per announcer. Under a budget
+  band L delivered as much or more (1 MB 99.8 %, 256 kB 99.9 % against 99.4 %, 64 kB 99.3 %
+  against 99.1 %) with up to 6 % fewer frames.
+- **Scenario matrix and false announcers**: with one clock within 1.2 minutes of §28 (the band O
+  town 16.3 minutes against 15.3, the band L clusters 8.2 against 9.4). With real
+  clocks the band L town started after 27.7 minutes against 29.6, and band O sooner everywhere;
+  the two band L clusters after 11.7 minutes against 9.9 and the band L neighbourhood's slowest
+  tenth after 15.4 against 13.7, over the matrix's eight worlds; over 24 others the clusters
+  started after 21.3 minutes against 22.1, mid band L after 18.3 against 19.1, and the
+  neighbourhood as before (10.4 against 10.3) with its slowest tenth 1.2 minutes later. Lures and
+  spoofers: delivery within 0.4 points, start within 1.7 minutes.
+- **Collections**: band L across 15 km² within a minute or sooner; band O across 15 km² up to 4
+  minutes sooner with real clocks, and with one clock within a minute but for four collections with
+  covers, 2.2 minutes later; band O in one cell within a minute. In one band L cell, within a minute
+  either way with one clock, and with real clocks 1.6 to 2.7 minutes later in four of five cases:
+  every node starts there without a time, and waits two periods for one (29.3).
+- **Living network**: newcomers in band L caught up after 8.5 / 9.1 minutes (one clock / real
+  clocks) against 9.2 / 9.7; in band O 8.5 / 8.6 against 8.6 / 8.3, and over sixteen more worlds
+  with real clocks 8.8 against 9.2. The slowest tenth of the daily band L bulletins arrived after
+  10.8 / 13.2 minutes against 22.2 / 18.0.
+- **Size sweep**: with one clock band L across 15 km² started as soon or sooner at every size (up
+  to 5 minutes sooner), the band L neighbourhood within 1.6 minutes either way, and band O within
+  a minute except across 15 km² in 7, 423 and 846 kB pieces (1.3 to 2.4 minutes later). With real
+  clocks band O started as soon or sooner at every size; band L 1.1 to 2.8 minutes later at three
+  sizes of eight in one cell and five of eight across 15 km², where every node starts without a
+  time (29.3). Frames from 14 % fewer to 8 % more.
+
+### 29.5 Open
+
+- **A first time sooner.** Where every node starts without a time, one waits two control periods
+  before it starts one itself, a period more than before, and band L with real clocks started 1 to
+  3 minutes later (29.4). An announcer that also told its time once a period outside the window,
+  where only nodes that know none listen, would let `T_acquire` be a period again, for a frame a
+  minute per announcer where the carrier hops.
