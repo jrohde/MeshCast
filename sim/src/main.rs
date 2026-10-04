@@ -1012,11 +1012,8 @@ fn params() -> Params {
     if let Some(g) = std::env::var("MESHCAST_T_GUARD_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
         p.t_guard_ms = g;
     }
-    if let Some(w) = std::env::var("MESHCAST_T_WATCH_MIN").ok().and_then(|v| v.parse::<u64>().ok()) {
-        p.t_watch_ms = w * 60_000;
-    }
-    if let Some(s) = std::env::var("MESHCAST_T_TELL_S").ok().and_then(|v| v.parse::<u64>().ok()) {
-        p.t_tell_ms = s * 1000;
+    if let Ok(v) = std::env::var("MESHCAST_TELL") {
+        p.tells_time = v != "0";
     }
     if let Some(s) = std::env::var("MESHCAST_T_ACQUIRE_S").ok().and_then(|v| v.parse::<u64>().ok()) {
         p.t_acquire_ms = s * 1000;
@@ -1026,6 +1023,9 @@ fn params() -> Params {
     }
     if let Ok(v) = std::env::var("MESHCAST_RELAY_ANY") {
         p.relay_unfollowed = v != "0";
+    }
+    if let Ok(v) = std::env::var("MESHCAST_WINDOW_WANDERS") {
+        p.ctrl_window_wanders = v != "0";
     }
     if let Ok(v) = std::env::var("MESHCAST_RELAY_WITHDRAW") {
         p.relay_withdraw = v != "0";
@@ -1280,8 +1280,16 @@ fn run_dynamics(nodes: usize, area_km2: f64, stations: usize, channels: usize, f
             t += step;
         }
     }
+    // Every hour: announcer pairs that hear each other only on the control carrier, and whether
+    // their windows meet (PROTOCOL.md §6).
+    let mut t = 3_600_000;
+    while t < until {
+        events.push((t, 9, 0));
+        t += 3_600_000;
+    }
     events.sort();
     let mut offline: Vec<usize> = Vec::new();
+    let mut islands = (0usize, 0usize, 0usize, 0usize, 0usize);
     // When each node was switched off, and from when to when, for time that counts.
     let mut went_off: BTreeMap<usize, Millis> = BTreeMap::new();
     let mut switched_off: Vec<Vec<(Millis, Millis)>> = vec![Vec::new(); nodes];
@@ -1293,6 +1301,17 @@ fn run_dynamics(nodes: usize, area_km2: f64, stations: usize, channels: usize, f
     for (t, kind, c) in events {
         built.engine.run(t, 600_000);
         match kind {
+            9 => {
+                let e = &built.engine;
+                let ctrl = e.phys.iter().position(|p| p.kind == CarrierKind::LoraControl).unwrap_or(0);
+                let bulk = e.phys.iter().position(|p| p.kind != CarrierKind::LoraControl).unwrap_or(0);
+                let (n, apart, partly) = e.ctrl_only_pairs(ctrl, bulk);
+                islands.0 += 1;
+                islands.1 += n;
+                islands.2 += apart;
+                islands.3 += partly;
+                islands.4 += (apart > 0) as usize;
+            }
             0 => {
                 let src = &mut built.sources[c];
                 let o = track_object(common.seed, src.node, next_index[c], bulletin_kb * 1024, ContentType::Speech);
@@ -1583,6 +1602,9 @@ fn run_dynamics(nodes: usize, area_km2: f64, stations: usize, channels: usize, f
         let on_mean = if catch_on_h.is_empty() { 0.0 } else { catch_on_h.iter().sum::<f64>() / catch_on_h.len() as f64 };
         let on_worst = catch_on_h.iter().cloned().fold(0.0f64, f64::max);
         println!("newcomers counting only the time they were switched on: mean {:.2} h, worst {:.2} h", on_mean, on_worst);
+    }
+    if islands.0 > 0 {
+        println!("control carrier: announcer pairs that hear each other only there, hourly mean {:.1}; sharing no window in the next hour {:.1}, fewer than nine in ten {:.1}; hours with a pair sharing none {} of {}", islands.1 as f64 / islands.0 as f64, islands.2 as f64 / islands.0 as f64, islands.3 as f64 / islands.0 as f64, islands.4, islands.0);
     }
     println!("of the {} follower nodes on at the end, {} hold the current window of every channel they follow ({:.1} %)", online, up_to_date, if online > 0 { 100.0 * up_to_date as f64 / online as f64 } else { 0.0 });
     if !offline.is_empty() {

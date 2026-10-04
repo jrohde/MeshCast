@@ -111,6 +111,9 @@ relays go (`docs/FEASIBILITY.md` §28):
   carry budget, by kind and by what the node knew of it then (neighbours holding it, an announcer
   listing it, in or out of its collection's window, idle time), each with the share the node held
   again later.
+- `control carrier`: every hour, the pairs of announcers that hear each other on the control
+  carrier but not on the bulk carrier, how many of them share none of their control windows in the
+  coming hour, and how many fewer than nine in ten (`docs/PROTOCOL.md` §3, §6).
 
 ## Looking inside one world
 
@@ -142,8 +145,10 @@ relays go (`docs/FEASIBILITY.md` §28):
   to change that), how far apart the nodes' shared times are, how many keep within a second of the
   median, the steps taken, role changes, announcers, nodes without a time and excursions, and at
   the end the stations' roles; `=2` also lists the nodes more than 10 ms off.
-- `MESHCAST_T_GUARD_MS`, `MESHCAST_T_WATCH_MIN`, `MESHCAST_T_TELL_S` and `MESHCAST_T_ACQUIRE_S`
-  override `T_guard`, `T_watch`, `T_tell` and `T_acquire` (0 turns the last three off).
+- `MESHCAST_T_GUARD_MS` and `MESHCAST_T_ACQUIRE_S` override `T_guard` and `T_acquire` (0 turns
+  acquisition off). `MESHCAST_TELL=0` keeps announcers from telling their time on the control
+  carrier, and `MESHCAST_WINDOW_WANDERS=0` puts the control window in the middle of every period,
+  as before `docs/FEASIBILITY.md` §29.
 - `MESHCAST_T_EXCURSION_MIN=40` overrides `T_excursion` for an experiment, and
   `MESHCAST_BACKOFF_MAX_ATTEMPT=4` the number of times the random backoff after a busy channel
   doubles. `MESHCAST_CTRL_WINDOW_MS=4000 MESHCAST_CTRL_PERIOD_MS=60000` set the

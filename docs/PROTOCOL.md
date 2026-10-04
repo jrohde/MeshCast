@@ -325,12 +325,24 @@ and fetch them through bridge nodes, and the roots those announce (§2).
 once: the packet type changes only in standby, and the other mode's settings are lost (SX1261/2
 datasheet rev 1.2, §13.4.2); the change itself is quick, standby to receive taking 83 µs
 (Table 8-2). A node whose bulk carrier is GFSK on that radio therefore listens on the control
-carrier only in a common window, `T_ctrl_window` (draft 4 s) every `T_ctrl_period` (60 s),
-beginning halfway through each period of the shared time base the hop sequences already use (§5.3,
-§6), and on the bulk carrier the rest of the time. Every node sends control-carrier frames only in
-the window, each one whole, and nothing on a bulk carrier that shares the radio during it; a bulk
-carrier on another radio (ESP-NOW, IP) is not held. A station whose concentrator receives LoRa
-and FSK at once (SX1302) follows the same rule, so that the ones that cannot hear it miss nothing.
+carrier only in a common window, `T_ctrl_window` (draft 4 s) once every `T_ctrl_period` (60 s) of
+the shared time the hop sequences already use (§5.3, §6), and on the bulk carrier the rest of the
+time. **Where the window falls in a period follows from the period's number**, pseudo-randomly, as
+a hop sequence does: with `r = splitmix64(WINDOW_ID, k)` for period `k` (`WINDOW_ID` = 0xFFFFFFFD),
+the window begins `r mod (T_ctrl_period − T_ctrl_window + 1)` ms into the period. Where the cell's
+carrier hops and a period is a whole number of dwells (the draft: three), it keeps inside one dwell
+and clear of the dwell's first tenth, where announcers beacon and candidates step up: it begins in
+dwell `r mod (T_ctrl_period / T_dwell)` of the period, `T_dwell / 10 + T_guard + (r div
+(T_ctrl_period / T_dwell)) mod (T_dwell − T_ctrl_window − 2 T_guard − T_dwell / 10 + 1)` ms after
+the dwell starts. Everyone who shares a time shares every window, and two groups whose times
+differ share one now and then, which is how the later time crosses to the other (§6). Placed
+halfway through every period, as first specified, the windows of two groups apart stayed apart for
+good; placed anywhere in a hopping cell, a window now and then took the start of a meeting dwell,
+and a band L neighbourhood started playback a meeting later (FEASIBILITY.md §29). Every node sends
+control-carrier frames only in the window, each one whole, and nothing on a bulk carrier that
+shares the radio during it; a bulk carrier on another radio (ESP-NOW, IP) is not held. A station
+whose concentrator receives LoRa and FSK at once (SX1302) follows the same rule, so that the ones
+that cannot hear it miss nothing.
 Short windows were tried as well: 1 to 4 s every 30 or 60 s delivered within a few percent of a
 node with two receivers, and a node that never listened on the control carrier fell far behind,
 so the draft takes the longest window, which leaves the most room for clocks that disagree and for
@@ -1228,28 +1240,41 @@ way, beacon time plus time on air (LoRaMac-node, `LoRaMacClassB.c`).
   find. Taking only later times, a node whose clock ran ahead looked for that announcer on the
   wrong channel and led a cell of its own instead.
 
-Where the cell's carrier hops, a node that knows no time finds nobody on it, and two groups that do
-not share a time never meet: their windows and their hop sequences differ. The control carrier
-carries the time across:
+Two groups that do not share a time meet on the control carrier only when their windows meet, and
+where the cell's carrier hops, their hop sequences differ too, and a node that knows no time finds
+nobody on it. The control carrier carries the time across:
 
-- **Every announcer tells its time on the control carrier**, once every `T_tell`, in the window.
-- **A node that knows no time listens on the control carrier all the time** until it hears a
-  beacon there, and takes that announcer's time. One that has heard none steps up only after
-  `T_acquire` of listening, a control period and its window, and is then a source of time itself:
-  it tells it at once on the control carrier, outside the window, where whoever else knows none is
-  listening, and keeps listening there for `T_acquire`, for a source that started before it.
-- **A candidate whose time moved steps up in the next rendezvous of its new time**, where the
-  other candidates and announcers are. Planned by its old time, it stepped up where nobody heard
-  it, and in a town started with clocks apart three cells too many stayed side by side.
-- **Once every `T_watch` an announcer listens on the control carrier through a whole period**, and
-  takes a later time it hears there; one that started the time itself does so two periods after it
-  began, and then twice as long each time, up to `T_watch`. Without the watch, two groups of 26
-  and 24 nodes in one band L neighbourhood kept times nine minutes apart for over an hour, until
-  they met by chance.
+- **Every announcer tells its time on the control carrier in every window.** Another group's
+  window falls on one of them now and then (§3), and an announcer that hears a later time there
+  takes it at its next beacon (above): the two groups become one. Announcers used to listen
+  instead through a whole period every `T_watch` (30 minutes), and sooner if they had started the
+  time themselves, while their windows stayed put. Deaf on the bulk carrier for that minute, they
+  cost newcomers in a band O neighbourhood 1.4 minutes more to catch up than now, and band L at a
+  256 kB budget delivered 99.4 % instead of 99.9 % with twice the role changes (FEASIBILITY.md
+  §29). Without either, two groups of 26 and 24 nodes in one band L neighbourhood kept times nine
+  minutes apart for over an hour.
+- **Where the cell's carrier hops, a node that knows no time listens on the control carrier all
+  the time** until it hears a beacon there, and takes that announcer's time. One that has heard
+  none steps up only after `T_acquire` of listening, two control periods and a window, the longest
+  it can wait for a whole window (§3), and is then a source of time itself: it tells it at once
+  on the control carrier, outside the window, where whoever else knows none is listening, and
+  keeps listening there for `T_acquire`, for a source that started before it. A control period
+  and its window was enough while windows stayed put; with windows that wander, a station back from
+  a power cut sometimes heard no time in it and started one of its own.
+- **Where the cell's carrier hops, a candidate whose time moved steps up in the next rendezvous of
+  its new time**, where the other candidates and announcers are. Planned by its old time, it
+  stepped up where nobody heard it, and in a town started with clocks apart three cells too many
+  stayed side by side.
 
-On a carrier that does not hop, every node hears every announcer's beacon on the cell's channel,
-and with it the time, without knowing it first: none of the three is needed there, and none is
-used.
+On a carrier that does not hop, a node that knows no time hears its cell's announcer on the cell's
+channel, and with it the time, without knowing it first: it needs no acquisition there, and a
+candidate no rendezvous. Its announcer still tells its time wherever a node listens on the
+control carrier only in the window: neighbouring cells whose bulk carriers do not reach each other
+are joined by the control carrier's longer range, and only in the windows they share. Telling only
+where the carrier hops, as first specified, left band O with real clocks without that join: four in
+five pairs of announcers that heard each other only on the control carrier never shared a window,
+in every world and for the whole of it, and one announcer missed a channel's new root for 21 hours
+(FEASIBILITY.md §28.5, §29).
 
 **A frame keeps `T_guard` from the edges** of a hop dwell and of the control window: a receiver
 whose clock is a few milliseconds off has retuned there already, or still listens on the other
@@ -1334,10 +1359,8 @@ simulator has no node with one.
 | own share | `min(regulatory, occ_high_own / (announcers heard + 1))` | content pacing ceiling; derived, not configured |
 | `T_dwell` | 20 s | hop dwell on frequency-agile carriers |
 | `meet_every` | 5 | every fifth dwell is on the common control-plane sequence |
-| `T_ctrl_period`, `T_ctrl_window` | 60 s, 4 s | the control window: control-carrier frames go only in it, and a radio shared with a sub-GHz bulk carrier listens on the control carrier only then; it begins halfway through each period (§3) |
-| `T_acquire` | 64 s | where the cell's carrier hops: how long a node that knows no shared time listens on the control carrier before it may step up by its own clock, a control period and its window (§6) |
-| `T_watch` | 30 min | where the cell's carrier hops: how often an announcer listens on the control carrier through a whole period, for the time of announcers whose window it does not share (§6) |
-| `T_tell` | 60 s | where the cell's carrier hops: how often an announcer tells its time on the control carrier, in the window (§6); `T_acquire` covers one |
+| `T_ctrl_period`, `T_ctrl_window` | 60 s, 4 s | the control window: control-carrier frames go only in it, and a radio shared with a sub-GHz bulk carrier listens on the control carrier only then; where it falls in each period follows from the period's number (§3) |
+| `T_acquire` | 124 s | where the cell's carrier hops: how long a node that knows no shared time listens on the control carrier before it may step up by its own clock, two control periods and a window, the longest it can wait for a whole window (§3, §6) |
 | `T_guard` | 50 ms | how far a frame keeps from the edges of a hop dwell and of the control window, for clocks a few milliseconds apart (§6) |
 | `T_offer` | 0–3 s | random delay before a holder offers on an open ask |
 | repair wait | `T_suppress × (neighbours heard better than the asker) / (all neighbours)` + jitter | ungranted NACK answer |

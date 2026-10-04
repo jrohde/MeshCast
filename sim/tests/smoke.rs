@@ -1129,8 +1129,11 @@ fn the_control_carrier_is_heard_in_its_window() {
     let manifest = b.sources[0].collections[0].as_object().0.id.short();
     b.engine.run(3_600_000, 600_000);
     let t = *b.engine.metrics.completions.get(&(1, manifest)).expect("the far node should get the collection manifest on LoRa");
-    let start = period / 2;
-    assert!((start..=start + window).contains(&(t % period)), "it arrived {} ms into a period, outside the window", t % period);
+    // The window that contains the arrival, or else the next one: the arrival is in it.
+    let far = &b.engine.nodes[1];
+    let (start, end) = far.node.ctrl_window_at(far.clock.local(t)).unwrap();
+    let local = far.clock.local(t);
+    assert!(start <= local && local <= end, "it arrived at {local}, outside the window {start}..{end}");
     assert_eq!(b.engine.metrics.frames_not_listening, 0, "a frame went out while its receivers listened elsewhere");
 }
 
@@ -1382,4 +1385,23 @@ fn an_announcer_that_listens_alone_is_relayed_to() {
     assert!(b.engine.nodes[3].node.is_announcing(), "the far station should announce");
     let missing = b.tracks.keys().filter(|id| !b.engine.nodes[3].node.holds(id)).count();
     assert_eq!(missing, 0, "the far station should hold every piece, {missing} missing");
+}
+
+#[test]
+fn announcers_that_meet_only_on_the_control_carrier_share_its_window() {
+    // Band O does not hop, so a node that knows no time hears its cell's announcer and the time with
+    // it. But two cells whose bulk carriers do not reach each other meet only on the control
+    // carrier, in the windows they share, and the shared time places the windows. Telling and
+    // watching the time there only where the carrier hops, four in five such pairs of announcers in
+    // band O never shared a window (PROTOCOL.md §6, FEASIBILITY.md §29).
+    use meshcast_core::frame::CarrierKind;
+    let mut s = spec(BulkPreset::GfskO, vec![(0.0, 0.0), (100.0, 0.0), (6000.0, 0.0), (6100.0, 0.0)], vec![1], vec![0, 2], 3.0);
+    s.clocks = meshcast_sim::scenario::ClockSpec { epoch_s: 3600, ppm: 20, same: false };
+    let mut b = build(&s, Params::default());
+    b.engine.run((s.hours * 3.6e6) as u64, 600_000);
+    let ctrl = b.engine.phys.iter().position(|p| p.kind == CarrierKind::LoraControl).unwrap();
+    let bulk = b.engine.phys.iter().position(|p| p.kind != CarrierKind::LoraControl).unwrap();
+    let (pairs, apart, partly) = b.engine.ctrl_only_pairs(ctrl, bulk);
+    assert!(pairs >= 1, "the two cells should hear each other only on the control carrier");
+    assert_eq!((apart, partly), (0, 0), "their control windows should meet");
 }
