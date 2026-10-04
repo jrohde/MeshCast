@@ -522,6 +522,22 @@ impl Engine {
                         eprintln!("OC {} {} {:?} {:?} role={:?}", now, i, id, self.nodes[i].node.object_kind(&id), self.nodes[i].node.role(self.phys.len() - 1));
                     }
                     self.metrics.completions.entry((i, id)).or_insert(now);
+                    if let Some((k, at)) = self.metrics.evicted_pending.remove(&(i, id)) {
+                        self.metrics.evictions[k].1 = Some(now - at);
+                    }
+                }
+                Action::Relayed { id } => {
+                    let r = self.metrics.relayers.entry(id).or_default();
+                    r.0 += 1;
+                    r.1.insert(i);
+                }
+                Action::Evicted { id, info } => {
+                    if self.trace_grants {
+                        eprintln!("EV {} {} {:?} relayed={} menu={} role={:?}", self.now, i, id, info.relayed, info.menu, self.nodes[i].node.role(self.phys.len() - 1));
+                    }
+                    let k = self.metrics.evictions.len();
+                    self.metrics.evictions.push((info, None));
+                    self.metrics.evicted_pending.insert((i, id), (k, self.now));
                 }
                 Action::Role { carrier, role, announcer, now: _ } => {
                     let now = self.now;
@@ -602,6 +618,30 @@ impl Engine {
                 let k = (h.0 as usize).wrapping_sub(1);
                 if !h.is_none() && k < self.nodes.len() && self.nodes[k].node.role(carrier) == meshcast_core::node::Role::Announcer {
                     self.metrics.grants_to_announcers += 1;
+                }
+            }
+            // An announcer's asks for its listeners: open, or met by a grant (FEASIBILITY.md §28).
+            if g.announcer == g.node && !self.nodes[from].mute {
+                let me = self.nodes[from].node.id();
+                let unpacked = self.nodes[from].node.unpacked(&g);
+                for (o, h, p) in &unpacked.want {
+                    if p & meshcast_core::frame::ASK_LISTENED == 0 {
+                        continue;
+                    }
+                    if !self.metrics.listened_asks.contains_key(&(from, *o)) {
+                        let real = self.nodes.iter().any(|n| n.alive && n.node.announcer_of(carrier) == me && n.node.listens_to(o));
+                        self.metrics.listened_asks.insert((from, *o), crate::metrics::ListenedAsk { first: now, real_listener: real, ..Default::default() });
+                    }
+                    let a = self.metrics.listened_asks.get_mut(&(from, *o)).unwrap();
+                    if h.is_none() {
+                        if a.granted.is_none() {
+                            a.open_frames += 1;
+                        }
+                    } else if a.granted.is_none() {
+                        let k = (h.0 as usize).wrapping_sub(1);
+                        let foreign = k < self.nodes.len() && self.nodes[k].node.announcer_of(carrier) != me;
+                        a.granted = Some((now, foreign));
+                    }
                 }
             }
         }

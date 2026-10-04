@@ -89,6 +89,28 @@ pub enum Action {
     Tx { carrier: usize, channel: u8, bytes: Vec<u8>, airtime_ms: u32, class: Class, frame_type: FrameType, upload_to: Option<NodeId> },
     ObjectComplete { id: ShortId, now: Millis },
     Role { carrier: usize, role: Role, announcer: NodeId, now: Millis },
+    /// Diagnostic: an object held for others gave way to the carry budget, with what was known of
+    /// it then (FEASIBILITY.md §28).
+    Evicted { id: ShortId, info: EvictionInfo },
+    /// Diagnostic: we took on a relay of `id` for another cell (FEASIBILITY.md §28).
+    Relayed { id: ShortId },
+}
+
+/// What a node knew of an object held for others when it gave way to the carry budget.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct EvictionInfo {
+    /// Fetched to relay for another cell, or a manifest of the menu of a channel we do not follow;
+    /// otherwise held as announcer for followers.
+    pub relayed: bool,
+    pub menu: bool,
+    /// Neighbours heard to hold it, and whether one of them is an announcer.
+    pub replicas: u16,
+    pub announcer_has: bool,
+    /// Still named by a collection manifest we hold.
+    pub in_window: bool,
+    /// Since it was last of use.
+    pub idle_ms: Millis,
+    pub len: u32,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -126,6 +148,10 @@ pub struct Stats {
     pub cache_evictions: u64,
     /// Relays not taken on because the carry budget was full of what is in use (§27).
     pub relays_declined: u64,
+    /// Relays handed on: an upload of what we relayed began to another cell's announcer (§28).
+    pub relays_handed_on: u64,
+    /// Relays given up because the ask they served was met first (§28).
+    pub relays_withdrawn: u64,
     /// How well we heard the holder, summed over grants that ended in completion and over grants
     /// that lapsed (dBm; divide by the counts).
     pub grant_rssi_completed: i64,
@@ -216,13 +242,31 @@ struct ManifestRef {
 }
 
 /// Another cell's ask, for its listeners, for an object we lack (PROTOCOL.md §4).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct RelayAsk {
     /// Since when it has gone unmet: we relay it only after `T_relay_wait`.
     first: Millis,
     /// When we last heard it: what we relay is of use while it is asked for.
     last: Millis,
     heard: u16,
+    /// Its outcome is in our record of how soon others meet such asks: it was met, we relayed it,
+    /// or it was forgotten.
+    counted: bool,
+    /// The announcers whose asks for it are still open, as far as we know (at most four).
+    askers: Vec<NodeId>,
+}
+
+/// Ages of another cell's asks, in doublings: under 1, 2, 4, ... 64 minutes, and over.
+const RELAY_AGE_BUCKETS: usize = 8;
+
+fn relay_age_bucket(age: Millis) -> usize {
+    let mut b = 0;
+    let mut edge: Millis = 60_000;
+    while b + 1 < RELAY_AGE_BUCKETS && age >= edge {
+        b += 1;
+        edge *= 2;
+    }
+    b
 }
 
 /// A collection manifest of a channel we do not follow, which we fetched to relay another cell's
@@ -412,6 +456,8 @@ pub struct Node {
     wants: BTreeSet<ShortId>,
     /// Objects completed by registration rather than by a symbol, awaiting `on_complete`.
     quiet_complete: Vec<ShortId>,
+    /// Relays taken on since the host last heard (diagnostic).
+    relay_log: Vec<ShortId>,
     neighbors: BTreeMap<NodeId, Neighbor>,
     carriers: Vec<CarrierRt>,
     ctrl: usize,
@@ -533,6 +579,9 @@ pub struct Node {
     /// Another cell's announcers' asks, for listeners, for an object we lack: when we first and
     /// last heard one, and how often (PROTOCOL.md §4).
     relay_asks: BTreeMap<ShortId, RelayAsk>,
+    /// How soon others meet the asks we hear from other cells, by age bucket: asks that reached
+    /// the bucket, and asks met in it, both in halves (an ask forgotten in a bucket counts half).
+    relay_life: [[u32; 2]; RELAY_AGE_BUCKETS],
     /// The pieces of collections we hold only to relay for another cell, of channels we do not
     /// follow (FEASIBILITY.md §27).
     relay_cols: BTreeMap<ShortId, RelayCol>,
@@ -588,6 +637,7 @@ impl Node {
             pending_ack: BTreeMap::new(),
             wants: BTreeSet::new(),
             quiet_complete: Vec::new(),
+            relay_log: Vec::new(),
             neighbors: BTreeMap::new(),
             carriers,
             ctrl,
@@ -650,6 +700,7 @@ impl Node {
             offered_with: BTreeMap::new(),
             relayed: BTreeSet::new(),
             relay_asks: BTreeMap::new(),
+            relay_life: [[0; 2]; RELAY_AGE_BUCKETS],
             relay_cols: BTreeMap::new(),
             last_used: BTreeMap::new(),
             root_follow_ups: BTreeMap::new(),
@@ -1078,6 +1129,11 @@ impl Node {
         self.progress.get(id).map(|p| (p.last_progress, p.last_want))
     }
 
+    /// Diagnostic: whether `id` is something we listen to (a piece or cover of what we follow).
+    pub fn listens_to(&self, id: &ShortId) -> bool {
+        self.kept_for_ourselves().contains(id) && !self.own_objects.contains(id)
+    }
+
     /// Diagnostic: what the next round of asking names, its sets read by our piece lists. It is
     /// built as for a GOSSIP and counts as asked.
     pub fn ask_now(&mut self) -> Vec<ShortId> {
@@ -1094,6 +1150,12 @@ impl Node {
     /// Diagnostic: whether we take our announcer to be asking for `id` itself (PROTOCOL.md §2).
     pub fn announcer_asked_for(&self, id: &ShortId) -> bool {
         self.ann_asks.get(id).map(|t| self.now < *t + self.cfg.params.want_ttl_ms).unwrap_or(false)
+    }
+
+    /// Diagnostic: what we learned of how soon others meet the asks we hear, per age bucket: the
+    /// share met in it, in permille, and how many asks reached it (halves).
+    pub fn relay_life(&self) -> Vec<(u32, u32)> {
+        (0..RELAY_AGE_BUCKETS).map(|b| (self.relay_met_permille(b), self.relay_life[b][0])).collect()
     }
 
     /// Diagnostic: bytes of the objects we hold complete.
@@ -1258,20 +1320,75 @@ impl Node {
     /// Note another cell's ask for its listeners for `id`, and return since when it has gone
     /// unmet. At most `max_relay_asks`: an ask heard once gives way before one heard twice, and
     /// then the one heard longest ago (docs/ABUSE.md, "Someone else's firmware", item 5).
-    fn note_relay_ask(&mut self, id: ShortId) -> Millis {
+    fn note_relay_ask(&mut self, id: ShortId, asker: NodeId) -> Millis {
         let now = self.now;
         if !self.relay_asks.contains_key(&id) && self.relay_asks.len() >= self.cfg.params.max_relay_asks.max(1) {
             if let Some(gone) = self.relay_asks.iter().min_by_key(|(_, a)| (a.heard >= 2, a.last)).map(|(k, _)| *k) {
+                self.count_relay_outcome(&gone, false);
                 self.relay_asks.remove(&gone);
             }
         }
         // A piece of a collection we fetched to relay has waited as long as the asks for it.
         let since = self.relay_cols.values().find(|c| c.pieces.contains(&id)).map(|c| c.since).unwrap_or(now);
-        let a = self.relay_asks.entry(id).or_insert(RelayAsk { first: now, last: now, heard: 0 });
+        let a = self.relay_asks.entry(id).or_insert(RelayAsk { first: now, last: now, heard: 0, counted: false, askers: Vec::new() });
         a.first = a.first.min(since);
         a.last = now;
         a.heard = a.heard.saturating_add(1);
+        if !a.askers.contains(&asker) && a.askers.len() < 4 {
+            a.askers.push(asker);
+        }
         a.first
+    }
+
+    /// Whether another cell's ask for its listeners, unmet since `first`, is due to be relayed.
+    /// Most asks are met by a holder, and relaying those only duplicates the work; how soon depends
+    /// on the band, the cell and where we are in it, so we judge by how soon others met the asks we
+    /// heard before: an ask is relayed once one of its age was met by anyone else, before it was
+    /// twice as old, less often than `relay_risk`, and at the latest after `want_ttl`, the longest
+    /// a false announcer can make us wait (FEASIBILITY.md §17, §28).
+    fn relay_due(&self, first: Millis) -> bool {
+        let age = self.now.saturating_sub(first);
+        if !self.cfg.params.relay_learn {
+            return age >= self.cfg.params.t_relay_wait_ms;
+        }
+        age >= self.cfg.params.want_ttl_ms || self.relay_met_permille(relay_age_bucket(age)) < self.cfg.params.relay_risk_permille as u32
+    }
+
+    /// Of the asks we heard reach age bucket `b`, the share that others met in it, in permille.
+    /// Before evidence a node expects what `T_relay_wait` says: an ask is met by others half the
+    /// time in a bucket that ends within `T_relay_wait`, and never after; four asks' worth.
+    fn relay_met_permille(&self, b: usize) -> u32 {
+        let [entered, met] = self.relay_life[b];
+        let end: Millis = 60_000 << b;
+        let prior_met = if end <= self.cfg.params.t_relay_wait_ms { 4 } else { 0 };
+        1000 * (met + prior_met) / (entered + 8)
+    }
+
+    /// Put the outcome of another cell's ask `id` in our record, once: met by someone else at its
+    /// age now, or not (we relayed it, or forgot it) at the age we last knew it open.
+    fn count_relay_outcome(&mut self, id: &ShortId, met: bool) {
+        let now = self.now;
+        let Some(a) = self.relay_asks.get_mut(id) else { return };
+        if a.counted {
+            return;
+        }
+        a.counted = true;
+        let age = if met { now } else { a.last }.saturating_sub(a.first);
+        let last = relay_age_bucket(age);
+        for b in 0..last {
+            self.relay_life[b][0] += 2;
+        }
+        self.relay_life[last][0] += if met { 2 } else { 1 };
+        if met {
+            self.relay_life[last][1] += 2;
+        }
+        // What the neighbourhood did long ago weighs less than what it does now.
+        if self.relay_life[0][0] > 1024 {
+            for c in self.relay_life.iter_mut() {
+                c[0] /= 2;
+                c[1] /= 2;
+            }
+        }
     }
 
     /// Whether we could make rendition `id`: we render, know it and hold what it is made from.
@@ -1493,6 +1610,10 @@ impl Node {
         self.relayed.retain(|id| keep.contains(id));
         let ttl = self.cfg.params.want_ttl_ms;
         let now = self.now;
+        let forgotten: Vec<ShortId> = self.relay_asks.iter().filter(|(_, a)| now >= a.last + ttl).map(|(k, _)| *k).collect();
+        for id in forgotten {
+            self.count_relay_outcome(&id, false);
+        }
         self.relay_asks.retain(|_, a| now < a.last + ttl);
         self.relay_cols.retain(|m, _| keep.contains(m));
         let store = &self.store;
@@ -1686,6 +1807,7 @@ impl Node {
         while let Some(id) = self.quiet_complete.pop() {
             self.on_complete(id, &mut out);
         }
+        out.extend(self.relay_log.drain(..).map(|id| Action::Relayed { id }));
         out
     }
 
@@ -1725,7 +1847,7 @@ impl Node {
             self.expire_neighbors();
             self.expire_conflicts();
             self.evict_orphans();
-            self.enforce_budget();
+            self.enforce_budget(out);
             let ttl = self.cfg.params.neighbor_ttl_ms;
             self.granted_to_us.retain(|_, t| *t + ttl >= now);
             // Announcers we hear directly are in conflict with us too.
@@ -2650,11 +2772,15 @@ impl Node {
         let index = if self.rounds_are_dear() { self.piece_index() } else { BTreeMap::new() };
         let mut singles = Vec::new();
         let mut groups: BTreeMap<SetKey, Vec<u16>> = BTreeMap::new();
+        let announcing = self.is_announcing();
+        let mine = if announcing { self.kept_for_ourselves() } else { BTreeSet::new() };
         for id in ids {
             let (grant, phase) = self.grants.get(&id).map(|(h, _, p)| (*h, *p)).unwrap_or((NodeId::NONE, 0));
-            // An announcer marks what its own followers asked for: an ask for listeners, which a
-            // follower of another cell may relay, rather than one to fill its library (§3.3).
-            let listened = self.is_announcing() && self.carriers.iter().filter_map(|c| c.carousel.as_ref()).any(|k| k.wanted_by(&id) > 0);
+            // An announcer marks what its own followers asked for, and what it listens to itself:
+            // an ask for listeners, which a follower of another cell may relay, rather than one to
+            // fill its library (§3.3). One that followed a channel nobody else in its cell followed
+            // asked for it unmarked, and nobody relayed it (FEASIBILITY.md §28).
+            let listened = announcing && (mine.contains(&id) || self.carriers.iter().filter_map(|c| c.carousel.as_ref()).any(|k| k.wanted_by(&id) > 0));
             let phase = phase | if listened { ASK_LISTENED } else { 0 };
             match index.get(&id) {
                 Some((m, k)) => groups.entry((*m, grant, phase)).or_default().push(*k),
@@ -3245,12 +3371,16 @@ impl Node {
                     self.carriers[i].upload = None;
                     return;
                 };
+                let own = self.announcer_of(i);
                 if let Some(u) = self.carriers[i].upload.as_mut() {
                     if !u.started {
                         u.started = true;
                         self.stats.uploads_started += 1;
                         if u.list.is_some() {
                             self.stats.repairs_started += 1;
+                        }
+                        if u.to != own && self.relayed.contains(object) {
+                            self.stats.relays_handed_on += 1;
                         }
                     }
                 }
@@ -3781,7 +3911,21 @@ impl Node {
     }
 
     fn on_complete(&mut self, id: ShortId, out: &mut Vec<Action>) {
-        self.last_used.insert(id, self.now);
+        // An object nobody has named, overheard or pushed on the control carrier, may be a root
+        // manifest: its bytes name its channel and carry the channel's signature, so they say what
+        // it is (PROTOCOL.md §1). An announcer that overheard a new root being uploaded next door,
+        // and heard no announcement of it, held it unread, and its cell stayed a seq behind.
+        let unnamed = self.store.entry(&id).map(|e| e.meta.is_none() && e.kind() == ContentType::Other).unwrap_or(false);
+        if let Some((oid, len)) = self.store.bytes(&id).filter(|b| unnamed && Manifest::decode(b).is_ok()).map(|b| (crate::ids::ObjectId::of(b), b.len() as u32)) {
+            if oid.short() == id {
+                self.store.ensure(ObjectMeta { id: oid, len, kind: ContentType::Manifest });
+            }
+        }
+        // Arriving is use, except for the menu of a channel we neither follow nor serve: that is
+        // of use once it names what another cell asks us to relay (FEASIBILITY.md §28).
+        if !self.cfg.params.evict_by_evidence || !self.menu_only().contains(&id) {
+            self.last_used.insert(id, self.now);
+        }
         // A collection manifest we fetched to relay another cell's asks: now we can read them, and
         // its pieces have waited as long as it has (FEASIBILITY.md §27).
         if self.cfg.params.relay_unfollowed && self.relayed.contains(&id) && !self.relay_cols.contains_key(&id) {
@@ -4126,6 +4270,18 @@ impl Node {
         last_used + self.cfg.params.want_ttl_ms <= self.now
     }
 
+    /// A relay that has reached another cell: an announcer other than ours lists it as held.
+    fn delivered(&self, id: &ShortId) -> bool {
+        let own = self.primary_bulk().map(|c| self.announcer_of(c)).unwrap_or(NodeId::NONE);
+        self.relayed.contains(id) && self.neighbors.iter().any(|(k, n)| n.announcer == *k && *k != own && n.haves.contains_key(id))
+    }
+
+    /// Whether what we hold for others may give way to the carry budget: it has not been of use
+    /// for `want_ttl`, or, by evidence, it was relayed and has been delivered (FEASIBILITY.md §28).
+    fn gives_way(&self, id: &ShortId, last_used: Millis) -> bool {
+        self.idle(last_used) || (self.cfg.params.evict_by_evidence && self.delivered(id))
+    }
+
     /// Room left in `carry_budget_bytes` for another relay: the budget less what we hold for others
     /// that has been of use within `want_ttl`, and less the relays we are fetching
     /// (FEASIBILITY.md §27).
@@ -4134,16 +4290,42 @@ impl Node {
         if budget == u64::MAX {
             return u64::MAX;
         }
-        let in_use: u64 = self.held_for_others(&self.kept_for_ourselves()).iter().filter(|h| !self.idle(h.0)).map(|h| h.2).sum();
+        let in_use: u64 = self.held_for_others(&self.kept_for_ourselves()).iter().filter(|h| !self.gives_way(&h.1, h.0)).map(|h| h.2).sum();
         let fetching: u64 = self.relayed.iter().filter(|id| self.wants.contains(id)).filter_map(|id| self.store.entry(id).filter(|e| !e.kind().is_read_by_nodes()).and_then(|e| e.len())).map(|l| l as u64).sum();
         budget.saturating_sub(in_use + fetching)
     }
 
-    /// What we hold for others stays within `carry_budget_bytes`: of what has not been of use for
-    /// `want_ttl`, the least recently used gives way, and can be fetched again by name. What is in
+    /// The collection manifest we hold that names piece `id`, if any.
+    fn naming_manifest(&self, id: &ShortId) -> Option<ShortId> {
+        self.collections.values().find(|m| self.pieces.get(*m).map(|l| l.contains(id)).unwrap_or(false)).copied().or_else(|| self.relay_cols.iter().find(|(_, c)| c.pieces.contains(id)).map(|(m, _)| *m))
+    }
+
+    /// What we know of `id`, held for others, as it gives way (diagnostic).
+    fn eviction_info(&self, id: &ShortId, used: Millis, len: u64) -> EvictionInfo {
+        let (mut replicas, mut announcer_has) = (0u16, false);
+        for (k, n) in self.neighbors.iter().filter(|(_, n)| n.haves.contains_key(id)) {
+            replicas = replicas.saturating_add(1);
+            // An announcer's frames name itself as the announcer they follow.
+            announcer_has |= n.announcer == *k;
+        }
+        let kind = self.store.entry(id).map(|e| e.kind());
+        EvictionInfo {
+            relayed: self.relayed.contains(id),
+            menu: kind.map(|k| k.is_read_by_nodes()).unwrap_or(false),
+            replicas,
+            announcer_has,
+            in_window: self.pieces.values().any(|l| l.contains(id)) || self.relay_cols.values().any(|c| c.pieces.contains(id)),
+            idle_ms: self.now.saturating_sub(used),
+            len: len as u32,
+        }
+    }
+
+    /// What we hold for others stays within `carry_budget_bytes`: of what may give way (not of use
+    /// for `want_ttl`, or a relay another cell's announcer lists), the menu first, then those
+    /// relays, then the least recently used, and it can be fetched again by name. What is in
     /// use stays even over the budget; a full budget takes on no more relays instead
-    /// (FEASIBILITY.md §27).
-    fn enforce_budget(&mut self) {
+    /// (FEASIBILITY.md §27, §28).
+    fn enforce_budget(&mut self, out: &mut Vec<Action>) {
         let budget = self.cfg.params.carry_budget_bytes;
         if budget == u64::MAX {
             return;
@@ -4153,12 +4335,24 @@ impl Node {
         if total <= budget {
             return;
         }
-        held.sort_unstable();
+        // What gives way first: by evidence, the menu of channels we do not follow, and relays
+        // another cell's announcer lists (FEASIBILITY.md §28); then the least recently used.
+        if self.cfg.params.evict_by_evidence {
+            let menu = self.menu_only();
+            held.sort_by_key(|(used, id, _)| (if menu.contains(id) { 0 } else if self.delivered(id) { 1 } else { 2 }, *used, *id));
+        } else {
+            held.sort_unstable();
+        }
         let mut over = total - budget;
         for (used, id, len) in held {
-            if over == 0 || !self.idle(used) {
+            if over == 0 {
                 break;
             }
+            if !self.gives_way(&id, used) {
+                continue;
+            }
+            let info = self.eviction_info(&id, used, len);
+            out.push(Action::Evicted { id, info });
             self.store.forget_content(&id);
             self.last_used.remove(&id);
             self.stats.cache_evictions += 1;
@@ -4392,13 +4586,43 @@ impl Node {
                 continue;
             }
             // Relaying for another cell (PROTOCOL.md §4): its announcer asks, for its listeners, for
-            // a piece or cover we lack, and nobody has met the ask for `T_relay_wait`: we fetch it
-            // from our own cell and keep it, to hand it on.
+            // a piece or cover we lack, and others are unlikely to meet the ask soon: we fetch it from
+            // our own cell and keep it, to hand it on, until that cell holds it.
             if from_announcer && !own {
+                // Of the asks this announcer made, those someone met: it granted the object to a
+                // holder, or lists it as held. Only its own asks count, not another cell's holding.
+                let asker = g.node;
+                let asked_here: Vec<ShortId> = g.want.iter().filter(|(_, grant, _)| !grant.is_none()).map(|(w, _, _)| *w).chain(g.have.iter().copied()).filter(|w| self.relay_asks.get(w).map(|a| a.askers.contains(&asker)).unwrap_or(false)).collect();
+                for w in &asked_here {
+                    if self.relay_asks.get(w).map(|a| !a.counted).unwrap_or(false) {
+                        self.count_relay_outcome(w, true);
+                    }
+                }
+                // A relay ends when the cells that asked for it hold the object: their announcers
+                // list it. What we have not fetched yet we no longer want, and our own announcer is
+                // no longer asked for it on their behalf. Relays kept until `want_ttl` passed the ask
+                // on from cell to cell long after its listeners had it, and dead-end cells fetched
+                // it too (FEASIBILITY.md §28). A grant to someone else is not yet delivery:
+                // withdrawing on it, delivery fell further. Another cell's holding is not this
+                // one's: withdrawing on any announcer's HAVE, relays for a cell that still lacked the
+                // object were dropped, taken on again and dropped, and its followers left.
+                let held: Vec<ShortId> = g.have.iter().filter(|w| asked_here.contains(w)).copied().collect();
+                for w in held {
+                    let open = match self.relay_asks.get_mut(&w) {
+                        Some(a) => {
+                            a.askers.retain(|x| *x != asker);
+                            !a.askers.is_empty()
+                        }
+                        None => false,
+                    };
+                    if self.cfg.params.relay_withdraw && !open && self.relayed.contains(&w) && !self.store.has_complete(&w) && self.wants.contains(&w) {
+                        self.wants.remove(&w);
+                        self.progress.remove(&w);
+                        self.relayed.remove(&w);
+                        self.stats.relays_withdrawn += 1;
+                    }
+                }
                 let asked: Vec<ShortId> = g.want.iter().filter(|(w, grant, phase)| grant.is_none() && phase & ASK_LISTENED != 0 && !self.store.has_complete(w) && !self.wants.contains(w)).map(|(w, _, _)| *w).collect();
-                // Only an ask the neighbourhood has not met for `T_want_min`: most are answered by
-                // a holder within a round, and relaying those only duplicated the work.
-                let wait = self.cfg.params.t_relay_wait_ms;
                 // A full carry budget takes on no more: fetching what it would have to evict
                 // before it is handed on only thrashes (FEASIBILITY.md §27).
                 let mut room = if asked.is_empty() { 0 } else { self.relay_room() };
@@ -4407,8 +4631,13 @@ impl Node {
                     // relayed, so only its asks are kept: a name nobody checks would be kept, and
                     // fetched, for anyone who made one up (docs/ABUSE.md, item 5).
                     let Some(meta) = self.relay_meta(&w) else { continue };
-                    let first = self.note_relay_ask(w);
-                    if now < first + wait {
+                    if self.cfg.params.evict_by_evidence {
+                        if let Some(m) = self.naming_manifest(&w) {
+                            self.last_used.insert(m, now);
+                        }
+                    }
+                    let first = self.note_relay_ask(w, g.node);
+                    if !self.relay_due(first) {
                         continue;
                     }
                     let len = meta.len as u64;
@@ -4417,7 +4646,9 @@ impl Node {
                         continue;
                     }
                     room -= len;
+                    self.count_relay_outcome(&w, false);
                     self.relayed.insert(w);
+                    self.relay_log.push(w);
                     if self.store.ensure(meta) {
                         self.quiet_complete.push(w);
                     }
@@ -4428,10 +4659,11 @@ impl Node {
                 // own announcer, which knows it if it is real (§2), and relay its pieces once we
                 // can name them.
                 for m in unread_asks.iter().copied() {
-                    let first = self.note_relay_ask(m);
-                    if now < first + wait || self.store.has_complete(&m) || self.wants.contains(&m) {
+                    let first = self.note_relay_ask(m, g.node);
+                    if !self.relay_due(first) || self.store.has_complete(&m) || self.wants.contains(&m) {
                         continue;
                     }
+                    self.count_relay_outcome(&m, false);
                     self.relayed.insert(m);
                     self.stats.relay_wants += 1;
                     self.add_want(m);

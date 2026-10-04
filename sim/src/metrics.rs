@@ -65,6 +65,28 @@ pub struct Metrics {
     /// Upload-upload collisions: same object (duplicate uploaders) vs different objects.
     pub upload_collision_same_object: u64,
     pub upload_collision_other_object: u64,
+    /// Asks an announcer made for its listeners (ASK_LISTENED), by (announcer index, object): how
+    /// long they stay open and how often they are repeated before a holder meets them
+    /// (FEASIBILITY.md §28).
+    pub listened_asks: BTreeMap<(usize, ShortId), ListenedAsk>,
+    /// Objects that gave way to a node's carry budget, with what the node knew of them then, and
+    /// how long after it the node held each again, if it did (FEASIBILITY.md §28).
+    pub evictions: Vec<(meshcast_core::node::EvictionInfo, Option<Millis>)>,
+    pub evicted_pending: BTreeMap<(usize, ShortId), (usize, Millis)>,
+    /// How many nodes took on a relay of each object.
+    pub relayers: BTreeMap<ShortId, (u32, std::collections::BTreeSet<usize>)>,
+}
+
+/// One announcer's ask for its listeners for one object.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ListenedAsk {
+    /// When it was first sent, and how many GOSSIP frames carried it open (no grant yet).
+    pub first: Millis,
+    pub open_frames: u32,
+    /// When it was first granted, and whether to a node that followed another announcer then.
+    pub granted: Option<(Millis, bool)>,
+    /// Whether a node that followed this announcer when it first asked listens to the object.
+    pub real_listener: bool,
 }
 
 impl Metrics {

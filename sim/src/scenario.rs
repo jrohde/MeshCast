@@ -286,7 +286,8 @@ pub fn build(spec: &ScenarioSpec, params: Params) -> Built {
             profile,
             rule_choice: rule_choice.clone(),
             carriers: phys.iter().map(|p| p.to_core()).collect(),
-            params,
+            // Experiment (FEASIBILITY.md §28): a station has storage to spare.
+            params: if stations.contains(&i) && std::env::var("MESHCAST_STATIONS_UNBUDGETED").is_ok() { Params { carry_budget_bytes: u64::MAX, ..params } } else { params },
             seed: spec.seed.wrapping_add(i as u64 * 7919),
             keep_bytes_below: 4096,
             decodes: !small.contains(&i),

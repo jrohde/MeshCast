@@ -88,6 +88,11 @@ impl Entry {
         }
         self.blocks.resize(nb, None);
         if ((len as usize) <= keep_below || kind.is_read_by_nodes()) && self.bytes.is_none() {
+            // What was counted before we knew we must read it arrives again, payload and all.
+            for b in self.blocks.iter_mut() {
+                *b = None;
+            }
+            self.complete = false;
             self.bytes = Some(vec![0u8; byte_capacity(len)]);
         }
     }
@@ -203,6 +208,13 @@ impl MemStore {
             e.set_len(len, keep, kind);
             e.len_hint = Some(len);
             e.kind_hint = kind;
+            Self::recheck(e);
+        } else if e.meta.is_none() && e.kind_hint == ContentType::Other && e.len_hint == Some(len) {
+            // Collected before anyone named it: the hint says what it is (PROTOCOL.md §1). Its
+            // symbols carried no kind, so it was taken for content, not read on completion, and
+            // its announcement, already pending, was never taken up again.
+            e.kind_hint = kind;
+            e.set_len(len, keep, kind);
             Self::recheck(e);
         }
         !was && e.complete
@@ -483,5 +495,45 @@ mod tests {
         let meta = ObjectMeta { id: ObjectId::of(b"x"), len: 1000, kind: ContentType::Music };
         st.ensure(meta);
         assert_eq!(st.missing(&short, 0).len(), 5);
+    }
+
+    #[test]
+    fn an_announcement_names_what_was_collected_unnamed() {
+        // Symbols carry no kind: an object collected before anyone named it is content until an
+        // announcement says it is a manifest. Its announcement, pending meanwhile, was not taken
+        // up again, so the node held its channel's new root and never read it (FEASIBILITY.md §28).
+        let data: Vec<u8> = (0..700u32).map(|i| (i * 31 % 251) as u8).collect();
+        let short = ObjectId::of(&data).short();
+        let syms = symbols_of(&data);
+        let mut st = MemStore::new(4096);
+        st.put_symbol(short, 0, 0, data.len() as u32, &syms[0]);
+        assert_eq!(st.entry(&short).unwrap().kind(), ContentType::Other);
+        assert!(!st.ensure_hint(short, data.len() as u32, ContentType::Manifest));
+        assert_eq!(st.entry(&short).unwrap().kind(), ContentType::Manifest);
+        assert_eq!(st.missing(&short, 0).len(), syms.len() - 1, "what was kept stays");
+        for (esi, sym) in syms.iter().enumerate().skip(1) {
+            st.put_symbol(short, 0, esi as u16, data.len() as u32, sym);
+        }
+        assert_eq!(st.bytes(&short).unwrap(), &data[..]);
+    }
+
+    #[test]
+    fn what_was_counted_without_its_payload_comes_again_once_it_must_be_read() {
+        // Too large to keep as content, so counted only; named a manifest, it must be read.
+        let data: Vec<u8> = (0..9000u32).map(|i| (i * 7 % 251) as u8).collect();
+        let short = ObjectId::of(&data).short();
+        let syms = symbols_of(&data);
+        let mut st = MemStore::new(4096);
+        for (esi, sym) in syms.iter().enumerate() {
+            st.put_symbol(short, 0, esi as u16, data.len() as u32, sym);
+        }
+        assert!(st.has_complete(&short) && st.bytes(&short).is_none());
+        st.ensure_hint(short, data.len() as u32, ContentType::Manifest);
+        assert!(!st.has_complete(&short));
+        assert_eq!(st.missing(&short, 0).len(), syms.len());
+        for (esi, sym) in syms.iter().enumerate() {
+            st.put_symbol(short, 0, esi as u16, data.len() as u32, sym);
+        }
+        assert_eq!(st.bytes(&short).unwrap(), &data[..]);
     }
 }

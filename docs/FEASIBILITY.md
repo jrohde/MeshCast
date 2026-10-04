@@ -3199,4 +3199,256 @@ Against main (§26), eight worlds each; "one clock" and "real clocks" as in §26
 - **A relay wait that depends on the carrier.** In band L relaying at once halved the sparse
   median for 0.4 % more frames; in band O it cost 28 % more (27.2). No wait where a round of asking
   is dear (§14) and `T_relay_wait` where it is cheap is a candidate, to be measured across the
-  whole validation.
+  whole validation. (Done in §28, by a wait each node learns from the asks it hears: band L relays
+  at once, band O waits longer than before.)
+
+## 28. How long a relay waits, when it ends, and what gives way
+
+§27 left two constants that were chosen, not derived: a relay waited a fixed `T_relay_wait` (10
+minutes), and a full carry budget let the least recently used give way. Two questions followed:
+can the wait be worked out from what the network does, and is there evidence of what will not be
+asked for again? Both were measured in §27's sparse world (100 nodes, 2 stations, 15 km², 24
+channels, 2 followed each, a daily 22 kB bulletin, 48 hours), eight worlds per band unless said,
+sixteen where the differences are small. Columns as in 27.1: delivered within one publication
+period, mean (worst world); frames sent; role changes after the first hour; the median, over the
+hours, of the median latency.
+
+### 28.1 How soon others meet an ask
+
+The simulator now records every ask an announcer makes for its listeners: when it was first sent,
+how often it went out still open, when and to whom it was granted, and when the announcer held the
+object. With relaying for other cells switched off, this is how soon holders alone met a cell's
+asks:
+
+| | Band L | Band O |
+|---|---|---|
+| Met within 2 / 5 / 10 / 20 / 60 minutes | 3.8 / 23 / 32 / 38 / 54 % | 41 / 55 / 72 / 77 / 80 % |
+| Of the asks still open, met within 0–2 / 2–5 / 5–10 / 10–20 / 20–60 minutes | 4 / 20 / 11 / 9 / 25 % | 41 / 24 / 38 / 18 / 11 % |
+| Of the asks still open, granted at the next hearing after 1 / 2 / 3 | 24 / 6 / 3 % | 49 / 34 / 11 % |
+| Never granted | 48 % | 9 % |
+
+In band O holders, in the cell or a neighbouring one, met most asks within half an hour, and an
+ask still open after ten minutes had a fair chance yet. In sparse band L almost nothing was met in
+the first minutes, and little more after the first round of asking: half of the asks were never
+met by holders at all. A fixed wait is too long for the one and about right for the other, so the
+wait has to follow from what a node sees.
+
+### 28.2 A wait learned from the neighbourhood
+
+Counting rounds of asking instead of minutes (relay once an ask was heard open k times) made band O
+send 28, 21, 17 and 10 % more frames for k = 1 to 4: where rounds of asking are cheap an announcer
+repeats an open ask every half minute, and k rounds are no measure of how soon holders answer.
+
+So each node keeps a small life table of the other cells' asks it hears (PROTOCOL.md §4): per age,
+doubling from one minute, how many asks reached it and how many of those someone else met before
+they were twice as old. It relays an ask once that share is below `relay_risk`. What the nodes
+learned, averaged over nodes by how many asks reached each age:
+
+| Age of the ask (minutes) | < 1 | 1–2 | 2–4 | 4–8 | 8–16 | 16–32 | 32–64 | > 64 |
+|---|---|---|---|---|---|---|---|---|
+| Band L, met by others before twice that age | 2 % | 20 % | 10 % | 13 % | 19 % | 37 % | 42 % | 21 % |
+| Band O | 46 % | 26 % | 32 % | 64 % | 43 % | 21 % | 17 % | 0 % |
+
+The age is counted from when the node first heard the ask; the asking announcer does not say how
+old it is. In band L others met fewer than one in twenty of the asks a node heard in their first
+minute before the second, so it relays an ask as soon as it hears it; an ask it first hears later
+was met by others more often at every age, and waits until `want_ttl`. In band O the share stays
+above one in twenty up to an hour, and a node waits until `want_ttl`.
+
+Sixteen worlds per band, against the fixed wait, with no budget:
+
+| Relay when the share is below | Band L | Band O |
+|---|---|---|
+| Fixed `T_relay_wait` (§27) | 99.7 % (99.2), 671,050, 93, 19 min; 4,679 relays | 99.7 % (99.4), 152,718, 1; 426 relays |
+| **5 %** | **99.7 % (98.9), 672,458, 88, 11 min; 5,199** | **99.7 % (99.4), 152,955, 1; 314** |
+| 10 % | 99.8 % (99.5), 690,383, 91, 11 min; 6,411 | 99.7 % (99.4), 153,208, 2; 324 |
+| 20 % | 99.9 % (99.6), 694,570, 68, 10 min; 6,876 | 99.7 % (99.4), 159,344, 6; 840 |
+
+A share of 5 % costs 0.2 % more frames and nearly halves band L's median latency, as relaying at
+once did in §27.2. Band O relays a quarter less, at the same delivery and frames. Two choices that
+look like detail decided the outcome. Before a node has heard any ask it needs a prior: one that
+expects nothing (half the asks met, at every age) made nodes wait for evidence while their asks
+aged, and band L sent 10 % more frames; one that says what `T_relay_wait` said (half met within
+it, none after) costs nothing once evidence arrives. And a ceiling: relaying at the latest after
+`T_relay_wait`, whatever was learned, cost band L 4 % more frames; after `want_ttl`, nothing. The
+ceiling bounds what a false announcer can make a node learn (ABUSE.md, "Relay deterrence").
+
+### 28.3 Relays that passed the ask on
+
+With a carry budget the learned wait cost much more. Eight band L worlds, the stations exempt
+from the budget as a device with room to spare would be, and the eviction order of 28.4:
+
+| Budget per node | Fixed `T_relay_wait` | Learned, 5 % |
+|---|---|---|
+| None (sixteen worlds) | 99.7 % (99.2), 671,050 | 99.7 % (98.9), 672,458 (+0.2 %) |
+| 1 MB | 99.6 % (99.3), 661,252 | 99.8 % (99.1), 730,892 (+11 %) |
+| 512 kB | 99.5 % (99.0), 695,836 | 99.8 % (99.6), 840,383 (+21 %) |
+| 256 kB | 99.2 % (98.1), 704,635 | 99.4 % (98.8), 813,642 (+15 %) |
+| 64 kB | 98.8 % (97.8), 665,757 | 98.9 % (98.3), 698,548 (+5 %) |
+
+The extra frames were repeated carousel passes and uploads: at 1 MB 32 % more repeats and 15 % more
+uploads, at 512 kB 86 % and 33 %. The nodes evicted half again as much of what they held for their
+own cells (510 objects per world at 1 MB against 328) and needed it again a third of the time
+instead of an eighth. Two remedies that went for the storage were measured and rejected: letting a
+relay taken on before `T_relay_wait` use free room only (850,000 frames at 256 kB instead of
+814,000), and letting what a node holds for its own cell outrank relays (822,000).
+
+What was wrong was elsewhere. Some forty-five nodes relayed every relayed object, and only one
+relay in four was ever handed on to the cell that asked. An oracle that let one node per
+neighbourhood relay each object, and abandoned the rest, did not help: 1.5 % more frames, a median
+of 14 minutes instead of 10, and two and a half times the role changes. Several relayers in several
+places are how an object finds a way when one of them cannot get it. But a relayer asks its own
+announcer for the object; that announcer counts the ask as its follower's and marks its own ask as
+for listeners; the next cell relays that, and so on. More than half of the asks marked for
+listeners (51 to 55 %) came from cells where nobody listened to the object, and a relay was kept
+until `want_ttl` after the last ask, so each relayer's announcer went on passing the object long
+after the listeners had it.
+
+The remedy was to end that: **a relay ends when the cell that asked for it holds the object.**
+Sixteen band L worlds without a budget, and eight at 1 MB and 256 kB:
+
+| A relay ends | No budget | 1 MB | 256 kB |
+|---|---|---|---|
+| `want_ttl` after the last ask (as before) | 99.7 % (98.9), 671,038, 94 | 99.8 % (99.1), 730,892 | 99.4 % (98.8), 813,642 |
+| When the asking announcer grants it or lists it | 99.5 % (98.8), 623,206, 88 | 99.5 % (98.8), 638,324 | |
+| When any announcer lists it | 99.6 % (99.0), 629,389, 183 | 99.6 % (99.3), 642,944 | 99.5 % (99.0), 733,095 |
+| The same, only relays not yet started | 99.6 % (99.2), 648,442, 102 | 99.7 % (99.4), 665,599 | 99.4 % (98.5), 741,988 |
+| **When the announcer that asked lists it** | **99.6 % (99.1), 641,028, 66** | **99.6 % (98.8), 663,212** | **99.4 % (98.6), 776,814** |
+
+Ending relays did not make fewer nodes relay (47 per object against 43) but made them stop asking:
+carousel repeats fell by 29 % without a budget and by 36 % at 1 MB. Ending a relay also when the
+asking announcer granted the object to someone else cost delivery: a grant is not yet delivery.
+The first version ended a relay whenever any announcer listed the object, not the one that asked:
+in one world relays for a cell that still lacked a bulletin were dropped, taken on again and
+dropped, its followers left their announcers 881 times, and roles changed 1,883 times after the
+first hour instead of 224. A relay now ends only on the HAVE of an announcer that asked for it
+(smoke test `a_relay_ends_when_the_cell_that_asked_holds_it`).
+
+### 28.4 What gives way
+
+Every eviction now records what was known of the object, and the simulator notes whether the node
+held it again later. Eight band L worlds, fixed wait, stations exempt, the least recently used
+giving way and a menu manifest counted as used when it arrives (§27); per world:
+
+| What gave way | 256 kB | held again | 64 kB | held again |
+|---|---|---|---|---|
+| The menu of channels the node does not follow | 2,753 | 97 % | 5,529 | 92 % |
+| Content held for its own cell | 1,003 | 15 % | 1,209 | 14 % |
+| A relay an announcer listed as held | 299 | 4.7 % | 247 | 8.3 % |
+| A relay no announcer listed | 15 | 28 % | 9 | 19 % |
+| Anything out of its collection's window | 8 | 1.6 % | 35 | 2.8 % |
+
+The menu was most of what gave way and came back when passed again, for free; being counted as of
+use when it arrived, it filled small budgets and kept relays out (19,117 relays declined per world
+at 256 kB). A relay that an announcer listed was rarely needed again, one that none listed several
+times as often. Content out of its window was rarely needed again, but almost nothing that gave
+way was out of its window, and idle time told little (own-cell content idle six hours or more came
+back 12 % of the time, against 16 % within two hours). So the menu is of use when it names an ask,
+not when it arrives, and gives way first; then relays another cell's announcer lists as held;
+then the least recently used (PROTOCOL.md §4). With the fixed wait this delivered 99.2 % (98.1) instead of 98.9 %
+(98.3) at 256 kB, with 5,222 relays declined per world and 4.6 % more frames, and 98.8 % (97.8)
+instead of 98.3 % (97.3) at 64 kB with 4.1 % more.
+
+### 28.5 Two holes the new rules exposed
+
+The final rules delivered as main on the whole, but a few worlds fell short where main had not,
+and the two traced were faults that main had as well.
+
+**An announcer that listens alone.** In one band L world 98.9 % of the bulletins arrived in their
+period, against 99.4 % on main and 100 % without ending relays (28.3). Nine of the missing
+follower-bulletin pairs were three announcers' own, of channels none of their followers had asked
+for; one of them asked for its bulletin every few minutes for ten hours without an offer. An
+announcer marked as for listeners only what its followers asked for, so its own asks went out
+unmarked, and the nodes that heard them, holding nothing and following nothing, did not relay
+them. Kept for an hour after the last ask, relays for other cells had brought such objects within
+its reach; ended sooner, they no longer did. An announcer now marks what it listens to itself as
+well (PROTOCOL.md §4; smoke test
+`an_announcer_that_listens_alone_is_relayed_to`). The four weakest band L worlds then delivered
+99.8, 100, 99.8 and 99.9 % instead of 98.9, 99.4, 99.4 and 99.3.
+
+**A root nobody announced.** Over sixteen band O worlds with real clocks, in two worlds 4 and 5
+followers of one announcer lacked the current window at the end, against at most 2 on main.
+Traced: the announcer had overheard a neighbouring cell's upload of its channel's new root, a
+single symbol, before it heard any announcement of it. Symbols carry no kind, so it held the root
+as content; holding it, it never fetched it; and with no announcement reaching it in the hour that
+was left, it never read it, and neither did its cell. It happens on main too: in the worlds
+traced, 22 to 56 roots per world were completed unnamed, and the next announcement usually mended
+it. An announcement that came while such an object was still arriving did not: the kind it named
+was not taken, and the announcement, pending, was not taken up again. A root needs no announcement
+to be read, since its bytes name its channel and carry the channel's signature. A node that
+completes an object nobody has named now reads it as a root, and an announcement names the kind of
+an object already being collected (PROTOCOL.md §1; smoke test
+`an_announcer_reads_a_root_it_overheard_unannounced`). The two worlds then held 76 and 74 of 76.
+The rest of the shortfall in the second is a time island: its announcer ran 196 seconds off the
+shared time and heard the announcer of the channel's source only on the control carrier (−108 dBm,
+below the bulk carrier's sensitivity), whose windows it never shared (28.7).
+
+### 28.6 The whole validation
+
+Against main (§27), with all of 28.2 to 28.5; "one clock" and "real clocks" as in §26.3.
+
+| Sparse world | Main | Now |
+|---|---|---|
+| Band L, one clock, 16 worlds | 99.7 % (99.2), 99.4 %, 671,050, 93, 19 min | 99.8 % (99.5), 100 %, 645,863, 85, 10 min |
+| Band L, real clocks | 99.8 % (99.4), 99.5 %, 665,379, 82, 20 min | 99.9 % (99.6), 100 %, 652,001, 73, 11 min |
+| Band O, one clock, 16 worlds | 99.7 % (99.4), 100 %, 152,718, 1 | 99.7 % (99.4), 100 %, 151,100, 7 |
+| Band O, real clocks, 16 worlds | 99.6 % (99.2), 99.7 %, 156,796, 58 | 99.6 % (99.2), 99.7 %, 154,686, 67 |
+
+The second column of each cell is the share of followers that hold the current window of every
+channel they follow at the end. Band L delivered as much or more with 2 to 4 % fewer frames, and
+its median bulletin arrived in half the time; every band L world now holds every follower's
+window at the end. In band O one world had a station take over its neighbours at the twelfth
+hour (102 role changes after the first hour; the other fifteen 0 to 3), at the same delivery; with
+real clocks role changes ranged from 3 to 300 per world in both.
+
+With a budget (eight worlds, stations exempt):
+
+| Budget | Band L, main | Band L, now | Band O |
+|---|---|---|---|
+| 1 MB | 99.6 % (99.1), 672,790, 19 min | 99.8 % (99.6), 680,521 (+1 %), 9 min | 99.8 %, −2 % frames |
+| 256 kB | 98.9 % (98.3), 673,376, 19 min | 99.4 % (98.7), 826,345 (+23 %), 10 min | 99.8 %, −2 % |
+| 64 kB | 98.3 % (97.3), 639,796, 19 min | 99.1 % (97.7), 735,488 (+15 %), 10 min | 99.8 %, −0.2 % |
+
+At 1 MB the rules deliver more, sooner, for 1 % more frames. Below that a node that relays as
+soon as it hears an ask holds more than it can keep: at 256 kB a third of the relays and own-cell
+content that gave way was needed again, against an eighth on main, where the menu filled the
+budget and most relays were declined (19,117 per world against 1,985). There the fixed wait did
+better on everything but speed: with the rest of 28.3 to 28.5 it delivered 99.8 % (99.5) at
+256 kB with 658,372 frames, 2 % fewer than main, and a median of 19 minutes. Relaying before
+`T_relay_wait` only into free room, worse before relays ended (28.3), now took the learned wait
+from 826,345 frames to 783,561 at 256 kB (99.6 %) and changed nothing at 64 kB; it was not taken
+(28.7).
+
+- **Scenario matrix and false announcers**: as main but for the band L town (start 24.9 minutes
+  against 24.2 with 1.4 % more frames with one clock; with real clocks 29.6 against 29.2 with
+  1.3 % fewer) and tenths of a minute elsewhere. Lures and spoofers: the same delivery, start
+  within 0.1 minutes; the slowest tenth under five silent lures 69.5 minutes against 64.5 with one
+  clock and 68.6 against 69.2 with real clocks.
+- **Collections**: whole channels within 0.7 minutes and 1 % of frames. One collection per
+  listener starts within 0.3 minutes of main or sooner (band L across 15 km² with covers 45.7
+  minutes against 46.9), with 2 to 12 % fewer frames across 15 km² and up to 3.5 % more within
+  one cell.
+- **Living network**: bulletins as fast (band L median 4.2 minutes, band O 1.8), newcomers 9.2 /
+  9.7 minutes against 9.4 / 9.3. In one of the eight band L worlds of the daily network one hour's
+  slowest tenth arrived after 22 minutes instead of 10, an upload granted twelve minutes before it
+  began, and under an attacker or a spoofer 14 instead of 10 and 11; over sixteen more worlds the
+  slowest tenth averaged 5.5 minutes against 5.4, with 6 hours of 368 above 15 minutes against 4.
+- **Size sweep**: playback started within 1.4 minutes of main at every size, frames within 1.1 %.
+
+### 28.7 Open
+
+- **Asks that travel.** The chain of asks marked for listeners is also how an ask reaches a source
+  several cells away; it now ends when its listeners are served, but it still spreads in every
+  direction until then. Scoping it by distance (an ask marked with how many relays away its
+  listeners are, relayed later the farther, as in an expanding ring search) is a candidate.
+- **One table for every cell.** A node's life table pools the asks of every cell it hears. A cell
+  whose asks no holder reaches waits as long as the neighbourhood's asks are met: in band O up to
+  `want_ttl`. A table per asking announcer, starting from the pooled one, is a candidate.
+- **Time islands.** An announcer whose shared time differs from its neighbours' by more than a
+  control window hears them on the control carrier only while it watches (§26), and missed every
+  announcement of a channel's root for 21 hours (28.5).
+- **A wait that weighs what it pushes out.** Below 1 MB relaying as soon as an ask is heard cost
+  15 to 23 % more frames than main, and the fixed wait none but twice the time (28.6). The life
+  table weighs only how likely others are to meet an ask; a relay that has to push out something
+  the node may need again should wait longer. Relaying early only into free room went part of
+  the way. Which budget a device sets is still open (§27).
