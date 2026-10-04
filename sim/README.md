@@ -93,7 +93,24 @@ chosen against (`docs/ABUSE.md`, item 5).
 
 `dynamics` also reports a `carrying` line: frames sent in all, bulk frames, what a node holds at
 the end (mean and most, in kB), relay wants taken on, objects that gave way to the carry budget,
-and relays declined because the budget was full (`docs/PROTOCOL.md` §4).
+relays declined because the budget was full, relays handed on to the cell that asked, and relays
+withdrawn because that cell held the object (`docs/PROTOCOL.md` §4). And, to see where frames and
+relays go (`docs/FEASIBILITY.md` §28):
+
+- `bulk frames`: sent by announcers (their carousels' first passes and repeats) and by others
+  (uploads to their announcer).
+- `relayed objects`: how many objects were relayed, by how many distinct nodes each, and relays
+  per object.
+- `relay life`: the share of other cells' asks of each age, doubling from one minute, that someone
+  else met before they were twice as old, as the nodes learned it, averaged over nodes by how
+  many asks reached each age.
+- `listened asks`: every ask an announcer made for its listeners, with how many came from a cell
+  where nobody listened to the object when it was first asked, how soon they were met, after how
+  many open asks they were granted, and how many were granted to another cell's node.
+- `evicted relayed`, `evicted announcer's`, `evicted menu` and `evictions`: what gave way to the
+  carry budget, by kind and by what the node knew of it then (neighbours holding it, an announcer
+  listing it, in or out of its collection's window, idle time), each with the share the node held
+  again later.
 
 ## Looking inside one world
 
@@ -136,6 +153,13 @@ and relays declined because the budget was full (`docs/PROTOCOL.md` §4).
   `MESHCAST_T_RELAY_WAIT_S` overrides `T_relay_wait`. `MESHCAST_PROACTIVE=1` makes announcers fetch
   every piece of every channel they hear of, and `MESHCAST_RELAY_ANY=0` makes nodes relay only for
   channels they follow and keep no menu of the others, as before `docs/FEASIBILITY.md` §27.
+  `MESHCAST_RELAY_LEARN=100` sets `relay_risk` in permille, and `=0` makes nodes relay after a fixed
+  `T_relay_wait` instead; `MESHCAST_RELAY_WITHDRAW=0` keeps relays until `want_ttl` after the last
+  ask; `MESHCAST_EVICT_EVIDENCE=0` lets the least recently used give way and counts a menu manifest
+  as used when it arrives, as before §28. `MESHCAST_STATIONS_UNBUDGETED=1` exempts the stations
+  from the carry budget, as a device with room to spare would be. With `MESHCAST_TRACE_GRANTS=1`,
+  `dynamics` also prints `EV` for every object that gives way, with whether it was a relay or the
+  menu and the node's role.
 - `MESHCAST_TRACE_BUSY=0` counts, for node index 0, which transmitter kept its channel busy each
   time it wanted to send, with the first and last minute; the cell report prints it as
   `busy blame`. It found an announcer whose carousel chained frames without a gap

@@ -1297,3 +1297,89 @@ fn a_station_that_fetches_on_request_hears_of_a_new_episode_soon() {
     let got = done(second).expect("the follower should have the second episode");
     assert!(got <= at + 5 * 60_000, "the second episode arrived {:.1} min after it was published", (got - at) as f64 / 60_000.0);
 }
+
+#[test]
+fn a_relay_ends_when_the_cell_that_asked_holds_it() {
+    // A relay ends when the cell that asked for it holds the object, and only then: another cell's
+    // announcer listing the object says nothing about the cell that asked. Withdrawing on any
+    // announcer's HAVE, relays for a cell that still lacked the object were dropped, taken on again
+    // and dropped, and its followers left their announcer (FEASIBILITY.md §28).
+    use meshcast_core::frame::{Frame, Gossip, ASK_LISTENED};
+    use meshcast_core::ids::NodeId;
+    let s = spec(BulkPreset::GfskO, vec![(0.0, 0.0), (300.0, 0.0), (600.0, 0.0)], vec![0], vec![1], 2.0);
+    let mut b = build(&s, Params::default());
+    let chan = b.sources[0].channel;
+    // Node 2 follows nothing and keeps the menu: it can name the pieces, and holds none.
+    b.engine.nodes[2].node.unfollow(chan);
+    b.engine.run(3_600_000, 600_000);
+    let w = *b.tracks.keys().next().unwrap();
+    assert!(!b.engine.nodes[2].node.holds(&w), "node 2 should not hold the piece");
+    let gossip = |from: NodeId, want: bool, have: bool| {
+        Frame::Gossip(Gossip { node: from, announcer: from, announcer_colour: 0, announcer_colours: 1, heard: Vec::new(), have: if have { vec![w] } else { Vec::new() }, have_sets: Vec::new(), want: if want { vec![(w, NodeId::NONE, ASK_LISTENED)] } else { Vec::new() }, sets: Vec::new() })
+    };
+    let (asking, other) = (NodeId(9_001), NodeId(9_002));
+    // Another cell's announcer asks for its listeners until node 2 takes the relay on.
+    let mut taken = false;
+    for _ in 0..30 {
+        let now = b.engine.now;
+        b.engine.nodes[2].node.handle_frame(now, 1, &gossip(asking, true, false), -60);
+        if b.engine.nodes[2].node.wants_object(&w) {
+            taken = true;
+            break;
+        }
+        b.engine.run(now + 60_000, 600_000);
+    }
+    assert!(taken, "node 2 should take the relay on");
+    let now = b.engine.now;
+    b.engine.nodes[2].node.handle_frame(now, 1, &gossip(other, false, true), -60);
+    assert!(b.engine.nodes[2].node.wants_object(&w), "another cell holding it should not end the relay");
+    b.engine.nodes[2].node.handle_frame(now, 1, &gossip(asking, false, true), -60);
+    assert!(!b.engine.nodes[2].node.wants_object(&w), "the asking cell holding it should end the relay");
+}
+
+#[test]
+fn an_announcer_reads_a_root_it_overheard_unannounced() {
+    // Symbols carry no kind. An announcer that overheard a neighbouring cell's upload of its
+    // channel's new root, and heard no announcement of it, held the root as content and never read
+    // it, and its cell stayed a seq behind. A root's bytes name its channel and carry the channel's
+    // signature: they say what it is (PROTOCOL.md §1, FEASIBILITY.md §28).
+    use meshcast_core::frame::{Bulk, Frame, SYMBOL_SIZE};
+    use meshcast_core::manifest::{Collection, CollectionKind, Manifest};
+    let s = spec(BulkPreset::GfskO, vec![(0.0, 0.0), (300.0, 0.0), (600.0, 0.0)], vec![0], vec![1], 2.0);
+    let mut b = build(&s, Params::default());
+    b.engine.run(3_600_000, 600_000);
+    let chan = b.sources[0].channel;
+    let station = 1;
+    assert!(b.engine.nodes[station].node.is_announcing(), "the station should announce");
+    let seq = b.engine.nodes[station].node.manifest_state(&chan).expect("the station should know the channel's root").0;
+    // The source signs a new root; the station hears only its symbols, as if uploaded next door.
+    let src = &b.sources[0];
+    let series = Collection { cid: 1, kind: CollectionKind::Series, title: "Series".into(), pieces: src.objects.clone(), schedule: Vec::new() };
+    let m = Manifest::sign(&src.key, seq + 1, "Channel", vec![series.reference(None, true)], None, None);
+    let (meta, bytes) = m.as_object();
+    let now = b.engine.now;
+    for (esi, chunk) in bytes.chunks(SYMBOL_SIZE).enumerate() {
+        let mut payload = vec![0u8; SYMBOL_SIZE];
+        payload[..chunk.len()].copy_from_slice(chunk);
+        let f = Frame::Bulk(Bulk { object: meta.id.short(), block: 0, esi: esi as u16, len: meta.len, payload });
+        b.engine.nodes[station].node.handle_frame(now, 1, &f, -60);
+    }
+    let held = b.engine.nodes[station].node.manifest_state(&chan);
+    assert_eq!(held.map(|h| (h.0, h.2)), Some((seq + 1, true)), "the station should have read the root it overheard: {held:?}");
+}
+
+#[test]
+fn an_announcer_that_listens_alone_is_relayed_to() {
+    // An announcer is a listener too. Marking only what its followers asked for, an announcer that
+    // followed a channel nobody else in its cell followed asked for it unmarked, and the node
+    // between it and the source, which follows nothing, never relayed it (PROTOCOL.md §4,
+    // FEASIBILITY.md §28).
+    let s = spec(BulkPreset::GfskO, vec![(0.0, 0.0), (100.0, 0.0), (2500.0, 0.0), (5000.0, 0.0)], vec![0], vec![1, 3], 4.0);
+    let mut b = build(&s, Params::default());
+    let chan = b.sources[0].channel;
+    b.engine.nodes[2].node.unfollow(chan);
+    b.engine.run((s.hours * 3.6e6) as u64, 600_000);
+    assert!(b.engine.nodes[3].node.is_announcing(), "the far station should announce");
+    let missing = b.tracks.keys().filter(|id| !b.engine.nodes[3].node.holds(id)).count();
+    assert_eq!(missing, 0, "the far station should hold every piece, {missing} missing");
+}

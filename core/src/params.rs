@@ -165,6 +165,21 @@ pub struct Params {
     /// How long another cell's ask for its listeners goes unmet before a node relays it
     /// (PROTOCOL.md §4, `T_relay_wait`).
     pub t_relay_wait_ms: Millis,
+    /// A node relays another cell's ask once asks of its age were met by others, before twice that
+    /// age, less often than `relay_risk_permille` of the time, as it learned from the asks it heard,
+    /// and at the latest after `want_ttl`; `T_relay_wait` is what it expects before it has heard
+    /// any (PROTOCOL.md §4). Off: it relays after `T_relay_wait`, as before; kept to measure against.
+    pub relay_learn: bool,
+    pub relay_risk_permille: u16,
+    /// A relay ends when the cell that asked for it holds the object: what we have not fetched yet
+    /// we no longer want (PROTOCOL.md §4). Off: as before; kept to measure against.
+    pub relay_withdraw: bool,
+    /// What gives way to the carry budget is chosen by evidence: the menu of a channel we neither
+    /// follow nor serve is of use once it names another cell's ask, not when it arrives, and gives
+    /// way first; then relays another cell's announcer lists as held; then the least recently used
+    /// (PROTOCOL.md §4).
+    /// Off: arriving is use and the least recently used goes first, as before.
+    pub evict_by_evidence: bool,
     /// Bytes a node keeps of what it does not listen to, for others (PROTOCOL.md §4, `carry_budget`):
     /// what has not been of use for `want_ttl` gives way, least recently used first, and a full
     /// budget takes on no more relays. `u64::MAX`: no limit; 0: no relays.
@@ -213,6 +228,10 @@ impl Default for Params {
             proactive: false,
             relay_unfollowed: true,
             t_relay_wait_ms: 600_000,
+            relay_learn: true,
+            relay_risk_permille: 50,
+            relay_withdraw: true,
+            evict_by_evidence: true,
             carry_budget_bytes: u64::MAX,
         }
     }
