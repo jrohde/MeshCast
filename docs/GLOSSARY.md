@@ -17,6 +17,10 @@ challenges its announcer only on capability (PROTOCOL.md §5.1).
 
 **Bulk carrier.** A carrier used for content symbols: GFSK on sub-GHz, ESP-NOW LR, IP, SD.
 
+**Carry budget.** The bytes a node keeps for others, beyond what it listens to: what it relays
+and, as announcer, what its followers asked for. What has not been of use for `want_ttl` gives way,
+least recently used first, and a full budget takes on no more relays (PROTOCOL.md §4).
+
 **Carousel.** The announcer's endless loop over the objects its cell wants, rarest-first. A
 receiver joining at any time eventually has everything. From DVB/FLUTE practice.
 
@@ -75,6 +79,12 @@ of collections; a *collection manifest* lists one collection's pieces and schedu
 authentic as the root that names it by its full hash. A node believes a root it has checked
 (*adopted*); one it has only heard announced is something to fetch (PROTOCOL.md §2).
 
+**Menu.** The root and collection manifests of the channels a node hears of. An announcer holds
+the menu of every channel it hears of, to name every piece a follower may ask for, and fetches
+pieces only on request; every other node keeps what comes by of it, within its carry budget, to
+name what other cells ask it to relay (PROTOCOL.md §2). How a menu scales to many providers is
+open (PROTOCOL.md §9, question 14).
+
 **Object.** An immutable, hash-identified blob: track, bulletin, manifest, firmware image, page.
 
 **Place.** A piece's position in the list of its collection manifest, the order a listener plays
@@ -83,6 +93,10 @@ by it, the earlier place first (PROTOCOL.md §2, §4).
 
 **Polite spectrum access.** The ETSI alternative to duty cycle: CCA, max 1 s on, 100 ms off,
 100 s per hour per 200 kHz, more with frequency agility (AFA).
+
+**Relay.** Fetching, in one's own cell, what another cell's announcer has asked for its listeners
+and nobody met for `T_relay_wait`, to hand it on; any node does it for any channel, for what it
+can name, within its carry budget (PROTOCOL.md §4).
 
 **Repair symbol.** A RaptorQ-encoded symbol (v1) that lets a receiver reconstruct a block from any
 sufficiently large subset of symbols.
