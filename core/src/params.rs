@@ -165,6 +165,28 @@ pub struct Params {
     /// How long another cell's ask for its listeners goes unmet before a node relays it
     /// (PROTOCOL.md §4, `T_relay_wait`).
     pub t_relay_wait_ms: Millis,
+    /// A node relays another cell's ask once asks of its age were met by others, before twice that
+    /// age, less often than `relay_risk_permille` of the time, as it learned from the asks it heard,
+    /// and at the latest after `want_ttl`; `T_relay_wait` is what it expects before it has heard
+    /// any (PROTOCOL.md §4). Off: it relays after `T_relay_wait`, as before; kept to measure against.
+    pub relay_learn: bool,
+    pub relay_risk_permille: u16,
+    /// Experiment (§28): the menu of a channel a node neither follows nor serves is of use once it
+    /// names another cell's ask, not when it arrives. Off: arriving is use, as before.
+    pub menu_use_by_naming: bool,
+    /// Experiment (§28): what gives way to the carry budget first is chosen by evidence: the menu,
+    /// then relays the asking cell has, then the least recently used.
+    pub evict_by_evidence: bool,
+    /// Experiment (§28): a relay before `T_relay_wait` uses free room only.
+    pub relay_scavenge: bool,
+    /// Experiment (§28): what our own cell asked for comes before relays in the carry budget.
+    pub own_cell_first: bool,
+    /// Experiments (§28): a relay ends when the ask it serves is met; an ask is for listeners
+    /// while a follower asked within twice `T_want_min`.
+    pub relay_withdraw: bool,
+    pub listened_recent: bool,
+    pub relay_withdraw_on_have_only: bool,
+    pub relay_withdraw_unstarted_only: bool,
     /// Bytes a node keeps of what it does not listen to, for others (PROTOCOL.md §4, `carry_budget`):
     /// what has not been of use for `want_ttl` gives way, least recently used first, and a full
     /// budget takes on no more relays. `u64::MAX`: no limit; 0: no relays.
@@ -213,6 +235,16 @@ impl Default for Params {
             proactive: false,
             relay_unfollowed: true,
             t_relay_wait_ms: 600_000,
+            relay_learn: true,
+            relay_risk_permille: 50,
+            menu_use_by_naming: true,
+            evict_by_evidence: true,
+            relay_scavenge: true,
+            own_cell_first: false,
+            relay_withdraw: false,
+            listened_recent: false,
+            relay_withdraw_on_have_only: false,
+            relay_withdraw_unstarted_only: false,
             carry_budget_bytes: u64::MAX,
         }
     }

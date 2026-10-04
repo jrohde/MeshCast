@@ -162,6 +162,11 @@ impl Carousel {
         self.wants.get(id).map(|w| w.len()).unwrap_or(0)
     }
 
+    /// Askers of `id` that asked at or after `since`.
+    pub fn wanted_by_since(&self, id: &ShortId, since: Millis) -> usize {
+        self.wants.get(id).map(|w| w.values().filter(|t| **t >= since).count()).unwrap_or(0)
+    }
+
     pub fn wanted_ids(&self) -> impl Iterator<Item = &ShortId> {
         self.wants.keys()
     }

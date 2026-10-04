@@ -1027,6 +1027,34 @@ fn params() -> Params {
     if let Ok(v) = std::env::var("MESHCAST_RELAY_ANY") {
         p.relay_unfollowed = v != "0";
     }
+    if let Ok(v) = std::env::var("MESHCAST_RELAY_WITHDRAW") {
+        p.relay_withdraw = v != "0";
+    }
+    if std::env::var("MESHCAST_WITHDRAW_UNSTARTED").is_ok() {
+        p.relay_withdraw_unstarted_only = true;
+    }
+    if std::env::var("MESHCAST_WITHDRAW_HAVE_ONLY").is_ok() {
+        p.relay_withdraw_on_have_only = true;
+    }
+    if let Ok(v) = std::env::var("MESHCAST_LISTENED_RECENT") {
+        p.listened_recent = v != "0";
+    }
+    if let Ok(v) = std::env::var("MESHCAST_OWN_CELL_FIRST") {
+        p.own_cell_first = v != "0";
+    }
+    if let Ok(v) = std::env::var("MESHCAST_RELAY_SCAVENGE") {
+        p.relay_scavenge = v != "0";
+    }
+    if let Ok(v) = std::env::var("MESHCAST_EVICT_EVIDENCE") {
+        p.evict_by_evidence = v != "0";
+    }
+    if let Ok(v) = std::env::var("MESHCAST_MENU_USE") {
+        p.menu_use_by_naming = v != "0";
+    }
+    if let Some(t) = std::env::var("MESHCAST_RELAY_LEARN").ok().and_then(|v| v.parse::<u16>().ok()) {
+        p.relay_learn = t > 0;
+        p.relay_risk_permille = t;
+    }
     if let Some(s) = std::env::var("MESHCAST_T_RELAY_WAIT_S").ok().and_then(|v| v.parse::<u64>().ok()) {
         p.t_relay_wait_ms = s * 1000;
     }
@@ -1586,7 +1614,108 @@ fn run_dynamics(nodes: usize, area_km2: f64, stations: usize, channels: usize, f
         let relayed: u64 = eng.nodes.iter().map(|n| n.node.stats.relay_wants).sum();
         let evicted: u64 = eng.nodes.iter().map(|n| n.node.stats.cache_evictions).sum();
         let declined: u64 = eng.nodes.iter().map(|n| n.node.stats.relays_declined).sum();
-        println!("carrying: frames sent {}, bulk {}; held per node at the end: mean {:.0} kB, most {:.0} kB; relay wants {}; evicted {}; relays declined {}", eng.metrics.frames_sent, eng.metrics.bulk_sent, mean / 1000.0, max as f64 / 1000.0, relayed, evicted, declined);
+        let handed: u64 = eng.nodes.iter().map(|n| n.node.stats.relays_handed_on).sum();
+        let withdrawn: u64 = eng.nodes.iter().map(|n| n.node.stats.relays_withdrawn).sum();
+        println!("carrying: frames sent {}, bulk {}; held per node at the end: mean {:.0} kB, most {:.0} kB; relay wants {}; evicted {}; relays declined {}; relays handed on {}; withdrawn {}", eng.metrics.frames_sent, eng.metrics.bulk_sent, mean / 1000.0, max as f64 / 1000.0, relayed, evicted, declined, handed, withdrawn);
+        // Where the bulk frames went (FEASIBILITY.md §28).
+        let first: u64 = eng.nodes.iter().map(|n| n.node.stats.carousel_frames[0]).sum();
+        let repeat: u64 = eng.nodes.iter().map(|n| n.node.stats.carousel_frames[1]).sum();
+        println!("bulk frames: by announcers {} (carousel first passes {}, repeats {}), by others {} (uploads at their announcer {})", eng.metrics.bulk_sent_by[1], first, repeat, eng.metrics.bulk_sent_by[0], eng.metrics.upload_outcome.iter().sum::<u64>());
+        // How many nodes relayed each relayed object (FEASIBILITY.md §28).
+        let rel = &eng.metrics.relayers;
+        if !rel.is_empty() {
+            let mut hist = [0usize; 6];
+            for (_, nodes) in rel.values() {
+                hist[nodes.len().min(5)] += 1;
+            }
+            println!("relayed objects: {}; distinct nodes relaying each 1/2/3/4/5+: {:?}, mean {:.1}; relays per object {:.1}", rel.len(), &hist[1..], rel.values().map(|(_, n)| n.len() as f64).sum::<f64>() / rel.len() as f64, rel.values().map(|(c, _)| *c as f64).sum::<f64>() / rel.len() as f64);
+        }
+        // What gave way to the carry budget, by what was known of it then, and how much of it was
+        // held again later: which signals say an object will not be needed (FEASIBILITY.md §28).
+        let ev = &eng.metrics.evictions;
+        if !ev.is_empty() {
+            let class = |name: &str, f: &dyn Fn(&meshcast_core::node::EvictionInfo) -> bool| {
+                let all: Vec<_> = ev.iter().filter(|(i, _)| f(i)).collect();
+                let again = all.iter().filter(|(_, a)| a.is_some()).count();
+                format!("{name} {} ({:.0} % again)", all.len(), 100.0 * again as f64 / all.len().max(1) as f64)
+            };
+            let mut again: Vec<f64> = ev.iter().filter_map(|(_, a)| a.map(|t| t as f64 / 60_000.0)).collect();
+            again.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let med = again.get(again.len() / 2).copied().unwrap_or(0.0);
+            for (kind, f) in [("relayed", (|i: &meshcast_core::node::EvictionInfo| i.relayed && !i.menu) as fn(&meshcast_core::node::EvictionInfo) -> bool), ("announcer's", |i| !i.relayed && !i.menu), ("menu", |i| i.menu)] {
+                let sub = |g: &dyn Fn(&meshcast_core::node::EvictionInfo) -> bool| class("", &|i| f(i) && g(i));
+                println!("evicted {kind}: {}; neighbours holding it 0 {}, 1 {}, 2+ {}; an announcer holds it {}, none {}; in a window {}, out {}; idle <2 h {}, 2-6 h {}, 6 h+ {}", sub(&|_| true), sub(&|i| i.replicas == 0), sub(&|i| i.replicas == 1), sub(&|i| i.replicas >= 2), sub(&|i| i.announcer_has), sub(&|i| !i.announcer_has), sub(&|i| i.in_window), sub(&|i| !i.in_window), sub(&|i| i.idle_ms < 7_200_000), sub(&|i| (7_200_000..21_600_000).contains(&i.idle_ms)), sub(&|i| i.idle_ms >= 21_600_000));
+            }
+            println!(
+                "evictions: {}; held again {:.1} %, median after {:.0} min; relayed {}, announcer's {}, menu {}; neighbours holding it 0 {}, 1 {}, 2+ {}; an announcer holds it {}, none {}; in its window {}, out {}; idle <2 h {}, 2-6 h {}, 6 h+ {}",
+                ev.len(),
+                100.0 * again.len() as f64 / ev.len() as f64,
+                med,
+                class("", &|i| i.relayed && !i.menu),
+                class("", &|i| !i.relayed && !i.menu),
+                class("", &|i| i.menu),
+                class("", &|i| i.replicas == 0),
+                class("", &|i| i.replicas == 1),
+                class("", &|i| i.replicas >= 2),
+                class("", &|i| i.announcer_has),
+                class("", &|i| !i.announcer_has),
+                class("", &|i| i.in_window),
+                class("", &|i| !i.in_window),
+                class("", &|i| i.idle_ms < 7_200_000),
+                class("", &|i| (7_200_000..21_600_000).contains(&i.idle_ms)),
+                class("", &|i| i.idle_ms >= 21_600_000),
+            );
+        }
+        // What the nodes learned of how soon others meet another cell's asks, per age bucket:
+        // the share met there, weighted by how many asks reached it (FEASIBILITY.md §28).
+        let mut life = vec![(0u64, 0u64); 8];
+        for n in eng.nodes.iter() {
+            for (b, (h, e)) in n.node.relay_life().into_iter().enumerate() {
+                life[b].0 += h as u64 * e as u64;
+                life[b].1 += e as u64;
+            }
+        }
+        println!("relay life (<1, <2, <4, <8, <16, <32, <64, more min): met {} permille", life.iter().map(|(s, e)| if *e > 0 { (s / e).to_string() } else { "-".into() }).collect::<Vec<_>>().join(" / "));
+        // How long an announcer's asks for its listeners stay open, and how often they are
+        // repeated before someone meets them (FEASIBILITY.md §28).
+        let asks = &eng.metrics.listened_asks;
+        let mut lifetimes: Vec<f64> = Vec::new();
+        let mut never = 0usize;
+        let mut by_frames = [0usize; 5];
+        let mut foreign = 0usize;
+        let mut granted = 0usize;
+        let cascade = asks.values().filter(|a| !a.real_listener).count();
+        for ((ann, obj), a) in asks {
+            match eng.metrics.completions.get(&(*ann, *obj)).copied().filter(|c| *c >= a.first) {
+                Some(c) => lifetimes.push((c - a.first) as f64 / 60_000.0),
+                None => never += 1,
+            }
+            if let Some((_, f)) = a.granted {
+                granted += 1;
+                foreign += f as usize;
+                by_frames[(a.open_frames as usize).min(4)] += 1;
+            }
+        }
+        lifetimes.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let pct = |q: f64| lifetimes.get(((lifetimes.len() as f64 - 1.0) * q).round() as usize).copied().unwrap_or(0.0);
+        let within = |m: f64| 100.0 * lifetimes.iter().filter(|l| **l <= m).count() as f64 / asks.len().max(1) as f64;
+        println!(
+            "listened asks: {} (with no listener in the cell when first asked: {}); met at the announcer {:.1} %, p50 {:.1} min, p90 {:.1} min; within 2/5/10/20/60 min {:.1}/{:.1}/{:.1}/{:.1}/{:.1} %; never {}; granted {} after 0/1/2/3/4+ open asks {:?}, to another cell's node {}",
+            asks.len(),
+            cascade,
+            100.0 * lifetimes.len() as f64 / asks.len().max(1) as f64,
+            pct(0.5),
+            pct(0.9),
+            within(2.0),
+            within(5.0),
+            within(10.0),
+            within(20.0),
+            within(60.0),
+            never,
+            granted,
+            by_frames,
+            foreign
+        );
     }
     println!("bulk airtime share, busiest nodes: {}", airtime.iter().map(|(i, a)| format!("{i}:{:.1}%", a * 100.0)).collect::<Vec<_>>().join(" "));
     if let Some(ctrl_c) = eng.phys.iter().position(|p| p.kind == CarrierKind::LoraControl).filter(|c| *c != bulk_c) {

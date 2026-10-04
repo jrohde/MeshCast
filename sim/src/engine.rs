@@ -2,7 +2,7 @@
 //! propagation, sensitivity, capture, half-duplex, CCA busy detection and occupancy.
 
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap, VecDeque};
+use std::collections::{BTreeSet, BinaryHeap, HashMap, VecDeque};
 
 use meshcast_core::frame::{Frame, FrameType};
 use meshcast_core::ids::NodeId;
@@ -133,6 +133,9 @@ pub struct Engine {
     pub metrics: Metrics,
     pub verbose: bool,
     trace_grants: bool,
+    /// Oracle (FEASIBILITY.md §28): one relayer per object and neighbourhood, and the claims.
+    relay_oracle: bool,
+    relay_claims: std::collections::BTreeMap<meshcast_core::ids::ShortId, Vec<(usize, Millis)>>,
     /// Symbols to lose on purpose, once each: (receiver, object, symbol), for tests.
     lose: Vec<(usize, meshcast_core::ids::ShortId, u16)>,
     /// MESHCAST_TRACE_RX=<node>: every symbol that node receives.
@@ -208,7 +211,7 @@ impl Engine {
         }
         let mut metrics = Metrics::default();
         metrics.per_node_bulk = vec![(0, 0); n];
-        let mut e = Engine { attackers: Vec::new(), attack_ids: Vec::new(), rendition_ids: Default::default(), nodes, phys, heap: BinaryHeap::new(), seq: 0, tx_seq: 0, loss, reach, recent: HashMap::new(), txs: HashMap::new(), now: 0, metrics, verbose: false, trace_grants: std::env::var("MESHCAST_TRACE_GRANTS").is_ok(), trace_busy: std::env::var("MESHCAST_TRACE_BUSY").ok().and_then(|v| v.parse().ok()), busy_from: VecDeque::new(), busy_blame: Default::default(), next_sample: 0, lose: Vec::new(), trace_rx: std::env::var("MESHCAST_TRACE_RX").ok().and_then(|v| v.parse().ok()), no_ctrl_rx: std::env::var("MESHCAST_NO_CTRL_RX").is_ok(), clock_restart: restart };
+        let mut e = Engine { attackers: Vec::new(), attack_ids: Vec::new(), rendition_ids: Default::default(), nodes, phys, heap: BinaryHeap::new(), seq: 0, tx_seq: 0, loss, reach, recent: HashMap::new(), txs: HashMap::new(), now: 0, metrics, verbose: false, trace_grants: std::env::var("MESHCAST_TRACE_GRANTS").is_ok(), relay_oracle: std::env::var("MESHCAST_ORACLE_RELAY").is_ok(), relay_claims: Default::default(), trace_busy: std::env::var("MESHCAST_TRACE_BUSY").ok().and_then(|v| v.parse().ok()), busy_from: VecDeque::new(), busy_blame: Default::default(), next_sample: 0, lose: Vec::new(), trace_rx: std::env::var("MESHCAST_TRACE_RX").ok().and_then(|v| v.parse().ok()), no_ctrl_rx: std::env::var("MESHCAST_NO_CTRL_RX").is_ok(), clock_restart: restart };
         for i in 0..n {
             e.schedule_wake(i, 1);
         }
@@ -522,6 +525,37 @@ impl Engine {
                         eprintln!("OC {} {} {:?} {:?} role={:?}", now, i, id, self.nodes[i].node.object_kind(&id), self.nodes[i].node.role(self.phys.len() - 1));
                     }
                     self.metrics.completions.entry((i, id)).or_insert(now);
+                    if let Some((k, at)) = self.metrics.evicted_pending.remove(&(i, id)) {
+                        self.metrics.evictions[k].1 = Some(now - at);
+                    }
+                }
+                Action::Relayed { id } => {
+                    // Oracle (FEASIBILITY.md §28): one relayer per object and neighbourhood. A relay
+                    // that a node in radio range of this one took on in the last hour is abandoned.
+                    if self.relay_oracle {
+                        let now = self.now;
+                        let c = self.phys.len() - 1;
+                        let sens = self.phys[c].sensitivity_dbm;
+                        let near: BTreeSet<usize> = self.reach[i][c].iter().filter(|(_, rx)| *rx >= sens).map(|(j, _)| *j).collect();
+                        let claims = self.relay_claims.entry(id).or_default();
+                        claims.retain(|(_, t)| now < *t + 3_600_000);
+                        if claims.iter().any(|(j, _)| *j != i && near.contains(j)) {
+                            self.nodes[i].node.abandon_relay(&id);
+                            continue;
+                        }
+                        claims.push((i, now));
+                    }
+                    let r = self.metrics.relayers.entry(id).or_default();
+                    r.0 += 1;
+                    r.1.insert(i);
+                }
+                Action::Evicted { id, info } => {
+                    if self.trace_grants {
+                        eprintln!("EV {} {} {:?} relayed={} menu={} role={:?}", self.now, i, id, info.relayed, info.menu, self.nodes[i].node.role(self.phys.len() - 1));
+                    }
+                    let k = self.metrics.evictions.len();
+                    self.metrics.evictions.push((info, None));
+                    self.metrics.evicted_pending.insert((i, id), (k, self.now));
                 }
                 Action::Role { carrier, role, announcer, now: _ } => {
                     let now = self.now;
@@ -602,6 +636,30 @@ impl Engine {
                 let k = (h.0 as usize).wrapping_sub(1);
                 if !h.is_none() && k < self.nodes.len() && self.nodes[k].node.role(carrier) == meshcast_core::node::Role::Announcer {
                     self.metrics.grants_to_announcers += 1;
+                }
+            }
+            // An announcer's asks for its listeners: open, or met by a grant (FEASIBILITY.md §28).
+            if g.announcer == g.node && !self.nodes[from].mute {
+                let me = self.nodes[from].node.id();
+                let unpacked = self.nodes[from].node.unpacked(&g);
+                for (o, h, p) in &unpacked.want {
+                    if p & meshcast_core::frame::ASK_LISTENED == 0 {
+                        continue;
+                    }
+                    if !self.metrics.listened_asks.contains_key(&(from, *o)) {
+                        let real = self.nodes.iter().any(|n| n.alive && n.node.announcer_of(carrier) == me && n.node.listens_to(o));
+                        self.metrics.listened_asks.insert((from, *o), crate::metrics::ListenedAsk { first: now, real_listener: real, ..Default::default() });
+                    }
+                    let a = self.metrics.listened_asks.get_mut(&(from, *o)).unwrap();
+                    if h.is_none() {
+                        if a.granted.is_none() {
+                            a.open_frames += 1;
+                        }
+                    } else if a.granted.is_none() {
+                        let k = (h.0 as usize).wrapping_sub(1);
+                        let foreign = k < self.nodes.len() && self.nodes[k].node.announcer_of(carrier) != me;
+                        a.granted = Some((now, foreign));
+                    }
                 }
             }
         }
