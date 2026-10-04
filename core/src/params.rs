@@ -145,17 +145,19 @@ pub struct Params {
     pub t_ctrl_period_ms: Millis,
     pub t_ctrl_window_ms: Millis,
     /// How long a node that knows no shared time listens on the control carrier before it may step
-    /// up as announcer by its own clock: a control period and its window (PROTOCOL.md §6).
+    /// up as announcer by its own clock: two control periods and a window, the longest a node can
+    /// wait for a whole window and the time told in it (PROTOCOL.md §3, §6).
     pub t_acquire_ms: Millis,
-    /// How often an announcer listens on the control carrier through a whole period, to hear the
-    /// time of announcers whose window it does not share (§6). 0: never.
-    pub t_watch_ms: Millis,
-    /// How often an announcer tells its time on the control carrier, where the cell's carrier hops
-    /// (PROTOCOL.md §6). 0: never.
-    pub t_tell_ms: Millis,
+    /// An announcer tells its time on the control carrier in every window, wherever nodes listen there
+    /// only in the window (PROTOCOL.md §6). Off: never; kept to measure against.
+    pub tells_time: bool,
     /// How far a frame keeps from the edges of a hop dwell and of the control window: room for
     /// clocks a little apart (PROTOCOL.md §6).
     pub t_guard_ms: Millis,
+    /// Each control period's window sits where the period's number puts it, so that groups whose
+    /// shared times differ meet in a window now and then (PROTOCOL.md §3, §6). Off: in the middle of
+    /// every period, as before; kept to measure against.
+    pub ctrl_window_wanders: bool,
     /// An announcer fetches every piece of every channel it hears of, asked for or not. Off: it
     /// fetches what a follower asks for (PROTOCOL.md §2, FEASIBILITY.md §27); kept to measure against.
     pub proactive: bool,
@@ -221,10 +223,10 @@ impl Default for Params {
             t_excursion_ms: 2_400_000,
             t_ctrl_period_ms: 60_000,
             t_ctrl_window_ms: 4_000,
-            t_acquire_ms: 64_000,
-            t_watch_ms: 1_800_000,
-            t_tell_ms: 60_000,
+            t_acquire_ms: 124_000,
+            tells_time: true,
             t_guard_ms: 50,
+            ctrl_window_wanders: true,
             proactive: false,
             relay_unfollowed: true,
             t_relay_wait_ms: 600_000,

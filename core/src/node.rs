@@ -192,8 +192,6 @@ pub struct Stats {
     /// Steps forward of our shared time (§6), and the largest, in ms.
     pub time_steps: u64,
     pub time_step_max_ms: u64,
-    /// Whole control periods an announcer listened through for other times (§6).
-    pub time_watches: u64,
     /// Want sets sent, and the pieces they asked for.
     pub want_sets: u64,
     pub want_set_pieces: u64,
@@ -548,12 +546,6 @@ pub struct Node {
     /// beacon on the control carrier is still to go, outside the window (§6).
     time_source_since: Millis,
     ctrl_at_once: bool,
-    /// We started the shared time ourselves and have taken nobody's since (§6).
-    self_started: bool,
-    /// As announcer: when we next listen on the control carrier through a whole period, and until
-    /// when we do (§6).
-    next_watch: Millis,
-    watch_until: Millis,
     /// The symbol our last proof NACK asked for, and when its answer came (§5.2).
     probe_symbol: Option<(ShortId, u16)>,
     probe_answered: Option<(ShortId, Millis)>,
@@ -684,9 +676,6 @@ impl Node {
             next_ctrl_beacon: 0,
             time_source_since: 0,
             ctrl_at_once: false,
-            self_started: false,
-            next_watch: 0,
-            watch_until: 0,
             probe_symbol: None,
             probe_answered: None,
             ask_rest_at: None,
@@ -1478,6 +1467,11 @@ impl Node {
         !self.acquiring()
     }
 
+    /// Diagnostic: the control window that contains local time `t`, or else the next one.
+    pub fn ctrl_window_at(&self, t: Millis) -> Option<(Millis, Millis)> {
+        self.ctrl_window_from(t)
+    }
+
     /// Diagnostic: our shared time at local time `t`.
     pub fn shared_time(&self, t: Millis) -> Millis {
         self.mesh(t)
@@ -1896,29 +1890,16 @@ impl Node {
             // Nobody told us an earlier start: our time is the shared time here.
             self.time_heard = true;
         }
-        // The time of announcers whose window we do not share (§6): once every `T_watch` an announcer
-        // listens on the control carrier through a whole period, and takes a later time it hears there.
-        // One that started the time itself watches sooner, two periods after it began and then twice
-        // as long each time, up to `T_watch`: where several started at once, out of each other's
-        // reach, their groups otherwise kept apart until the first watch, half an hour later.
-        if self.is_announcing() && self.time_on_ctrl() && self.cfg.params.t_watch_ms > 0 {
-            let p = self.cfg.params.t_ctrl_period_ms;
-            let every = |me: &Self| if me.self_started { (2 * (now - me.time_source_since)).clamp(2 * p, me.cfg.params.t_watch_ms) } else { me.cfg.params.t_watch_ms };
-            if self.next_watch == 0 {
-                self.next_watch = if self.self_started { now + 2 * p } else { now + 1 + self.rng.below(self.cfg.params.t_watch_ms) };
+        // The time for those who have none, and for groups whose time differs (§6): an announcer tells
+        // it on the control carrier in every window, where a node that knows no time listens all the
+        // time and another group's window falls now and then. The next one goes in the window after.
+        let ctrl = self.ctrl;
+        if self.is_announcing() && self.time_on_ctrl() && (self.cfg.params.tells_time || self.ctrl_at_once) && now >= self.next_ctrl_beacon {
+            self.next_ctrl_beacon = self.ctrl_window_from(now).map(|(_, e)| e + 1).unwrap_or(now + self.cfg.params.t_ctrl_period_ms);
+            if !self.carriers[ctrl].queue.iter().any(|p| p.frame_type == FrameType::Beacon) {
+                let b = self.make_beacon(self.cell_carrier());
+                self.enqueue(ctrl, Frame::Beacon(b));
             }
-            if now >= self.next_watch {
-                self.watch_until = now + p;
-                self.next_watch = now + every(self);
-                self.stats.time_watches += 1;
-            }
-        }
-        // The time for those who have none (§6): an announcer tells it on the control carrier, where a
-        // node that knows no time can hear it, once every control period.
-        if self.is_announcing() && self.time_on_ctrl() && (self.cfg.params.t_tell_ms > 0 || self.ctrl_at_once) && now >= self.next_ctrl_beacon {
-            self.next_ctrl_beacon = now + self.cfg.params.t_tell_ms.max(self.cfg.params.t_ctrl_period_ms);
-            let b = self.make_beacon(self.cell_carrier());
-            self.enqueue(self.ctrl, Frame::Beacon(b));
         }
         if now >= self.next_beacon {
             self.next_beacon = now + self.cfg.params.election.t_beacon_ms;
@@ -2011,14 +1992,12 @@ impl Node {
                 out.push(Action::Role { carrier, role: Role::Candidate, announcer: NodeId::NONE, now: self.now });
             }
             Transition::BecameAnnouncer => {
-                self.next_watch = 0;
                 if carrier == self.cell_carrier() {
                     // An announcer that has heard no time is a source of it: it tells it at once on the
                     // control carrier, where whoever else knows none is listening, and listens there
                     // itself for `T_acquire` for one that started before it (§6).
                     if self.acquiring() {
                         self.time_source_since = self.now;
-                        self.self_started = true;
                         self.ctrl_at_once = true;
                     }
                     self.next_ctrl_beacon = self.now;
@@ -2394,16 +2373,39 @@ impl Node {
 
     /// The control window that contains `t`, or else the next one, as (start, end): a node with
     /// one radio for its control and bulk carriers listens on the control carrier only then, and
-    /// every node sends control-carrier frames only then (PROTOCOL.md §3). Windows sit in the
-    /// middle of each period. `None` without a separate control carrier, or with windows off.
+    /// every node sends control-carrier frames only then (PROTOCOL.md §3). Each period's window
+    /// sits where the period's number puts it, the same for everyone who shares the time, so that
+    /// groups whose times differ share a window now and then and the later time crosses (§6); with
+    /// `ctrl_window_wanders` off, in the middle of every period. `None` without a separate control
+    /// carrier, or with windows off.
     fn ctrl_window_from(&self, t: Millis) -> Option<(Millis, Millis)> {
         let (p, w) = (self.cfg.params.t_ctrl_period_ms, self.cfg.params.t_ctrl_window_ms);
         if w == 0 || p <= w || self.ctrl == self.cell_carrier() {
             return None;
         }
+        let wanders = self.cfg.params.ctrl_window_wanders;
+        // Where the carrier hops, the window keeps inside one dwell and clear of its first tenth,
+        // where announcers beacon and candidates step up in a meeting dwell: placed anywhere, it
+        // took the start of a meeting dwell now and then, and a band L cold start lost a meeting.
+        let d = self.cfg.params.dwell_ms.max(1);
+        let g = self.cfg.params.t_guard_ms;
+        let (lo, hi) = (d / 10 + g, d.saturating_sub(w + g));
+        let in_dwells = self.hops(self.cell_carrier()) && p % d == 0 && hi >= lo;
+        let start_of = |k: u64| {
+            if !wanders {
+                return k * p + p / 2;
+            }
+            let r = mix(WINDOW_ID, k);
+            if in_dwells {
+                k * p + (r % (p / d)) * d + lo + (r / (p / d)) % (hi - lo + 1)
+            } else {
+                k * p + r % (p - w + 1)
+            }
+        };
         let m = self.mesh(t);
-        let pos = (m + p - (p / 2) % p) % p;
-        let start = self.local_at(if pos < w { m - pos } else { m + (p - pos) });
+        let k = m / p;
+        let s = if m < start_of(k) + w { start_of(k) } else { start_of(k + 1) };
+        let start = self.local_at(s);
         Some((start, start + w))
     }
 
@@ -2417,7 +2419,7 @@ impl Node {
     /// Whether we receive on `carrier` at `t`: outside the control window our one radio listens
     /// on the bulk carrier, inside it on the control carrier.
     pub fn listening(&self, carrier: usize, t: Millis) -> bool {
-        if self.acquiring() || t < self.watch_until {
+        if self.acquiring() {
             return carrier == self.ctrl || !self.shares_ctrl_radio(carrier);
         }
         match self.ctrl_window_from(t) {
@@ -2435,18 +2437,20 @@ impl Node {
         }
     }
 
-    /// Whether the shared time travels on the control carrier (§6): where the cell's carrier hops,
-    /// a node that knows no time finds nobody on it. On a carrier that does not hop it hears any
-    /// announcer's beacon, and with it the time, without knowing it first.
+    /// Whether the shared time travels on the control carrier (§6): wherever nodes listen there only
+    /// in the window, which the shared time places. Neighbouring cells whose bulk carriers do not
+    /// reach each other meet only there; told only where the cell's carrier hops, four in five such
+    /// pairs of announcers in band O never shared a window (FEASIBILITY.md §29).
     fn time_on_ctrl(&self) -> bool {
-        self.ctrl != self.cell_carrier() && self.cfg.params.t_ctrl_window_ms > 0 && self.cfg.params.t_acquire_ms > 0 && self.hops(self.cell_carrier())
+        self.ctrl != self.cell_carrier() && self.cfg.params.t_ctrl_window_ms > 0
     }
 
     /// Whether we listen for a shared time on the control carrier (§6): we know none yet, and are
     /// no time source ourselves. A node that knows none cannot find a hopping carrier's schedule,
-    /// nor the window; every announcer tells the time there once a period.
+    /// nor the window; every announcer tells the time there in every window. On a carrier that does
+    /// not hop it hears its cell's announcer, and the time with it, without knowing it first.
     fn acquiring(&self) -> bool {
-        !self.time_heard && self.time_on_ctrl()
+        !self.time_heard && self.time_on_ctrl() && self.cfg.params.t_acquire_ms > 0 && self.hops(self.cell_carrier())
     }
 
     /// The lowest phase no grant or repair uses, if any is left.
@@ -2506,9 +2510,6 @@ impl Node {
         self.booted_at = now;
         self.next_ctrl_beacon = 0;
         self.ctrl_at_once = false;
-        self.next_watch = 0;
-        self.self_started = false;
-        self.watch_until = 0;
         self.next_gossip = now + p.t_gossip_ms;
         self.next_score = now;
         self.want_refresh = true;
@@ -3635,7 +3636,6 @@ impl Node {
         }
         if frame_type == FrameType::Beacon && i == self.cell_carrier() && self.time_pending > 0 {
             let step = core::mem::take(&mut self.time_pending);
-            self.self_started = false;
             self.step_time(step as i64);
         }
     }
@@ -5007,15 +5007,22 @@ pub const MEETING_ID: NodeId = NodeId(0xFFFF_FFFF);
 /// Key of the shared base sequence that coloured announcers shift.
 pub const BASE_ID: NodeId = NodeId(0xFFFF_FFFE);
 
+/// Key of the sequence that places each control period's window (PROTOCOL.md §3, §6).
+pub const WINDOW_ID: NodeId = NodeId(0xFFFF_FFFD);
+
+/// splitmix64 of a key and an index: the pseudo-random sequences every node computes alike.
+pub fn mix(key: NodeId, index: u64) -> u64 {
+    let mut z = (key.0 as u64) << 32 ^ index ^ 0x9E37_79B9_7F4A_7C15;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
 /// Pseudo-random hop sequence per announcer (splitmix64 of announcer id and dwell index).
 /// Two announcers' sequences coincide on about one dwell in `n`, which is how they discover
 /// each other; followers and uploaders compute the same sequence for their announcer.
 pub fn hop_channel(announcer: NodeId, dwell_index: u64, n: u64) -> u8 {
-    let mut z = (announcer.0 as u64) << 32 ^ dwell_index ^ 0x9E37_79B9_7F4A_7C15;
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    z ^= z >> 31;
-    (z % n.max(1)) as u8
+    (mix(announcer, dwell_index) % n.max(1)) as u8
 }
 
 /// The bits of the phases below `k`.

@@ -336,6 +336,44 @@ impl Engine {
         self.schedule_wake(node, now + 1);
     }
 
+    /// Diagnostic: pairs of live announcers that hear each other on the control carrier but not on
+    /// the bulk carrier, and of those how many share none of their control windows in the coming
+    /// hour, and how many fewer than nine in ten (PROTOCOL.md §3, §6). Such a pair crosses roots
+    /// and announcements only in a window both are in, for a second at least.
+    pub fn ctrl_only_pairs(&self, ctrl: usize, bulk: usize) -> (usize, usize, usize) {
+        let windows = |i: usize| {
+            let n = &self.nodes[i];
+            let mut v = Vec::new();
+            let mut g = self.now;
+            while g < self.now + 3_600_000 {
+                let Some((s, e)) = n.node.ctrl_window_at(n.clock.local(g)) else { break };
+                let (s, e) = (n.clock.global(s), n.clock.global(e));
+                v.push((s, e));
+                g = e.max(g) + 1;
+            }
+            v
+        };
+        let anns: Vec<usize> = (0..self.nodes.len()).filter(|&i| self.nodes[i].alive && self.nodes[i].node.role(bulk) == meshcast_core::node::Role::Announcer).collect();
+        let hears = |a: usize, b: usize, c: usize| self.rx_dbm(a, b, c) >= self.phys[c].sensitivity_dbm && self.rx_dbm(b, a, c) >= self.phys[c].sensitivity_dbm;
+        let (mut pairs, mut apart, mut partly) = (0, 0, 0);
+        for (k, &a) in anns.iter().enumerate() {
+            for &b in &anns[k + 1..] {
+                if !hears(a, b, ctrl) || hears(a, b, bulk) {
+                    continue;
+                }
+                pairs += 1;
+                let (wa, wb) = (windows(a), windows(b));
+                let shared = wa.iter().filter(|(s, e)| wb.iter().any(|(t, f)| (*e).min(*f).saturating_sub((*s).max(*t)) >= 1_000)).count();
+                if shared == 0 {
+                    apart += 1;
+                } else if shared * 10 < wa.len() * 9 {
+                    partly += 1;
+                }
+            }
+        }
+        (pairs, apart, partly)
+    }
+
     /// Diagnostic: how far apart the live nodes' shared times are now (ms), how many nodes are
     /// within one second of the median, and how many live nodes there are (PROTOCOL.md §6).
     pub fn shared_time_spread(&self) -> (u64, usize, usize) {
