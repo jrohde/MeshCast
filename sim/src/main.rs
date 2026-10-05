@@ -220,6 +220,10 @@ enum Cmd {
         /// Hours between newcomers: a node is replaced by one that has learned nothing.
         #[arg(long, default_value_t = 0.0)]
         newcomer_h: f64,
+        /// Nodes over a strip this many metres wide instead of a square of the same area, with the
+        /// stations spread along it: villages along a road or a valley (0: a square).
+        #[arg(long, default_value_t = 0.0)]
+        strip_m: f64,
         #[command(flatten)]
         common: Common,
     },
@@ -580,8 +584,8 @@ fn main() {
             };
             run(spec, &common, None);
         }
-        Cmd::Dynamics { nodes, area_km2, stations, channels, quiet_channels, quiet_publish_h, follows, publish_h, bulletin_kb, window, churn_h, node_churn_h, newcomer_h, common } => {
-            run_dynamics(nodes, area_km2, stations, channels, quiet_channels, quiet_publish_h, follows, publish_h, bulletin_kb, window, churn_h, node_churn_h, newcomer_h, &common);
+        Cmd::Dynamics { nodes, area_km2, stations, channels, quiet_channels, quiet_publish_h, follows, publish_h, bulletin_kb, window, churn_h, node_churn_h, newcomer_h, strip_m, common } => {
+            run_dynamics(nodes, area_km2, stations, channels, quiet_channels, quiet_publish_h, follows, publish_h, bulletin_kb, window, churn_h, node_churn_h, newcomer_h, strip_m, &common);
         }
         Cmd::Failover { nodes, area_km2, kill_at_h, revive_at_h, common } => {
             let spec = ScenarioSpec {
@@ -1037,9 +1041,6 @@ fn params() -> Params {
     if let Ok(v) = std::env::var("MESHCAST_LEAVE_LACKING") {
         p.leave_lacking = v != "0";
     }
-    if let Ok(v) = std::env::var("MESHCAST_RELAY_LEAVES") {
-        p.relay_leaves = v != "0";
-    }
     if let Ok(v) = std::env::var("MESHCAST_LEAVE_BACKOFF") {
         p.leave_backoff = v != "0";
     }
@@ -1213,11 +1214,32 @@ struct DynamicsReport {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run_dynamics(nodes: usize, area_km2: f64, stations: usize, channels: usize, quiet_channels: usize, quiet_publish_h: f64, follows: usize, publish_h: f64, bulletin_kb: u32, window: usize, churn_h: f64, node_churn_h: f64, newcomer_h: f64, common: &Common) {
+fn run_dynamics(nodes: usize, area_km2: f64, stations: usize, channels: usize, quiet_channels: usize, quiet_publish_h: f64, follows: usize, publish_h: f64, bulletin_kb: u32, window: usize, churn_h: f64, node_churn_h: f64, newcomer_h: f64, strip_m: f64, common: &Common) {
     use meshcast_core::manifest::{Collection, CollectionKind, Manifest, ScheduleEntry};
     use meshcast_core::rng::Rng;
     use meshcast_core::ids::ShortId;
     use scenario::{track_object, TrackInfo};
+    // A strip instead of a square: the stations spread along it, each the node nearest its point.
+    let (positions, stations_at) = if strip_m > 0.0 {
+        let len = area_km2 * 1e6 / strip_m;
+        let mut r = Rng::new(common.seed ^ 0x57);
+        let p: Vec<(f64, f64)> = (0..nodes).map(|_| (r.unit() * len, r.unit() * strip_m)).collect();
+        let mut st: Vec<usize> = Vec::new();
+        for k in 0..stations.min(nodes) {
+            let x = (k as f64 + 0.5) * len / stations as f64;
+            let best = (0..nodes).filter(|i| !st.contains(i)).min_by(|a, b| (p[*a].0 - x).abs().total_cmp(&(p[*b].0 - x).abs()));
+            st.extend(best);
+        }
+        (Some(p), Some(st))
+    } else {
+        (None, None)
+    };
+    // Diagnostic (MESHCAST_TRACE_SPREAD, a strip only): hourly, how far each publication in its
+    // period has spread along the strip.
+    let xs: Option<Vec<f64>> = positions.as_ref().filter(|_| std::env::var("MESHCAST_TRACE_SPREAD").is_ok()).map(|p| p.iter().map(|q| q.0).collect());
+    for (i, x) in xs.iter().flatten().enumerate() {
+        eprintln!("POS {} {:.0}", i, x);
+    }
     let spec = ScenarioSpec {
         nodes,
         area_km2,
@@ -1233,8 +1255,8 @@ fn run_dynamics(nodes: usize, area_km2: f64, stations: usize, channels: usize, q
         exponent: common.exponent,
         shadow_db: common.shadow_db,
         follow_fraction: 0.0,
-        positions: None,
-        stations_at: None,
+        positions,
+        stations_at,
         sources_at: None,
         renditions: common.renditions(),
         attack: common.attack(),
@@ -1323,7 +1345,7 @@ fn run_dynamics(nodes: usize, area_km2: f64, stations: usize, channels: usize, q
     let mut offline: Vec<usize> = Vec::new();
     let mut islands = (0usize, 0usize, 0usize, 0usize, 0usize);
     // Every hour: how many nodes, and how many announcers, hold the newest root of each channel.
-    let mut menu = (0usize, 0f64, 0f64, 0f64);
+    let mut menu = (0usize, 0f64, 0f64, 0f64, 0f64);
     // When each node was switched off, and from when to when, for time that counts.
     let mut went_off: BTreeMap<usize, Millis> = BTreeMap::new();
     let mut switched_off: Vec<Vec<(Millis, Millis)>> = vec![Vec::new(); nodes];
@@ -1362,6 +1384,34 @@ fn run_dynamics(nodes: usize, area_km2: f64, stations: usize, channels: usize, q
                         }
                     }
                 }
+                if let Some(xs) = &xs {
+                    let period = (publish_h * 3.6e6) as Millis;
+                    for (id, t_pub, followers) in pubs.iter().filter(|(_, tp, _)| *tp <= t && t < *tp + period) {
+                        let alive = |i: usize| e.nodes[i].alive;
+                        let holders: Vec<f64> = (0..e.nodes.len()).filter(|&i| alive(i) && e.nodes[i].node.holds(id)).map(|i| xs[i] / 1000.0).collect();
+                        let wanting = (0..e.nodes.len()).filter(|&i| alive(i) && e.nodes[i].node.wants_object(id)).count();
+                        let got = followers.iter().filter(|&&f| e.nodes[f].node.holds(id)).count();
+                        let src = built.tracks.get(id).map(|tr| xs[tr.source] / 1000.0).unwrap_or(-1.0);
+                        let lo = holders.iter().cloned().fold(f64::MAX, f64::min);
+                        let hi = holders.iter().cloned().fold(f64::MIN, f64::max);
+                        let fx: Vec<String> = followers.iter().map(|&f| format!("{:.1}{}", xs[f] / 1000.0, if e.nodes[f].node.holds(id) { "+" } else { "-" })).collect();
+                        eprintln!("SPREAD {:.0}h pub={:.0}h {:?} src={:.1} holders={} [{:.1}..{:.1}] wanting={} got={}/{} followers={}", t as f64 / 3.6e6, *t_pub as f64 / 3.6e6, id, src, holders.len(), lo, hi, wanting, got, followers.len(), fx.join(" "));
+                    }
+                }
+                // Followers: the newest root of each channel they follow, without which they do
+                // not know what it published.
+                let (mut k_fol, mut n_fol) = (0usize, 0usize);
+                for (i, s) in subs.iter().enumerate() {
+                    if !e.nodes[i].alive {
+                        continue;
+                    }
+                    for &c in s {
+                        let src = &built.sources[c];
+                        n_fol += 1;
+                        k_fol += e.nodes[i].node.manifest_state(&src.channel).map(|m| m.0 >= src.seq && m.3).unwrap_or(false) as usize;
+                    }
+                }
+                menu.4 += k_fol as f64 / n_fol.max(1) as f64;
                 let alive = e.nodes.iter().filter(|n| n.alive).count().max(1);
                 menu.0 += 1;
                 menu.1 += k_all as f64 / n_all.max(1) as f64;
@@ -1594,6 +1644,20 @@ fn run_dynamics(nodes: usize, area_km2: f64, stations: usize, channels: usize, q
     println!("  carrier: {}", eng.phys[bulk_c].name);
     println!("publications: {} (initial catalogue + {} later)", pubs.len(), pubs.len().saturating_sub(channels * window));
     println!("delivered to followers within one publication period: {:.1} %", report.delivered_within_period * 100.0);
+    // What the bulk carrier allows at all: a piece reaches only the part of the network its
+    // source is in.
+    let parts = eng.components(bulk_c);
+    let (mut joined, mut pairs) = (0usize, 0usize);
+    for (id, _, followers) in &pubs {
+        if let Some(tr) = built.tracks.get(id) {
+            for &f in followers {
+                pairs += 1;
+                joined += (parts[f] == parts[tr.source]) as usize;
+            }
+        }
+    }
+    let n_parts = parts.iter().enumerate().filter(|(i, p)| *i == **p).count();
+    println!("bulk carrier: {} parts; followers in the same part as the source: {:.1} % of follower-publication pairs", n_parts, 100.0 * joined as f64 / pairs.max(1) as f64);
     let f = |x: &Option<f64>| x.map(|v| format!("{v:.2}")).unwrap_or_else(|| "-".into());
     let later: Vec<String> = pubs.iter().zip(p50.iter().zip(p90.iter())).filter(|((_, t, _), _)| *t > 0).map(|((_, t, fl), (a, b))| format!("t={:.0}h n={} p50={} p90={}", *t as f64 / 3.6e6, fl.len(), f(a), f(b))).collect();
     println!("latency of later publications (hours after publishing):");
@@ -1669,6 +1733,7 @@ fn run_dynamics(nodes: usize, area_km2: f64, stations: usize, channels: usize, q
     }
     if menu.0 > 0 {
         println!("menu: nodes holding a channel's newest root, hourly mean {:.1} %, announcers {:.1} %; newest roots held per node {:.1} of {}", 100.0 * menu.1 / menu.0 as f64, 100.0 * menu.2 / menu.0 as f64, menu.3 / menu.0 as f64, built.sources.len());
+        println!("menu of followers: the newest root of a channel they follow held, hourly mean {:.2} %", 100.0 * menu.4 / menu.0 as f64);
     }
     if islands.0 > 0 {
         println!("control carrier: announcer pairs that hear each other only there, hourly mean {:.1}; sharing no window in the next hour {:.1}, fewer than nine in ten {:.1}; hours with a pair sharing none {} of {}", islands.1 as f64 / islands.0 as f64, islands.2 as f64 / islands.0 as f64, islands.3 as f64 / islands.0 as f64, islands.4, islands.0);

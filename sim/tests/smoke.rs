@@ -1501,20 +1501,6 @@ fn out_of_reach(params: Params, hours: f64) -> meshcast_sim::scenario::Built {
 }
 
 #[test]
-fn a_relay_does_not_leave_its_announcer_for_what_it_relays() {
-    // With 400 channels in a band L network, one piece that only its source held, an announcer
-    // nobody near followed, made 93 nodes leave their announcers 1,510 times in two days, 1,366
-    // of them for what they relayed for another cell (FEASIBILITY.md §31). What a follower only
-    // relays is no evidence against its own announcer (PROTOCOL.md §5.2); leaving for it, the
-    // node between left A six times in six hours here and ended up announcing.
-    let b = out_of_reach(Params::default(), 6.0);
-    let bridge = &b.engine.nodes[2].node;
-    assert!(bridge.stats.relay_wants > 0, "the node between should relay what B asks for");
-    assert_eq!(bridge.stats.left_lacking, 0, "it should not leave A for what it relays");
-    assert_eq!(bridge.announcer_of(1), b.engine.nodes[1].node.id(), "it should still follow A");
-}
-
-#[test]
 fn what_no_announcer_can_get_is_waited_for_longer() {
     // A follower that left its announcer for an object that announcer did not list waits for it
     // twice as long under the next, for every announcer it left for it (PROTOCOL.md §5.2): at

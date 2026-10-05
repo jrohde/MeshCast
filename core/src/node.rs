@@ -2172,22 +2172,20 @@ impl Node {
         let own_haves = self.neighbors.get(&own).map(|n| n.haves.clone()).unwrap_or_default();
         let lacking = self.cfg.params.leave_lacking;
         let claims_or_lacks = |x: &ShortId| own_haves.contains_key(x) || (lacking && !self.ann_granted_within(x, t));
-        // Two limits keep leaving to what it is for (FEASIBILITY.md §31). What we only relay for
-        // another cell is no evidence against our own announcer: leaving would not bring it to
-        // the cell that asked, an excursion does that, and it shakes our own cell. And what the
-        // next announcer cannot get either is out of reach, not withheld: each announcer we left
-        // for it that did not list it doubles how long we wait for it under the next. One that
-        // lists it and does not send it is waited for as long as ever. Without them, one piece
-        // that only its source held, an announcer nobody near followed, made 93 nodes leave
-        // their announcers 1,510 times in two days, 1,366 of them for what they relayed.
-        let relay_leaves = self.cfg.params.relay_leaves;
-        let ours = |x: &ShortId| relay_leaves || !self.relayed.contains(x);
+        // What the next announcer cannot get either is out of reach, not withheld: each announcer
+        // we left for it that did not list it doubles how long we wait for it under the next
+        // (FEASIBILITY.md §31). One that lists it and does not send it is waited for as long as
+        // ever. Without it, one piece that only its source held, an announcer nobody near
+        // followed, made 93 nodes leave their announcers 1,510 times in two days. What we only
+        // relay counts like what we listen to: a relay that leads a cell of its own is how a
+        // want crosses where two followers of different cells hear only each other, and kept
+        // from leaving, a band L valley delivered 6.5 points less (§32).
         let backoff = self.cfg.params.leave_backoff;
         let patience = |x: &ShortId, d: Millis| match self.progress.get(x) {
             Some(p) if backoff && !own_haves.contains_key(x) => d.saturating_mul(1u64.checked_shl(p.left as u32).unwrap_or(u64::MAX)),
             _ => d,
         };
-        let never_served_for = self.wants.iter().find(|x| ours(x) && claims_or_lacks(x) && self.progress.get(x).map(|p| p.last_progress == 0 && now >= p.wanted_at.max(from).saturating_add(patience(x, w))).unwrap_or(false)).copied();
+        let never_served_for = self.wants.iter().find(|x| claims_or_lacks(x) && self.progress.get(x).map(|p| p.last_progress == 0 && now >= p.wanted_at.max(from).saturating_add(patience(x, w))).unwrap_or(false)).copied();
         let never_served = never_served_for.is_some() || self.pending_ack.iter().any(|(p, since)| own_haves.contains_key(p) && now >= *since + w);
         // Sooner by asking: an announcer that has listed what we wait for since we began to wait,
         // and has not sent one symbol of it for `T_want_min`, the time after which we would ask for
@@ -2208,7 +2206,7 @@ impl Node {
         // probe could follow every answer at once (§25).
         let proven = self.proven.filter(|(a, at)| *a == own && *at >= from).map(|(_, at)| at);
         let waiting = self.wants.iter().find(|x| {
-            ours(x) && claims_or_lacks(x)
+            claims_or_lacks(x)
                 && self.progress.get(x).map(|p| {
                     let start = since(p).max(from);
                     // Listed since we began to wait: what it listed before, it may have dropped since.

@@ -845,8 +845,8 @@ that hear each other. Each kind of pair has its own way across:
   hours, and nobody relayed them (FEASIBILITY.md §28). Once such an ask has gone unmet long
   enough (below), a follower that hears it and can name the object, because a
   collection manifest or root it holds names it (its own, or the menu it keeps, §2), wants the
-  piece or cover itself, fetches it in its own cell like anything it wants (but does not leave its
-  announcer for it, §5.2), keeps it, and answers the next ask with an offer. A set it cannot read names a collection manifest of a channel it
+  piece or cover itself, fetches it in its own cell like anything it wants, keeps it, and answers
+  the next ask with an offer. A set it cannot read names a collection manifest of a channel it
   does not follow: it fetches that manifest first, from its own announcer, which holds the
   manifests of every channel it hears of (§2) and answers only for names it knows, and relays
   the pieces once it can name them; they have waited as long as the asks for the manifest. It
@@ -1153,23 +1153,25 @@ persist and EtherFatsoen shares the channel between them.
   5.8 minutes later. The matrix, the living networks and the networks under attack did not
   change. And an announcer can no longer keep its followers by asking forever for what it never
   gets (ABUSE.md, "election capture").
-  **Out of reach is not withheld.** Two limits keep that rule to what it is for. What a follower
-  only relays for another cell (§4) is no evidence against its own announcer: leaving would not
-  bring the object to the cell that asked, which an excursion does, and it shakes the follower's
-  own cell. And a follower that left an announcer for an object that announcer did not list, and
-  finds that the next one cannot get it either, has learned something of the object, not of the
-  announcers: each announcer it left for that object doubles how long it waits for it under the
-  next, both the 90 minutes and `T_excursion` above, until it holds the object or no longer wants
-  it. An announcer that lists the object and does not send it is waited for as long as ever, and
-  a want it has never had starts at the usual wait, so a false announcer gains nothing from the
-  doubling. In a band L network over 15 km² with 400 channels that nobody followed besides its 24,
-  one piece that only its source held, an announcer nobody near followed, made 93 nodes leave
-  their announcers 1,510 times in two days, 1,366 of them for what they relayed; over 24 worlds 613 role
-  changes after the first hour, 196 with both limits, and 98.9 % of bulletins delivered within
-  their period (95.5 % in the worst world) against 99.2 % (96.6 %). Either limit alone did less:
-  the doubling alone 306 role changes, not leaving for relays alone 492 (FEASIBILITY.md §31).
-  Without the rule at all the many-channel network delivered 99.4 %, but in one of sixteen sparse
-  worlds the eight followers of one channel waited 44 hours for its first pieces.
+  **Out of reach is not withheld.** A follower that left an announcer for an object that
+  announcer did not list, and finds that the next one cannot get it either, has learned something
+  of the object, not of the announcers: each announcer it left for that object doubles how long it
+  waits for it under the next, both the 90 minutes and `T_excursion` above, until it holds the
+  object or no longer wants it. An announcer that lists the object and does not send it is waited
+  for as long as ever, and a want it has never had starts at the usual wait, so a false announcer
+  gains nothing from the doubling. In a band L network over 15 km² with 400 channels that nobody
+  followed besides its 24, one piece that only its source held, an announcer nobody near
+  followed, made 93 nodes leave their announcers 1,510 times in two days; over 24 worlds there
+  were 613 role changes after the first hour, 306 with the doubling, and 98.9 % of bulletins
+  delivered within their period (95.5 % in the worst world) against 99.2 % (96.0 %)
+  (FEASIBILITY.md §31). What a follower only relays for another cell (§4) counts like what it
+  listens to. Most of those leaves were for what the leavers relayed, and not leaving for that
+  took the role changes down to 196; but where two followers of different cells hear only each
+  other, a relay that leads a cell of its own is how a want crosses, and a band L valley 30 km
+  long delivered 79.7 % of its bulletins in their period this way, and 73.2 % with relays kept
+  from leaving (FEASIBILITY.md §32). Without the rule at all the many-channel network
+  delivered 99.4 %, but in one of sixteen sparse worlds the eight followers of one channel waited
+  44 hours for its first pieces.
 - **Challenge on capability, not on circumstance**: a follower more capable than its announcer
   (a station back from a power cut, following the battery node that took over) for
   `challenge_beacons` consecutive beacons becomes a candidate; the incumbent hears the more
@@ -1382,7 +1384,7 @@ simulator has no node with one.
 | `H` | 10 % of `score_max` | yield hysteresis between announcers of equal capability |
 | `challenge_beacons` | 3 | beacons from a less capable announcer before a follower challenges it |
 | step-up order | span in 4 capability bands; in a band, 2/3 by score + 1/3 jitter | span `T_base + T_jitter` from the candidacy, or 7/10 of the meeting dwell after its first fifth on a hopping carrier |
-| `T_excursion` | 40 min | a want without a symbol, and without a grant by our announcer, this long sends a follower to another announcer that has it; a visit without a symbol this long ends, and one that brought none is not repeated for `want_ttl`; with nobody to visit, and one `T_want_min` more, it makes the follower leave its announcer, twice as long for each announcer it already left for that object that did not list it, and never for what it only relays (§5.2); and what was asked for and neither granted nor arriving this long is stuck, and asked for last (§4) |
+| `T_excursion` | 40 min | a want without a symbol, and without a grant by our announcer, this long sends a follower to another announcer that has it; a visit without a symbol this long ends, and one that brought none is not repeated for `want_ttl`; with nobody to visit, and one `T_want_min` more, it makes the follower leave its announcer, twice as long for each announcer it already left for that object that did not list it (§5.2); and what was asked for and neither granted nor arriving this long is stuck, and asked for last (§4) |
 | `rssi_hysteresis` | 6 dB | a follower switches announcer only for a clearly stronger one |
 | `near_rssi` | sensitivity + 17 dB | beacon strength that means "same cell" for the tie-break |
 | `max_passes` | 1 | carousel passes per object unless re-wanted |

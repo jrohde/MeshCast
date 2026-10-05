@@ -344,6 +344,30 @@ impl Engine {
     /// the bulk carrier, and of those how many share none of their control windows in the coming
     /// hour, and how many fewer than nine in ten (PROTOCOL.md §3, §6). Such a pair crosses roots
     /// and announcements only in a window both are in, for a second at least.
+    /// Diagnostic: the parts of the network that carrier `c` joins, every node labelled with the
+    /// smallest index in its part; two nodes are joined when each hears the other.
+    pub fn components(&self, c: usize) -> Vec<usize> {
+        let n = self.nodes.len();
+        let mut part: Vec<usize> = (0..n).collect();
+        fn root(part: &mut Vec<usize>, mut i: usize) -> usize {
+            while part[i] != i {
+                part[i] = part[part[i]];
+                i = part[i];
+            }
+            i
+        }
+        let s = self.phys[c].sensitivity_dbm;
+        for a in 0..n {
+            for b in a + 1..n {
+                if self.rx_dbm(a, b, c) >= s && self.rx_dbm(b, a, c) >= s {
+                    let (ra, rb) = (root(&mut part, a), root(&mut part, b));
+                    part[ra.max(rb)] = ra.min(rb);
+                }
+            }
+        }
+        (0..n).map(|i| root(&mut part, i)).collect()
+    }
+
     pub fn ctrl_only_pairs(&self, ctrl: usize, bulk: usize) -> (usize, usize, usize) {
         let windows = |i: usize| {
             let n = &self.nodes[i];
