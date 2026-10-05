@@ -3824,7 +3824,8 @@ Each paired with before world by world, band L, 24 worlds at 400 quiet channels 
   fewer frames (se 1.1) at 400 and 5 % (2.1) at 1000, and the worst world at 96.6 % and 94.1 %
   against 95.5 % and 90.3 %. Delivery gained 0.30 points (se 0.15) at 400. Against the doubling
   alone, the relays gave 109 fewer role changes at 400 (se 45) and 163 at 1000 (69). Taken
-  (PROTOCOL.md §5.2, "Out of reach is not withheld").
+  (PROTOCOL.md §5.2, "Out of reach is not withheld"); the relay limit was undone in §32, where it
+  cost a long, thin network more than it saved here.
 - *No leaving for what it lacks.* With the rule of §25 off, a follower left only an announcer that
   listed what it wanted and did not send it. With many channels that did best of all; but the sparse
   network without quiet channels lost: over sixteen worlds the worst delivered 96.5 % against
@@ -3884,5 +3885,93 @@ up announcing; now it never does. Waiting as long each time, the two listeners l
   listened, so it did not fetch it, and so did not announce it, and a follower further down the
   line never learned of the channel (§30.3 serves only what a cell listens to). The networks
   measured here are dense enough that some announcer that holds a root is always within reach of
-  the control carrier; a sparse line is not.
+  the control carrier; a sparse line is not. Its cause is in §32.4.
 - **Band L at 1000 channels** still delivers 97.8 %, against 99.9 % without quiet channels.
+
+## 32. A valley: relays that lead
+
+The validation of §31 had no long, thin network. Villages along a road or a valley are one: the
+network of §30.1 without quiet channels (100 nodes, 15 km², two stations, 24 channels of which each
+node follows two, 48 hours), but over a strip 500 metres wide and 30 kilometres long (sim/README.md,
+`--strip-m`).
+
+### 32.1 What the strip costs
+
+| | Square | Strip 1 km wide | Strip 500 m wide |
+|---|---|---|---|
+| Band O: delivered (worst world) | 99.7 % (99.4) | 99.7 % (98.9) | 98.7 % (96.5) |
+| Band L: delivered (worst world) | 99.9 % (99.2) | 98.4 % (96.6) | 73.2 % (37.0) |
+| ... role changes after the first hour | 35 | 546 | 3,090 |
+
+§31's protocol, 24 worlds each, the square sixteen. Band O held; band L in the narrow strip did not.
+Part of that loss no protocol can avoid. Band L reaches about a kilometre, and with three or four
+nodes per kilometre of strip, gaps open: the simulator now reports the parts of the network its bulk
+carrier joins, and the share of follower-publication pairs whose follower is in its source's part
+(sim/README.md, `bulk carrier`). The narrow strip split into two or more parts in 10 of 24 worlds,
+and 90.1 % of the pairs had their source within reach at all (50.2 % in the worst world). Of what
+could be delivered, 81.2 % was; in the square every pair is within reach, and 99.9 % was delivered.
+
+### 32.2 Where it stops
+
+The simulator also traces how far each publication has spread along the strip, hour by hour
+(`MESHCAST_TRACE_SPREAD`). In a world the bulk carrier joined whole, a bulletin travelled about a
+kilometre an hour: its holders spanned 3.7 km after an hour and 18 km after 23 hours, on average over
+the publications of the day. One published at the west end reached 14.8 km within four hours and no
+further. There two followers of different cells, 1.04 km apart at the edge of band L's reach, heard
+only each other: neither heard the other's announcer. Content crosses from cell to cell through a
+node that hears another cell's announcer: it relays what that cell asks for, uploads to it, or visits
+it (PROTOCOL.md §4). Between those two nobody did.
+
+### 32.3 Relays that lead
+
+Over the first eight worlds, band L in the narrow strip:
+
+| | Delivered (worst world) | Role changes after the first hour |
+|---|---|---|
+| §31 | 73.4 % (37.0) | 2,986 |
+| No relays | 10.4 % (5.3) | 5,359 |
+| Relays only for channels a node follows (§27) | 13.8 % (7.3) | 4,241 |
+| No leaving for what an announcer lacks (§25) | 32.4 % (15.6) | 139 |
+| Relays leave as before §31 | 78.9 % (41.3) | 6,098 |
+
+Relays and leaves carry the content along the strip. A relay that leaves its announcer for what it
+cannot get, and leads a cell of its own, is heard as an announcer by the follower across such a bridge,
+which then relays its asks: the want crosses. Kept from leaving by §31, relays cost the strip 5.5
+points over these eight worlds (se 1.0), 0.6 to 9.3 in each.
+
+Two ways to keep both were measured over those eight worlds. A relay leaves only at a bridge, where
+it hears a node that follows an announcer it does not hear itself, and, in a tighter form, that node
+does not hear its announcer either (gossip names the announcers a node hears): the strip delivered
+79.2 % and 78.7 %, the tight form with 1,536 fewer role changes (se 156) than relays leaving everywhere;
+but at 400 quiet channels both had about as many role changes as the doubling alone (302 and 278
+against 306): in a dense network such edges are everywhere. Every leave for what an announcer lacks
+only at a bridge, relays or not: the strip delivered 3.0 points less than with the doubling alone (se
+1.1). Neither was taken. Relays leave like any follower, and the doubling of §31 stays: over 24
+worlds the narrow strip in band L delivered 79.7 % (41.3) against 73.2 % (37.0), 6.5 points more (se
+1.0), with twice the role changes (6,116 against 3,090) and 11 % more frames; of what could be delivered
+at all, 88.5 % against 81.2 %. The strip a kilometre wide gained 0.7 points in band L (se 0.17), 99.1
+% (98.1); band O was as before in both, within 0.1 points (se 0.2).
+
+What §31 gained from keeping relays: 109 fewer role changes per world at 400 quiet channels (se 45)
+and 163 at 1000 (se 69), against the doubling alone, with delivery the same.
+
+### 32.4 A menu that stops after one hop
+
+A root travels with its announcement on the control carrier, unless someone sent it there in the last
+`T_want_min` (PROTOCOL.md §2). The node that just received a pushed root announces it at its next
+round, within that time, and then marked the root as pushed for good without pushing it: a root crossed
+one control hop from whoever pushed it first. In a test line of cells up to eight kilometres apart,
+the root of a channel stopped at the first announcer that held it, and a follower further along never
+learned of the channel (§31.5). In the strip, roots also travel through the cells: followers held
+the newest root of a channel they follow in 94.9 % (band L) and 95.0 % (band O) of the hours (`menu
+of followers`), against 95.8 % in the square. So it costs nothing measurable where the bulk carrier
+joins the network, and is left open.
+
+### 32.5 Validation
+
+The protocol is now §30's with the doubling of §31, and that alone went through the whole validation
+of §31.4 against §30: sparse band L with one clock and with real clocks delivered as before to the
+hundredth of a point, and under carry budgets within 0.11 points (se 0.14); at 400 quiet channels
+0.26 points more (se 0.20) with 307 fewer role changes (se 141), at 1000 0.11 less (se 0.23) with 304
+fewer (se 173); the matrix, false announcers, living networks, collections and the size sweep were
+frame for frame the same. The narrow strip joins the validation, in both bands.
