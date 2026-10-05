@@ -222,13 +222,22 @@ Rules:
   wants the channel's root manifest and all its collection manifests, which are small and tell it
   what another cell asks for (§4), and the pieces and covers of what it follows; of the other
   collections it fetches only what it relays (§4).
-- **An announcer holds the menu and fetches on request.** It serves every channel it hears of,
-  and keeps the root and every collection manifest of each, so that it can name every piece and
-  cover a follower may ask for. Of pieces and covers it fetches what a follower asks for (§4), and
-  keeps what it holds while it announces, within its carry budget (§4). It does not fetch a
-  channel because it heard of it: once nodes relay for any channel (§4), content reaches the cells
-  whose listeners ask for it, and announcers that fetched everything they heard of sent more
-  frames for the same delivery (FEASIBILITY.md §27).
+- **An announcer serves what its cell listens to and publishes, and fetches on request.** It
+  serves a channel while a follower of its cell has asked for anything of it within `cell_keep`
+  (draft 24 h) or announced it (its own publication, or a correction, below), and the channels it
+  follows itself: it keeps the channel's root and every collection manifest current, wants a newer
+  root it hears announced, and passes new manifests once unasked. Of any other channel it keeps,
+  like every node, what comes by (below), and answers an ask for what it holds. Of pieces and
+  covers it fetches what a follower asks for (§4), and keeps what it holds while it announces,
+  within its carry budget (§4). Serving every channel it heard of, every announcer wanted and
+  passed the manifests of all of them, and each new announcer passed them all again: with 400
+  channels nobody followed beside the 24 that were, a sparse band L network delivered 88.8 % of
+  its bulletins over 24 worlds, one of them 8.5 %, instead of 99.8 %, with twice the frames and 44
+  times the role changes; serving its cell's, and announcing new roots first (§3.4), 98.9 %
+  (FEASIBILITY.md §30). It does not fetch a channel because it heard of it: once
+  nodes relay for any channel (§4), content reaches the cells whose listeners ask for it, and
+  announcers that fetched everything they heard of sent more frames for the same delivery
+  (FEASIBILITY.md §27).
 - **Every node keeps the menu it hears.** Of a channel it neither follows nor serves, a node
   collects and keeps the root and collection manifests that come by, announced and pushed on the
   control carrier or passed by its announcer when new, without asking for them, and within its
@@ -277,7 +286,9 @@ Rules:
 - **Followers keep their announcer current.** An announcer announces its manifests in ascending
   channel order: all of them in one frame, flagged as its whole list, when they fit, otherwise
   from a cursor that steps one entry less than a frame holds, so that any two neighbours on the
-  list share a frame. A follower that holds the adopted manifest of a channel it follows or
+  list share a frame; when they do not fit, in the round after it adopted a root, the roots it
+  adopted last instead (§3.4), which prove nothing about a channel they leave out. A follower that holds the adopted
+  manifest of a channel it follows or
   publishes, and hears its own announcer announce an older seq of it or leave it out (absent from
   a whole list, or between two neighbours), announces its own: after a random wait of up to
   `T_offer`, not if it hears anyone announce that seq or a newer one first, not while its
@@ -435,10 +446,20 @@ silence.
 
 ### 3.4 `MANIFEST_ANNOUNCE`
 
-Flags bit 0: the entries are the sender's whole list (§2). Then `node_id` (4), a count (1) and up
-to 8 entries of `channel_id` (8) + `manifest_short_id` (8) + `seq` (4) + `len` (4), in ascending
-channel order and wrapping around at most once, + CRC: 201 bytes when full. An announcer that
-knows no manifest sends an empty whole list, so that its followers tell it theirs.
+Flags bit 0: the entries are the sender's whole list (§2). Flags bit 1: the entries are a
+selection, the roots the sender adopted last, newest first, from which a receiver can tell
+nothing about a channel missing from them. Then `node_id` (4), a count (1) and up to 8 entries of
+`channel_id` (8) + `manifest_short_id` (8) + `seq` (4) + `len` (4), otherwise in ascending channel
+order and wrapping around at most once, + CRC: 201 bytes when full. An announcer that knows no
+manifest sends an empty whole list, so that its followers tell it theirs. An announcer whose list
+does not fit one frame sends, in the round after it adopted a root but never in two rounds
+running, the roots it adopted last instead of the next stretch in channel order. In channel order
+alone, the new root of one channel among four hundred waited hours for its turn, and the cells
+that followed it with it: over eight worlds a sparse band L network delivered 96.8 % of its
+bulletins instead of 99.1 %. Every other round regardless, the stretches in channel order by
+which followers tell what their announcer lacks (§2) came half as often, and with 24 channels and
+real clocks the network delivered 0.04 points less than in channel order alone; in the round after
+a new root only, as much (FEASIBILITY.md §30).
 
 ### 3.5 `NACK` (v0 repair)
 
@@ -1354,6 +1375,7 @@ simulator has no node with one.
 | `T_relay_wait` | 10 min | what a node expects of other cells' asks before it has heard any: met half the time within it, never after (§4) |
 | `relay_risk` | 5 % | a node relays another cell's ask once fewer than this share of the asks of its age were met by others before twice that age, as it learned from the asks it heard (§4) |
 | `carry_budget` | per device | bytes a node keeps for others, beyond what it listens to; what has not been of use for `want_ttl` gives way, the menu first, then relays another cell's announcer lists, then the least recently used, and a full budget takes on no more relays (§4). The simulator's default is no limit |
+| `cell_keep` | 24 h | an announcer serves a channel this long after a follower of its cell last asked for anything of it (§2) |
 | `T_gossip`, `T_gossip_min` | 5 min, 30 s | announcer/source gossip cadence and its floor |
 | `control_reserve` | 10 % | share of the band budget kept free for control frames |
 | own share | `min(regulatory, occ_high_own / (announcers heard + 1))` | content pacing ceiling; derived, not configured |
@@ -1450,13 +1472,25 @@ simulator has no node with one.
     manifest lists, the earlier place first (§2, §4), and listeners in a band O town could start
     playing a programme 7.9 minutes sooner than when it went by size (FEASIBILITY.md §19). Open:
     the `integrity` slot of a piece (reserved, §1).
-14. **A menu that scales.** An announcer holds the root and every collection manifest of every
-    channel it hears of (§2), so that its followers can ask for anything and other cells' asks can
-    be relayed (§4). With a few dozen channels that is a few kilobytes; with tens of thousands of
-    providers of millions of pieces it is neither storable on a small node nor cheap to keep
-    current over the air, since every new episode changes a collection manifest and a root.
-    Candidates, to be specified here before they are simulated: directory channels (signed
-    channels whose content is a catalogue of other channels, followed like any channel, with a
-    default one known to the firmware and others added by QR code), roots that name collections
-    by a Merkle root so that a node can hold part of a catalogue and verify what it holds, deltas
-    between successive manifests, and compression of titles (hashes do not compress).
+14. **A menu that scales: how everyone learns what is on the mesh.** Partly settled in §2 and
+    §3.4: an announcer serves what its cell listens to and publishes, not every channel it hears
+    of, and announces the roots it adopted last first. With 400 channels nobody followed beside
+    the 24 that were, a sparse band L network delivered 98.9 % of its bulletins over 24 worlds,
+    against 99.8 % without them and 88.8 % when every announcer served everything; with 1000,
+    97.5 % against 59.3 % (FEASIBILITY.md §30). It still delivers less than without them, and every
+    node still keeps every root that comes by. What is left is a direction, to be specified here
+    before it is simulated, in three layers (sources in FEASIBILITY.md §30 and PRIOR-ART.md):
+    - *What a node follows* stays on the device and is never sent: receivers do not transmit.
+    - *What is new* on what a cell follows: small heads (channel, seq, root id prefix) repeated in
+      tiers under a fixed share of the control budget, what the cell follows and what changed
+      lately often, the rest seldom, as SAP (RFC 2974) and DVB service information do. Between
+      announcers, reconciling sets (rateless IBLT, PinSketch) instead of rotating lists, if
+      rotation proves too slow.
+    - *What exists*: no directory held by the project and no project key. A provider describes
+      its channel when it publishes, in its signed root and in a fixed taxonomy (kind: music,
+      podcast, radio, speech; then genre, language and the like), and a node's guide is the merge
+      of the self-descriptions its neighbours carry, ordered by that taxonomy and by how widely a
+      channel is followed. Nobody can edit another's description; a listener can order and hide
+      locally, and a curated list is a channel like any other, found the same way or by QR code.
+    Open: the taxonomy and its encoding, the heads budget at tens of thousands of channels, and
+    how far popularity can rank without inviting a flood of self-promoting channels (ABUSE.md).

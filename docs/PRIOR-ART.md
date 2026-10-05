@@ -125,6 +125,58 @@ synchronised TDMA slots, transmitting in every third one, and accepts the latenc
 over several hops. Both carry speech between people in near real time; MeshCast carries
 programmes to listeners ahead of time, which is why it can use the sub-GHz bands at all.
 
+## Discovery: what exists and what is new
+
+How everyone learns what is on the mesh (PROTOCOL.md §9 Q14). These shaped the direction there;
+FEASIBILITY.md §30 has the measurements that led to it.
+
+**SAP** (RFC 2974, Session Announcement Protocol). Multicast sessions announced on a shared
+channel with a total bandwidth limit (4000 bit/s by default) and an interval that grows with the
+number of announcements, `max(300 s, 8 × N × size / limit)`. The model for a fixed metadata budget
+in which more channels mean slower repetition, not more airtime.
+
+**DVB service information** (ETSI TS 101 211). Present/following tables of the own transport
+stream about every 2 s, of other streams about every 10 s, schedules every 10 to 300 s: tiered
+repetition by how near and how soon. The model for announcing what a cell follows and what
+changed lately more often than the rest (PROTOCOL.md §3.4).
+
+**mDNS** (RFC 6762). Known-answer and duplicate-answer suppression: a responder stays silent when
+the answer was already heard. MeshCast's offers and corrections follow the same rule.
+
+**PodNet** (Lenders, Karlsson, May, IEEE SECON 2007). Podcast distribution between phones that
+meet: peers exchange Bloom filters of the channels they offer, and among the caching strategies
+studied, uniform caching of channels nobody nearby subscribes to did best overall. Close kin to the
+carry budget (PROTOCOL.md §4).
+
+**PSync** (Zhang, Lehman, Wang, IEEE INFOCOM 2017) and **State Vector Sync** (NDN). A producer
+publishes an invertible Bloom filter of its latest names and a consumer a Bloom filter of its
+subscriptions; SVS spreads a vector of latest sequence numbers, and partial SVS sends the recent
+and a random part of it in about a third of the bytes. Close to "what is new", but both have
+consumers transmit; MeshCast receivers do not.
+
+**Rateless IBLT** (Yang, Gilad, Alizadeh, ACM SIGCOMM 2024, arXiv 2402.02668). One stream of coded
+symbols serves every receiver, and each decodes its own difference after 1.35 to 1.72 symbols per
+differing item. Set reconciliation that fits broadcast: the candidate if announcers ever need to
+reconcile their menus instead of rotating them.
+
+**PinSketch / Minisketch** (BIP 330). Set reconciliation in about 8 bytes per difference for
+64-bit items, decoding quadratic in the difference: fine on a PC, seconds on an ESP32 for a
+difference of a hundred (estimate). **Range-based set reconciliation** (Meyer, arXiv 2212.13567;
+Negentropy, Nostr NIP-77) needs a few interactive rounds, which a silent receiver cannot take.
+
+**Binary fuse filters** (Graf, Lemire, arXiv 2201.01174). About 9 bits per item at 0.39 % false
+positives; a candidate for a compact summary a follower tests its subscriptions against.
+
+**Arweave and the Interplanetary Network Indexer.** Storage that is permanent and
+content-addressed, with the index of what exists left outside the protocol: in both, discovery
+ended at a few central indexers and gateways. The lesson for MeshCast is to keep "what exists" in
+the protocol, as a merge of what neighbours carry, rather than leave it to whoever runs an index.
+
+**Swarm** (postage stamps, neighbourhood responsibility by address prefix). Who keeps what follows
+from the content address, with no coordinator. An option for spreading the long tail; proof of
+work is not: a 20-bit hashcash takes an ESP32-S3 about 2.5 s and a current graphics card about
+50 µs (estimates), so it stops the honest and not the flooder.
+
 ## What is genuinely new here
 
 Not much, and that is the point. The combination is: FLUTE-style carousel delivery, Nostr-style
