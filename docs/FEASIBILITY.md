@@ -3975,3 +3975,63 @@ hundredth of a point, and under carry budgets within 0.11 points (se 0.14); at 4
 0.26 points more (se 0.20) with 307 fewer role changes (se 141), at 1000 0.11 less (se 0.23) with 304
 fewer (se 173); the matrix, false announcers, living networks, collections and the size sweep were
 frame for frame the same. The narrow strip joins the validation, in both bands.
+
+## 33. Where the chain breaks
+
+§32 left band L in the narrow strip delivering 88.5 % of what its bulk carrier could reach at all.
+One world the bulk carrier joined whole (world 16, 75.5 % delivered) was traced with every node's
+role each hour and every pair of nodes that hear each other (sim/README.md,
+`MESHCAST_TRACE_SPREAD`).
+
+### 33.1 How cells are joined
+
+Two neighbouring cells, a node of one hearing a node of the other, are joined in one of three
+ways. Through a gateway: a follower of one hears the other's announcer, and relays, uploads or
+visits (PROTOCOL.md §4). Through two followers alone, each hearing only the other. Or through the
+two announcers alone (PROTOCOL.md §9, question 11). In world 16, each hour, 37 to 56 pairs of
+neighbouring cells were joined through a gateway, 7 to 18 through two followers alone and 0 to 3
+through their announcers alone. Through gateways alone, all pairs of nodes were in one part of the
+network in 5 of 47 hours, about 58 % of them in most others and under 40 % in 8; through any
+link, all of them. What separates the two is what crossing at a gateway cannot carry. Leaving to lead
+(§32.3) turns some of it into gateways for a while.
+
+A bulletin published at the west end reached 19.9 km and stopped. Beyond it, node 50 at 21.1 km
+joined the two halves: mostly an announcer itself, heard by a follower of the cell to the west and
+by the announcer of the cell to the east. That announcer's ask reached node 50, but an announcer
+does not relay, and the follower to the west did not hear it.
+
+### 33.2 A relay that leads still asks for listeners
+
+An announcer marks the asks it makes for listeners, its own or its followers' (PROTOCOL.md §3.3,
+§4); only a marked ask is relayed. A relay that left its announcer and leads a cell of its own
+(§32.3) asked for what it relayed unmarked, since neither it nor a follower of its listened to it,
+and the chain of relays broke at the bridge it had just formed. It now marks what it relays as
+well: that is for listeners too, elsewhere.
+
+| Band L, 24 worlds | Before | Marked |
+|---|---|---|
+| Narrow strip: delivered (worst world) | 79.7 % (41.3) | 81.7 % (44.1) |
+| ... difference (se) | | +2.0 (0.6) |
+
+The narrow strip in band O delivered 0.35 points more (se 0.22) over eight worlds, the strip a
+kilometre wide in band L 0.15 less (se 0.14); 400 quiet channels 0.10 more (se 0.07), 1000
+0.03 more (se 0.05); the square frame for frame the same.
+
+### 33.3 The whole validation
+
+Against §32: sparse band L the same frame for frame with one clock, 0.01 points less with real
+clocks over eight worlds (se 0.01) and 0.004 more over 24 others (se 0.004); under carry budgets
+within 0.01 points; with 48 channels all followed as much, with 96 0.09 less (se 0.07); with 100
+quiet channels 0.04 less (se 0.04). Band O the same throughout. The scenario matrix, false
+announcers, living networks and the size sweep frame for frame the same. Where listeners pick
+single collections, every listener still had all it picked, playback started within half a minute
+of before and frames were within 0.7 %.
+
+### 33.4 Open
+
+- **Two cells joined only by two followers, or only by their announcers.** What crosses there is
+  what leaving to lead makes of it, at twice the role changes (§32.3). Two followers that relay
+  for each other, the one asking the other by name and handing on what it gets to its own
+  announcer, would carry it; so would an announcer that uploads to another as a last resort
+  (PROTOCOL.md §9, question 11). The narrow strip in band L delivers 81.7 % against 90.1 % within
+  reach.

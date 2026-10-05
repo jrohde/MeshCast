@@ -26,7 +26,9 @@ publish every H hours, spread over that span (0: never): the rest of a large men
 with the stations spread along it: villages along a road or a valley (`docs/FEASIBILITY.md` §32).
 `dynamics` then also reports, with `MESHCAST_TRACE_SPREAD=1`, each hour for each publication in
 its period how far it has spread: its source, the span its holders cover, how many nodes want it
-and which followers hold it, all in kilometres along the strip.
+and which followers hold it, all in kilometres along the strip; and, to tell how cells are joined,
+every node's position (`POS`), every pair of nodes that hear each other on the bulk carrier
+(`LINK`) at the start, and each hour every node's role and announcer (`ROLES`).
 
 `--bulk` selects the content carrier: `gfsk-o` (EU band O, 500 mW, 10 % duty cycle), `gfsk-l`
 (EU band L, 25 mW, polite access hopping over 15 channels), `esp-now` (2.4 GHz long-range mode),
@@ -147,7 +149,8 @@ relays go (`docs/FEASIBILITY.md` §28):
   its announcer, `UC` upload frame collided there (with the other frame and its sender, and the
   phase count each uploader believed against the announcer's; the line does not name the
   object), `UH` upload frame lost because its announcer was sending, `BO` other symbol of an
-  object an announcer wants, `MA` manifest announcement, `OC` object completed, `OX` an offer
+  object an announcer wants, `MA` manifest announcement, `OC` object completed, `RW` another cell's
+  ask taken on as a relay, `OX` an offer
   reaching (`ok`) or not reaching (`col` collided, with the interferer; `hd` the announcer was
   sending) an announcer that wants what it offers, and at the end
   `MISSING` for every object a follower lacks (with the announcers it hears and who listed the
@@ -186,6 +189,8 @@ relays go (`docs/FEASIBILITY.md` §28):
   are (nodes that hear, and are heard by, both the announcer and a holder) and how many of them
   know it, and every holder with its role, its announcer, whether the announcer hears it, and how
   strongly the follower does.
+- `MESHCAST_MARK_RELAYED=0` makes an announcer leave what it relays out of its asks for listeners,
+  as before `docs/FEASIBILITY.md` §33.
 - `MESHCAST_CARRY_BUDGET_KB=256` gives every node a carry budget, in kB (0: no relays);
   `MESHCAST_T_RELAY_WAIT_S` overrides `T_relay_wait`. `MESHCAST_PROACTIVE=1` makes announcers fetch
   every piece of every channel they hear of, and `MESHCAST_RELAY_ANY=0` makes nodes relay only for

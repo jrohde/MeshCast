@@ -418,7 +418,7 @@ it, and a want for such an object was granted and answered over and over; FEASIB
 | 14 | 6 × n_heard | other announcers this node hears: id (4), colour (1), colours (1); the conflict report (§5) |
 | … | 8 × n_have | short ids the node has completely |
 | … | 18 × n_have_sets | have sets: manifest short id (8), first piece (2), bitmap (8) |
-| … | 13 × n_want | wants: short id (8), granted holder (4; 0 = open ask), phase byte (1): the upload phase of the grant in its low four bits (§4), and in bit 7 an announcer's mark that it, or one of its own followers, listens to the object |
+| … | 13 × n_want | wants: short id (8), granted holder (4; 0 = open ask), phase byte (1): the upload phase of the grant in its low four bits (§4), and in bit 7 an announcer's mark that it, or one of its own followers, listens to the object, or that it relays it for listeners elsewhere |
 | … | 23 × n_sets | want sets: manifest short id (8), first piece (2), bitmap (8), granted holder (4; 0 = open ask), phase byte (1) as for a want |
 | … | 2 | CRC-16 |
 
@@ -842,7 +842,10 @@ that hear each other. Each kind of pair has its own way across:
   An announcer marks in its asks what its own followers asked for, and what it listens to itself
   (§3.3): an announcer is a listener too. Marking only its followers' asks, an announcer that
   followed a channel nobody else in its cell followed asked for its bulletins unmarked for ten
-  hours, and nobody relayed them (FEASIBILITY.md §28). Once such an ask has gone unmet long
+  hours, and nobody relayed them (FEASIBILITY.md §28). It marks what it relays as well: that is
+  for listeners too, elsewhere. A relay that leads a cell of its own (§5.2) asked for it unmarked,
+  the chain of relays broke there, and a band L valley 30 km long delivered 79.7 % of its
+  bulletins in their period against 81.7 % with the mark (FEASIBILITY.md §33). Once such an ask has gone unmet long
   enough (below), a follower that hears it and can name the object, because a
   collection manifest or root it holds names it (its own, or the menu it keeps, §2), wants the
   piece or cover itself, fetches it in its own cell like anything it wants, keeps it, and answers
@@ -1466,8 +1469,9 @@ simulator has no node with one.
     across were named one by one, by the kind of pair that joins two cells, and each got a rule
     (§4, "Content crosses wherever a link does"; FEASIBILITY.md §12). Still open: two cells joined
     only by their two announcers hearing each other. An announcer that uploaded to another
-    announcer as a last resort would close it, at the cost of leaving its own channel; no
-    simulated world has needed it yet.
+    announcer as a last resort would close it, at the cost of leaving its own channel. A band L
+    valley has such joins, 0 to 3 an hour among about 60 joins of neighbouring cells, and more
+    often two cells joined only by two followers that hear each other (FEASIBILITY.md §33).
 12. *(resolved: renditions, on demand and for the last hop; §1.2.)* A device that cannot run the
     neural decoder, such as a LilyGo T-Deck Pro, can play Opus but not SNAC. Carrying Opus
     alongside every programme was measured: with half the programmes also as Opus the network

@@ -2877,8 +2877,12 @@ impl Node {
             // An announcer marks what its own followers asked for, and what it listens to itself:
             // an ask for listeners, which a follower of another cell may relay, rather than one to
             // fill its library (§3.3). One that followed a channel nobody else in its cell followed
-            // asked for it unmarked, and nobody relayed it (FEASIBILITY.md §28).
-            let listened = announcing && (mine.contains(&id) || self.carriers.iter().filter_map(|c| c.carousel.as_ref()).any(|k| k.wanted_by(&id) > 0));
+            // asked for it unmarked, and nobody relayed it (FEASIBILITY.md §28). And what it relays:
+            // that is for listeners too, elsewhere. A relay that led a cell of its own asked for it
+            // unmarked, the chain of relays broke there, and a band L valley delivered 2 points less
+            // (§33).
+            let relays = self.cfg.params.mark_relayed && self.relayed.contains(&id);
+            let listened = announcing && (mine.contains(&id) || relays || self.carriers.iter().filter_map(|c| c.carousel.as_ref()).any(|k| k.wanted_by(&id) > 0));
             let phase = phase | if listened { ASK_LISTENED } else { 0 };
             match index.get(&id) {
                 Some((m, k)) => groups.entry((*m, grant, phase)).or_default().push(*k),

@@ -176,6 +176,9 @@ pub struct Params {
     /// announcer it left for it that did not list it (PROTOCOL.md §5.2). Off: as long each time;
     /// kept to measure against.
     pub leave_backoff: bool,
+    /// An announcer marks what it relays as asked for listeners (PROTOCOL.md §4). Off: only what it
+    /// or its followers listen to; kept to measure against.
+    pub mark_relayed: bool,
     /// An announcer fetches every piece of every channel it hears of, asked for or not. Off: it
     /// fetches what a follower asks for (PROTOCOL.md §2, FEASIBILITY.md §27); kept to measure against.
     pub proactive: bool,
@@ -250,6 +253,7 @@ impl Default for Params {
             announce_recent: true,
             leave_lacking: true,
             leave_backoff: true,
+            mark_relayed: true,
             proactive: false,
             relay_unfollowed: true,
             t_relay_wait_ms: 600_000,
