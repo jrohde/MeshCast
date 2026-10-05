@@ -3574,3 +3574,186 @@ Against §28, with all of 29.2 and 29.3; "one clock" and "real clocks" as in §2
   3 minutes later (29.4). An announcer that also told its time once a period outside the window,
   where only nodes that know none listen, would let `T_acquire` be a period again, for a frame a
   minute per announcer where the carrier hops.
+
+## 30. A menu that scales: serving what the cell listens to
+
+Every announcer kept the root and every collection manifest of every channel it heard of current,
+and passed each new one once unasked (§27): that is how another cell's ask could be named and
+relayed. With 24 channels that cost a few thousand frames over two days. PROTOCOL.md §9 Q14 asked
+what it costs when there are many more channels than anyone nearby follows: how does everyone
+learn what is on the mesh without the menu eating the airtime it is a menu of?
+
+### 30.1 Many channels nobody follows
+
+§27's sparse world (100 nodes over 15 km², two stations, 24 channels of which each node follows
+two, a 22 kB bulletin a day per channel, subscriptions changing every 6 hours, 48 hours), with
+100, 400 and 1000 more channels that nobody follows, each publishing once a week, published by the
+same nodes (sim/README.md, `--quiet-channels`). Eight worlds per band, 24 for band L at 400:
+
+| Quiet channels | 0 | 100 | 400 | 1000 |
+|---|---|---|---|---|
+| Band L: delivered (worst world) | 99.8 % (99.2) | 98.9 % (96.0) | 88.8 % (8.5) | 59.3 % (5.0) |
+| ... frames | 621,704 | 842,033 | 1,297,405 | 1,594,810 |
+| ... role changes after the first hour | 74 | 1,032 | 3,260 | 4,195 |
+| ... asks met at the announcer, slowest tenth after | 31.7 min | 50.5 | 77.8 | 170.2 |
+| Band O: delivered (worst world) | 99.8 % (99.6) | 99.7 % (99.0) | 99.6 % (98.5) | 98.9 % (98.7) |
+| ... frames | 165,967 | 234,497 | 253,970 | 442,245 |
+| ... role changes after the first hour | 3 | 3 | 16 | 541 |
+
+Band L, with 13 to 16 announcers, broke down: at 400 one world in 24 delivered 8.5 % and another
+64 %. Band O, with 3 to 6 over larger cells, held until a thousand. More channels that are all
+followed cost less: with 48 and 96 channels and nothing quiet, band L delivered 99.6 % (99.3) and
+98.3 % (97.3), with 499 and 1,381 role changes after the first hour.
+
+### 30.2 Where the airtime went
+
+In the first band L world with 400 quiet channels, announcers sent 241,200 bulk frames of roots
+and 276,663 of collection manifests, against 1,132 and 2,291 without them: 64 % of their bulk
+frames, where pieces had been 98 %. Each announcer kept every channel current, and each new
+announcer passed every manifest it held once more. The menu took the airtime the followers' uploads
+needed, and followers left an announcer that named no uploader for what they lacked (§25): 1,206
+times per world with 400 quiet channels, 333 with 100, 21 without. Every role change made a new
+announcer that passed the menu again. Band O has fewer, larger cells, so fewer announcers passed
+it.
+
+### 30.3 Serving what the cell listens to
+
+An announcer now serves a channel (keeps it current, passes its new manifests unasked) while a
+follower of its cell has asked for anything of it within `cell_keep`, 24 hours, or announced it,
+and the channels it follows itself (PROTOCOL.md §2). Of every other channel it keeps what comes by,
+as every node does, and answers an ask for what it holds. A follower's announcement counts because a
+source announces its own publication to its announcer: without it, a channel published where
+nobody followed it, which in the sparse world is most of them, was not fetched by the source's own
+announcer, and left the cell only on the control carrier. Step by step, over the same eight worlds:
+
+| Band L, 400 quiet channels | Every channel heard of | Asked for | ... or announced by a follower | ... and newest first (30.4) |
+|---|---|---|---|---|
+| Delivered (worst world) | 94.6 % (90.9) | 97.2 % (92.8) | 96.8 % (95.8) | 99.1 % (95.5) |
+| Frames | 1,342,958 | 728,943 | 758,742 | 746,896 |
+| Role changes after the first hour | 3,298 | 1,264 | 1,559 | 884 |
+| Asks met at the announcer, slowest tenth after | 50.6 min | 19.6 | 22.9 | 21.9 |
+| Nodes holding a channel's newest root, hourly mean | 95.8 % | 87.4 % | 88.7 % | 91.3 % |
+
+In the first world, announcers sent 1,253 root frames and 2,532 of collection manifests when
+serving what was asked for, 6,517 and 9,048 when also serving what a follower announced, against
+241,200 and 276,663 before.
+
+### 30.4 Newest first
+
+Serving its cell's channels, an announcer still announced every root it holds in channel order,
+seven new entries a round (PROTOCOL.md §2). With about 370 roots that is 53 rounds of 5 minutes,
+4.4 hours, before a given root comes round again. Traced in one world: a channel published in a
+cell where nobody followed it was first asked for 19.5 hours after publication, because its new
+root waited its turn in each cell on the way to its followers. An announcer whose list does not
+fit one frame now announces, in the round after it adopted a root, the eight roots it adopted
+last, newest first, flagged so that nobody concludes from it that a channel left out is gone
+(PROTOCOL.md §3.4); never two rounds running, so that the rotation goes on.
+
+Every other round regardless was tried first. Over the first eight worlds at 400 it delivered
+99.6 % (99.1), over 24 worlds 99.0 % (94.9), as much as the rule above (98.9 %, worst 95.5;
+difference −0.04 points, standard error 0.27). But it costs where nothing is new: followers tell
+that their announcer lacks a root from the stretches in channel order (PROTOCOL.md §2), which now
+came half as often. In the sparse world with 24 channels and real clocks, over 24 more worlds and
+against neither rule: every other round alone delivered 0.042 points less (standard error 0.019),
+with 41 role changes after the first hour against 35; with the cell rule, 0.042 less (0.015) and
+55. The cell rule alone, 0.067 less (0.046) and 48. The cell rule with newest first in the round
+after a new root only: as much (+0.000, standard error 0.017), and 39.
+
+### 30.5 Across the number of channels
+
+| | 0 quiet: before | now | 100: before | now | 400: before | now | 1000: before | now |
+|---|---|---|---|---|---|---|---|---|
+| Band L: delivered (worst world) | 99.8 % (99.2) | 99.9 % (99.2) | 98.9 % (96.0) | 99.9 % (99.5) | 88.8 % (8.5) | 98.9 % (95.5) | 59.3 % (5.0) | 97.5 % (90.3) |
+| ... frames | 627,219 | 616,282 | 842,033 | 677,125 | 1,297,405 | 726,896 | 1,594,810 | 842,519 |
+| ... role changes after the first hour | 69 | 43 | 1,032 | 118 | 3,260 | 613 | 4,195 | 870 |
+| Band O: delivered (worst world) | 99.7 % (99.5) | 99.7 % (99.4) | 99.7 % (99.0) | 99.8 % (99.6) | 99.6 % (98.5) | 99.8 % (99.6) | 98.9 % (98.7) | 99.8 % (99.6) |
+| ... frames | 166,945 | 167,225 | 234,497 | 231,920 | 253,970 | 229,486 | 442,245 | 253,175 |
+| ... role changes after the first hour | 3 | 6 | 3 | 7 | 16 | 8 | 541 | 28 |
+
+Without quiet channels sixteen worlds per band (30.6), at 400 in band L 24, otherwise eight. With
+48 and 96 channels all followed, band L delivered 99.7 % (99.5) and 99.0 % (97.9), with 227 and 683
+role changes after the first hour against 499 and 1,381, and band O 99.9 % and 99.8 % as before.
+
+What it costs: a node holds a quiet channel's newest root less often (90.8 % of channels in band L
+at 400, against 95.5 %), since only the cells that listen to a channel keep it current. A listener
+who opens such a channel from the menu asks for it, and its announcer then serves it (smoke test
+`an_announcer_serves_what_its_cell_listens_to`).
+
+What it does not solve: band L still delivers less with many channels than without (98.9 % at 400,
+97.5 % at 1000, and 9 of 24 worlds at 400 below 99 %). Followers still left an announcer that
+named no uploader 210 times per world at 400, against 10 without quiet channels. And every node
+still keeps every root and collection manifest that comes by, within its carry budget
+(PROTOCOL.md §2): at 400 a band L node held 817 kB at the end against 355 kB without them.
+
+Two remedies did not help, and were left out:
+
+- *Passing only what is new.* A node that steps up passed every manifest of the channels it serves
+  once unasked, as every carousel has passed what is new to it since collections came in (§16).
+  Passing unasked only a root that changed, over the first eight worlds at 400: 99.1 % (97.5)
+  against 99.6 % (99.1), 593 role changes against 349; at 1000, 97.3 % against 96.9 %. Fewer root
+  frames, more collection manifests asked for, and the same breakdown.
+- *A warm start.* Over 24 living band L neighbourhoods (§13) newcomers caught up after 8.4 minutes
+  against 8.2 without the cell rule, a difference within the spread between worlds (standard error
+  about 0.23 minutes); band O 8.7 against 8.8. A node that steps up starts with no record of what
+  its cell asked for; every node noting what its cell asks of its announcer, so that a new one
+  knows at once, gave 8.5 and 8.9.
+
+### 30.6 The whole validation
+
+Against §29, with the cell rule and newest first; "one clock" and "real clocks" as in §26.3.
+
+- **Sparse**: band L with one clock over sixteen worlds delivered 99.9 % (worst world 99.2)
+  against 99.8 % (99.2), with 2 % fewer frames and 43 role changes after the first hour against
+  69; with real clocks over eight 100.0 % (99.9) against 99.9 % (99.7), with 3 % fewer frames, and
+  over 24 more as much (30.4). Band O delivered as much, with up to 1 % more frames.
+- **Under a budget** (§28.6): band L at 1 MB 99.8 % (99.2) against 99.8 % (99.1) with 2 % fewer
+  frames, at 256 kB 99.9 % (99.9) against 99.9 % (99.4), at 64 kB 99.4 % (98.6) against 99.3 %
+  (98.2) with every follower holding its window at the end instead of 99.3 %, 3 % fewer frames
+  and 481 role changes against 686. Band O as much, with up to 2 % more frames.
+- **Scenario matrix, false announcers, collections and the size sweep**: frame for frame the
+  same. There every channel is followed in every cell, and every list fits one frame.
+- **Living network**: newcomers as in 30.5. The slowest tenth of the daily bulletins arrived
+  within 2 minutes of before over eight worlds per band and clock, under attack, lures and
+  spoofers too, and up to 4.8 minutes sooner in four cases; two exceptions, band O with one clock
+  under attack (6.0 against 3.0 minutes) and band L with real clocks under a spoofer (16.2 against
+  13.2).
+
+### 30.7 What other systems do
+
+Real catalogues are large. The Podcast Index lists 4,734,281 podcast feeds, of which 338,833
+published in the last 30 days (stats.podcastindex.org/daily_counts.json, read 2026-10-04), and
+radio-browser.info 60,114 stations. Should a small share of either reach a mesh, the menu runs to
+tens of thousands of channels. Announced in rotation as now (24 bytes an entry, eight a frame), ten
+thousand channels are about 1,250 frames, 250 kB, a round of the menu; the control carrier carries
+about 42 bytes a second in its windows (an estimate: LoRa at about 5 kbit/s for 4 seconds a
+minute), so one rotation would take at least an hour and a half of all its airtime. Rotation does
+not scale to that; the question is what replaces it. PRIOR-ART.md lists what was studied; the
+lessons:
+
+- **Three questions, three answers.** What a node follows stays on the device, as here (receivers
+  do not transmit). What is new is told in small heads repeated in tiers under a fixed budget, as
+  SAP (RFC 2974) and DVB service information (ETSI TS 101 211) do: what is near and new often, the
+  rest seldom. What exists is a catalogue a node merges from what its neighbours carry.
+- **Leaving the catalogue outside the protocol centralises it.** Arweave and IPFS keep content
+  permanent and addressed by hash, and leave "what exists" to indexers; in both, a few central
+  indexers and gateways became where people look.
+- **Reconciling sets beats rotating lists, when the lists are long.** Rateless IBLT (SIGCOMM 2024)
+  sends one stream from which each receiver decodes its own difference at 1.35 to 1.72 symbols per
+  differing item; PinSketch/Minisketch costs about 8 bytes per difference. Neither is needed while
+  newest first keeps a cell current; both are candidates between announcers at scale.
+- **Spam is bounded by demand, not by work.** Proof of work stops a small node and not a flooder
+  with a graphics card (PRIOR-ART.md). What an announcer serves is already bounded by what its
+  cell asks for (30.3); a catalogue can rank by how widely a channel is followed.
+
+PROTOCOL.md §9 Q14 now holds the direction chosen: no catalogue held by the project and no key of
+its own, channels that describe themselves when published in a fixed taxonomy, and a guide merged
+from what neighbours carry.
+
+### 30.8 Open
+
+- **What still breaks down in band L at many channels** (30.5): not the passes of a node that
+  steps up, nor its cold start. Followers leaving announcers that name no uploader remain the
+  sign; why they find none is the next thing to trace.
+- **Heads instead of whole roots** for channels a node only keeps, and their budget, before tens
+  of thousands of channels (30.5, 30.7).
+- **`cell_keep`** was measured at 24 hours only.

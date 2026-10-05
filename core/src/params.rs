@@ -158,6 +158,16 @@ pub struct Params {
     /// shared times differ meet in a window now and then (PROTOCOL.md §3, §6). Off: in the middle of
     /// every period, as before; kept to measure against.
     pub ctrl_window_wanders: bool,
+    /// An announcer serves (keeps current, passes unasked) only the channels a follower of its cell
+    /// asked for within `cell_keep_ms` or announced, and those it follows (PROTOCOL.md §2). Off: every
+    /// channel it hears of, as before; kept to measure against.
+    pub cell_menu: bool,
+    /// How long a follower's ask keeps a channel served (PROTOCOL.md §2, §8).
+    pub cell_keep_ms: Millis,
+    /// An announcer whose list does not fit one frame announces, in the round after it adopted a
+    /// root and never two rounds running, the roots it adopted last instead of the next stretch in
+    /// channel order (PROTOCOL.md §3.4). Off: channel order only; kept to measure against.
+    pub announce_recent: bool,
     /// An announcer fetches every piece of every channel it hears of, asked for or not. Off: it
     /// fetches what a follower asks for (PROTOCOL.md §2, FEASIBILITY.md §27); kept to measure against.
     pub proactive: bool,
@@ -227,6 +237,9 @@ impl Default for Params {
             tells_time: true,
             t_guard_ms: 50,
             ctrl_window_wanders: true,
+            cell_menu: true,
+            cell_keep_ms: 86_400_000,
+            announce_recent: true,
             proactive: false,
             relay_unfollowed: true,
             t_relay_wait_ms: 600_000,

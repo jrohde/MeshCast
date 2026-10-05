@@ -18,6 +18,10 @@ cargo build --release
 over time, every channel publishes a new bulletin periodically and drops its oldest. It reports
 delivery latency per publication, wasted receptions and orphaned objects.
 
+`--quiet-channels N --quiet-publish-h H` adds N channels that nobody follows at the start and that
+publish every H hours, spread over that span (0: never): the rest of a large menu
+(`docs/FEASIBILITY.md` §30). With more channels than nodes, a node runs several.
+
 `--bulk` selects the content carrier: `gfsk-o` (EU band O, 500 mW, 10 % duty cycle), `gfsk-l`
 (EU band L, 25 mW, polite access hopping over 15 channels), `esp-now` (2.4 GHz long-range mode),
 `gfsk-us` (FCC 15.247, 1 W, no duty cycle), `lora-bulk` (LoRa SF7 as the only carrier, for sparse
@@ -114,6 +118,10 @@ relays go (`docs/FEASIBILITY.md` §28):
 - `control carrier`: every hour, the pairs of announcers that hear each other on the control
   carrier but not on the bulk carrier, how many of them share none of their control windows in the
   coming hour, and how many fewer than nine in ten (`docs/PROTOCOL.md` §3, §6).
+- `menu`: every hour, the share of channels whose newest root a node holds, over nodes and over
+  announcers, and how many newest roots a node holds of how many channels exist.
+- `bulk frames by what they carry`: roots, collection manifests and pieces, sent by announcers and
+  by others.
 
 ## Looking inside one world
 
@@ -154,6 +162,11 @@ relays go (`docs/FEASIBILITY.md` §28):
   doubles. `MESHCAST_CTRL_WINDOW_MS=4000 MESHCAST_CTRL_PERIOD_MS=60000` set the
   control window (a window of 0 turns it off: a node then hears both carriers at once), and
   `MESHCAST_NO_CTRL_RX=1` makes nobody receive on a separate control carrier at all.
+- `MESHCAST_CELL_MENU=0` makes an announcer serve every channel it hears of, and
+  `MESHCAST_ANNOUNCE_RECENT=0` makes it announce in channel order only, as before
+  (`docs/FEASIBILITY.md` §30). `MESHCAST_TRACE_LATE=1` prints, in `dynamics`, each follower that
+  did not hold a publication within its period: when it was published, what it was, whether the
+  follower was on, and its announcer at the end.
 - `MESHCAST_CARRY_BUDGET_KB=256` gives every node a carry budget, in kB (0: no relays);
   `MESHCAST_T_RELAY_WAIT_S` overrides `T_relay_wait`. `MESHCAST_PROACTIVE=1` makes announcers fetch
   every piece of every channel they hear of, and `MESHCAST_RELAY_ANY=0` makes nodes relay only for

@@ -125,7 +125,7 @@ fn seeds() -> Vec<(&'static str, Vec<u8>)> {
             want: vec![(ShortId([4; 8]), NodeId::NONE, ASK_LISTENED | 3); 1],
             sets: vec![WantSet { set: PieceSet { manifest: ShortId([5; 8]), first: 64, bits: 0x8000_0000_0000_0001 }, grant: NodeId(9), phase: 3 }; 3],
         }),
-        Frame::ManifestAnnounce(ManifestAnnounce { node: NodeId(5), entries: vec![AnnounceEntry { channel: ChannelId([6; 8]), manifest: ShortId([7; 8]), seq: 9, len: 1234 }; 8], whole: true }),
+        Frame::ManifestAnnounce(ManifestAnnounce { node: NodeId(5), entries: vec![AnnounceEntry { channel: ChannelId([6; 8]), manifest: ShortId([7; 8]), seq: 9, len: 1234 }; 8], whole: true, chosen: false }),
         Frame::Nack(Nack { node: NodeId(8), object: ShortId([2; 8]), block: 0, answerer: NodeId(3), phase: 5, missing: vec![(0, 3), (10, 1)] }),
     ];
     let collection = Collection {

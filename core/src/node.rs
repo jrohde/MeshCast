@@ -577,6 +577,15 @@ pub struct Node {
     /// The pieces of collections we hold only to relay for another cell, of channels we do not
     /// follow (FEASIBILITY.md §27).
     relay_cols: BTreeMap<ShortId, RelayCol>,
+    /// As announcer: when a follower of ours last asked for anything of each channel (PROTOCOL.md §2).
+    cell_asked: BTreeMap<ChannelId, Millis>,
+    /// When we adopted the root we hold of each channel: what is newer than our last newest-first
+    /// announcement goes first in the next round (PROTOCOL.md §3.4).
+    root_adopted_at: BTreeMap<ChannelId, Millis>,
+    /// When we last announced newest first (PROTOCOL.md §3.4).
+    recent_at: Millis,
+    /// Whether our last announcement that did not fit one frame was newest first.
+    announce_flip: bool,
     /// When each object we hold was last of use: arrived, asked for, sent (§27).
     last_used: BTreeMap<ShortId, Millis>,
     /// Announcer: for each root manifest granted on an offer, the holder and what it listed with
@@ -691,6 +700,10 @@ impl Node {
             relay_asks: BTreeMap::new(),
             relay_life: [[0; 2]; RELAY_AGE_BUCKETS],
             relay_cols: BTreeMap::new(),
+            cell_asked: BTreeMap::new(),
+            root_adopted_at: BTreeMap::new(),
+            recent_at: 0,
+            announce_flip: false,
             last_used: BTreeMap::new(),
             root_follow_ups: BTreeMap::new(),
             stats,
@@ -965,6 +978,11 @@ impl Node {
         self.store.entry(id).filter(|e| e.len().is_some()).map(|e| e.kind())
     }
 
+    /// Diagnostic: whether, as announcer, we serve channel `chan` (PROTOCOL.md §2).
+    pub fn serves_channel(&self, chan: &crate::ids::ChannelId) -> bool {
+        self.serves(chan)
+    }
+
     /// Diagnostic: what we know of channel `chan`'s manifest: (seq, id, adopted, held, wanted).
     pub fn manifest_state(&self, chan: &crate::ids::ChannelId) -> Option<(u32, ShortId, bool, bool, bool)> {
         self.manifests.get(chan).and_then(|i| i.current().map(|r| (r.seq, r.short, i.announced.is_none(), self.store.has_complete(&r.short), self.wants.contains(&r.short))))
@@ -1100,6 +1118,7 @@ impl Node {
             ("announcer grants", self.ann_grants.len()),
             ("granted to us", self.granted_to_us.len()),
             ("offers", self.offers.len()),
+            ("cell asked", self.cell_asked.len()),
             ("relay asks", self.relay_asks.len()),
             ("relayed", self.relayed.len()),
             ("corrected", self.corrected.len()),
@@ -1172,6 +1191,28 @@ impl Node {
     pub fn follow_collection(&mut self, chan: ChannelId, cid: u32) {
         self.follows_collections.insert((chan, cid));
         self.readopt(chan);
+    }
+
+    /// Whether, as announcer, we serve channel `chan`: we keep its manifests current and pass them
+    /// unasked (PROTOCOL.md §2): what our cell asked for within `cell_keep`, what we
+    /// follow and what our cell publishes; without `cell_menu`, every channel we hear of.
+    fn serves(&self, chan: &ChannelId) -> bool {
+        if !self.is_announcing() {
+            return false;
+        }
+        if !self.cfg.params.cell_menu {
+            return true;
+        }
+        self.follows_channel(chan) || self.own_manifests.iter().any(|(c, _, _, _)| c == chan) || self.cell_asked.get(chan).map(|t| self.now < *t + self.cfg.params.cell_keep_ms).unwrap_or(false)
+    }
+
+    /// The channel object `id` belongs to, as far as the manifests we know say.
+    fn channel_of(&self, id: &ShortId) -> Option<ChannelId> {
+        if let Some((c, _)) = self.manifests.iter().find(|(_, i)| i.adopted.map(|a| a.short == *id).unwrap_or(false) || i.announced.map(|a| a.short == *id).unwrap_or(false)) {
+            return Some(*c);
+        }
+        let m = if self.pieces.contains_key(id) { Some(*id) } else { self.pieces.iter().find(|(_, l)| l.contains(id)).map(|(m, _)| *m) };
+        m.and_then(|m| self.collections.iter().find(|(_, v)| **v == m).map(|((c, _), _)| *c))
     }
 
     /// Something of `chan` is followed that was not: adopt its root manifest again, so that what
@@ -1681,8 +1722,9 @@ impl Node {
             let new = self.collections.get(&(chan, c.cid)) != Some(&id);
             self.adopt_collection(chan, c, new);
         }
-        // A collection manifest no root of ours names any more is not worth offering.
-        let named: BTreeSet<ShortId> = root.collections.iter().map(|c| c.manifest.id.short()).collect();
+        // A collection manifest no root of ours names any more is not worth offering. Of ours: a
+        // node may publish several channels, and one channel's new root says nothing of another's.
+        let named: BTreeSet<ShortId> = self.own_manifests.iter().filter_map(|(_, s, _, _)| self.roots.get(s)).flat_map(|r| r.collections.iter().map(|c| c.manifest.id.short())).collect();
         let stale: Vec<ShortId> = self.pending_ack.keys().filter(|id| self.store.entry(id).map(|e| e.kind() == ContentType::Collection).unwrap_or(false) && !named.contains(id)).copied().collect();
         for id in stale {
             self.pending_ack.remove(&id);
@@ -2003,14 +2045,14 @@ impl Node {
                     self.next_ctrl_beacon = self.now;
                 }
                 let mut car = Carousel::new(self.carousel_params());
-                for a in self.manifests.values().filter_map(|i| i.adopted) {
-                    car.add_manifest(a.short, true);
+                for (c, a) in self.manifests.iter().filter_map(|(c, i)| i.adopted.map(|a| (*c, a))) {
+                    car.add_manifest(a.short, !self.cfg.params.cell_menu || self.serves(&c));
                 }
                 self.carriers[carrier].carousel = Some(car);
                 self.carriers[carrier].upload = None;
                 // Serve everything any known manifest references; want what we lack, by name and
                 // length.
-                let to_want: Vec<(ShortId, u32)> = self.manifests.values().filter_map(|i| i.current()).filter(|r| !self.store.has_complete(&r.short)).map(|r| (r.short, r.len)).collect();
+                let to_want: Vec<(ShortId, u32)> = self.manifests.iter().filter(|(c, _)| self.serves(c)).filter_map(|(_, i)| i.current()).filter(|r| !self.store.has_complete(&r.short)).map(|r| (r.short, r.len)).collect();
                 for (id, len) in to_want {
                     if self.store.ensure_hint(id, len, ContentType::Manifest) {
                         self.quiet_complete.push(id);
@@ -2021,7 +2063,7 @@ impl Node {
                 // The manifests we hold were adopted by a follower, for the channels it follows
                 // and in the form it plays. An announcer serves every channel, so it adopts them
                 // again as one: their objects are registered and what it lacks is wanted.
-                let held: Vec<ShortId> = self.manifests.values().filter_map(|i| i.adopted).filter(|a| self.store.has_complete(&a.short)).map(|a| a.short).collect();
+                let held: Vec<ShortId> = self.manifests.iter().filter(|(c, _)| self.serves(c)).filter_map(|(_, i)| i.adopted).filter(|a| self.store.has_complete(&a.short)).map(|a| a.short).collect();
                 for short in held {
                     if let Some(m) = self.store.bytes(&short).and_then(|b| Manifest::decode(b).ok()) {
                         self.adopt_manifest(&m, short);
@@ -2619,7 +2661,14 @@ impl Node {
             let g = Gossip { node: self.cfg.id, announcer: self.gossip_announcer_field(), announcer_colour: self.announcer_colouring_field().0, announcer_colours: self.announcer_colouring_field().1, heard: self.heard_field(), have, have_sets, want, sets };
             self.enqueue(self.cell_carrier(), Frame::Gossip(g));
         }
+        // What our cell asked for longer than `cell_keep` ago, and when we adopted roots we no longer
+        // hold, are of no more use.
+        let (now, keep) = (self.now, self.cfg.params.cell_keep_ms);
+        self.cell_asked.retain(|_, t| now < *t + keep);
+        let manifests = &self.manifests;
+        self.root_adopted_at.retain(|c, _| manifests.contains_key(c));
         let mut whole = false;
+        let mut chosen = false;
         let entries: Vec<AnnounceEntry> = if announcing {
             let all: Vec<AnnounceEntry> = self
                 .manifests
@@ -2631,7 +2680,20 @@ impl Node {
             if all.len() <= MAX_ANNOUNCE_ENTRIES {
                 whole = true;
                 all
+            } else if self.cfg.params.announce_recent && !self.announce_flip && all.iter().any(|e| self.root_adopted_at.get(&e.channel).map(|t| *t > self.recent_at).unwrap_or(false)) {
+                // The roots we adopted last, newest first, in the round after we adopted one, but
+                // never two rounds running (PROTOCOL.md §3.4): a new root of one channel among
+                // hundreds waited hours for its turn in channel order, and alternating every round
+                // halved the rotation by which followers tell that we lack one.
+                self.announce_flip = true;
+                self.recent_at = self.now;
+                chosen = true;
+                let mut v = all;
+                v.sort_by_key(|e| core::cmp::Reverse(self.root_adopted_at.get(&e.channel).copied().unwrap_or(0)));
+                v.truncate(MAX_ANNOUNCE_ENTRIES);
+                v
             } else {
+                self.announce_flip = false;
                 // In channel order from a cursor that steps one entry less than a frame holds:
                 // every two neighbours of the list share some frame, so a follower can tell
                 // from a frame alone that a channel between them is not on it.
@@ -2651,10 +2713,10 @@ impl Node {
         // An announcer that knows no manifest says so too: its followers then tell it theirs.
         if !entries.is_empty() || whole {
             let cell = self.cell_carrier();
-            self.enqueue(cell, Frame::ManifestAnnounce(ManifestAnnounce { node: self.cfg.id, entries: entries.clone(), whole }));
+            self.enqueue(cell, Frame::ManifestAnnounce(ManifestAnnounce { node: self.cfg.id, entries: entries.clone(), whole, chosen }));
             if self.ctrl != cell {
                 let push: Vec<ShortId> = entries.iter().map(|e| e.manifest).collect();
-                self.enqueue(self.ctrl, Frame::ManifestAnnounce(ManifestAnnounce { node: self.cfg.id, entries, whole }));
+                self.enqueue(self.ctrl, Frame::ManifestAnnounce(ManifestAnnounce { node: self.cfg.id, entries, whole, chosen }));
                 self.push_on_ctrl(&push);
             }
         }
@@ -4012,7 +4074,7 @@ impl Node {
         }
         // You carry what you listen to: objects are registered (and thus collected from the air)
         // only for channels and collections we follow or, as announcer, serve.
-        let interested = self.follows_channel(&chan) || self.is_announcing();
+        let interested = self.follows_channel(&chan) || self.serves(&chan);
         let menu = !interested && self.keeps_menu();
         let mut to_want = Vec::new();
         let mut to_adopt = Vec::new();
@@ -4093,6 +4155,9 @@ impl Node {
     /// Returns the root it replaces.
     fn set_root(&mut self, chan: ChannelId, m: &Manifest, short: ShortId, len: u32, announced: Option<ManifestRef>) -> Option<ManifestRef> {
         let old = self.manifests.get(&chan).and_then(|i| i.adopted);
+        if old.map(|o| o.short != short).unwrap_or(true) {
+            self.root_adopted_at.insert(chan, self.now);
+        }
         self.manifests.insert(chan, ManifestInfo { adopted: Some(ManifestRef { seq: m.seq, short, len }), announced });
         if let Some(o) = old.filter(|o| o.short != short) {
             self.roots.remove(&o.short);
@@ -4109,9 +4174,11 @@ impl Node {
                 self.drop_collection_manifest(s);
             }
         }
+        // Passed once unasked where there is a carousel, if we serve the channel (PROTOCOL.md §2).
+        let pass = !self.cfg.params.cell_menu || self.follows_channel(&chan) || self.serves(&chan);
         for c in self.carriers.iter_mut() {
             if let Some(car) = c.carousel.as_mut() {
-                car.add_manifest(short, true);
+                car.add_manifest(short, pass);
             }
         }
         old
@@ -4137,6 +4204,7 @@ impl Node {
             nb.unread_sets.retain(|p| p.manifest != short);
         }
         self.bound_offered();
+        let new = new && (!self.cfg.params.cell_menu || self.follows_channel(&chan) || self.serves(&chan));
         let ordered = col.kind != CollectionKind::Singles;
         if ordered {
             self.unordered.remove(&short);
@@ -4483,6 +4551,18 @@ impl Node {
             // they are hidden from each other every frame of both collides at that follower.
             let addressed = g.announcer == me;
             let mut new_wants = Vec::new();
+            // What our cell asks for, we serve (PROTOCOL.md §2): a channel newly asked for is
+            // adopted again as one we serve.
+            if self.cfg.params.cell_menu && addressed {
+                let chans: BTreeSet<ChannelId> = g.want.iter().filter_map(|(w, _, _)| self.channel_of(w)).collect();
+                for c in chans {
+                    let was = self.serves(&c);
+                    self.cell_asked.insert(c, now);
+                    if !was {
+                        self.readopt(c);
+                    }
+                }
+            }
             for (w, _, _) in g.want.iter().filter(|_| addressed) {
                 // A rendition is for a programme about to play: an ask far ahead of its slot is
                 // not a listener's, and the device will ask again when it is due.
@@ -4786,8 +4866,20 @@ impl Node {
         }
         self.touch(m.node, rssi);
         let announcing = self.is_announcing();
+        // A follower of ours announces what it publishes, or corrects us on what it follows: our
+        // cell publishes or listens to it, and we serve it (PROTOCOL.md §2).
+        if self.cfg.params.cell_menu && announcing && self.neighbors.get(&m.node).map(|n| n.announcer == self.cfg.id).unwrap_or(false) {
+            let now = self.now;
+            for e in &m.entries {
+                let was = self.serves(&e.channel);
+                self.cell_asked.insert(e.channel, now);
+                if !was {
+                    self.readopt(e.channel);
+                }
+            }
+        }
         for e in &m.entries {
-            let interested = self.follows_channel(&e.channel) || announcing;
+            let interested = self.follows_channel(&e.channel) || (announcing && self.serves(&e.channel));
             // The menu of a channel we do not follow is collected if it comes by, never asked for:
             // it is what lets us name what another cell asks for (PROTOCOL.md §4).
             if !interested && !self.keeps_menu() {
@@ -4851,7 +4943,7 @@ impl Node {
         for (c, seq, short) in held {
             let behind = match m.entries.iter().find(|e| e.channel == c) {
                 Some(e) => e.seq < seq,
-                None => m.whole || m.entries.windows(2).any(|w| channel_between(&w[0].channel, &c, &w[1].channel)),
+                None => !m.chosen && (m.whole || m.entries.windows(2).any(|w| channel_between(&w[0].channel, &c, &w[1].channel))),
             };
             // An announcer that is asking for our manifest knows of it: it announces only what it
             // holds, and is fetching it. While it fetches it asks again every round, so an ask
@@ -4907,7 +4999,7 @@ impl Node {
         }
         self.stats.manifest_corrections += 1;
         let cell = self.cell_carrier();
-        self.enqueue(cell, Frame::ManifestAnnounce(ManifestAnnounce { node: self.cfg.id, entries, whole: false }));
+        self.enqueue(cell, Frame::ManifestAnnounce(ManifestAnnounce { node: self.cfg.id, entries, whole: false, chosen: false }));
     }
 
     fn rx_nack(&mut self, n: &Nack, rssi: i16) {

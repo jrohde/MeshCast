@@ -189,9 +189,16 @@ enum Cmd {
         area_km2: f64,
         #[arg(long, default_value_t = 1)]
         stations: usize,
-        /// Number of channels (each has its own source node).
+        /// Number of channels nodes follow and that publish every `publish_h`; a node runs more than one
+        /// when there are more channels than nodes.
         #[arg(long, default_value_t = 8)]
         channels: usize,
+        /// Further channels that exist, with their catalogue, but that nobody follows at the start and
+        /// that publish only every `quiet_publish_h` (0: never): the rest of a large menu.
+        #[arg(long, default_value_t = 0)]
+        quiet_channels: usize,
+        #[arg(long, default_value_t = 0.0)]
+        quiet_publish_h: f64,
         /// Channels each node follows at the start.
         #[arg(long, default_value_t = 3)]
         follows: usize,
@@ -573,8 +580,8 @@ fn main() {
             };
             run(spec, &common, None);
         }
-        Cmd::Dynamics { nodes, area_km2, stations, channels, follows, publish_h, bulletin_kb, window, churn_h, node_churn_h, newcomer_h, common } => {
-            run_dynamics(nodes, area_km2, stations, channels, follows, publish_h, bulletin_kb, window, churn_h, node_churn_h, newcomer_h, &common);
+        Cmd::Dynamics { nodes, area_km2, stations, channels, quiet_channels, quiet_publish_h, follows, publish_h, bulletin_kb, window, churn_h, node_churn_h, newcomer_h, common } => {
+            run_dynamics(nodes, area_km2, stations, channels, quiet_channels, quiet_publish_h, follows, publish_h, bulletin_kb, window, churn_h, node_churn_h, newcomer_h, &common);
         }
         Cmd::Failover { nodes, area_km2, kill_at_h, revive_at_h, common } => {
             let spec = ScenarioSpec {
@@ -1024,6 +1031,12 @@ fn params() -> Params {
     if let Ok(v) = std::env::var("MESHCAST_RELAY_ANY") {
         p.relay_unfollowed = v != "0";
     }
+    if let Ok(v) = std::env::var("MESHCAST_ANNOUNCE_RECENT") {
+        p.announce_recent = v != "0";
+    }
+    if let Ok(v) = std::env::var("MESHCAST_CELL_MENU") {
+        p.cell_menu = v != "0";
+    }
     if let Ok(v) = std::env::var("MESHCAST_WINDOW_WANDERS") {
         p.ctrl_window_wanders = v != "0";
     }
@@ -1191,7 +1204,7 @@ struct DynamicsReport {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run_dynamics(nodes: usize, area_km2: f64, stations: usize, channels: usize, follows: usize, publish_h: f64, bulletin_kb: u32, window: usize, churn_h: f64, node_churn_h: f64, newcomer_h: f64, common: &Common) {
+fn run_dynamics(nodes: usize, area_km2: f64, stations: usize, channels: usize, quiet_channels: usize, quiet_publish_h: f64, follows: usize, publish_h: f64, bulletin_kb: u32, window: usize, churn_h: f64, node_churn_h: f64, newcomer_h: f64, common: &Common) {
     use meshcast_core::manifest::{Collection, CollectionKind, Manifest, ScheduleEntry};
     use meshcast_core::rng::Rng;
     use meshcast_core::ids::ShortId;
@@ -1200,7 +1213,7 @@ fn run_dynamics(nodes: usize, area_km2: f64, stations: usize, channels: usize, f
         nodes,
         area_km2,
         stations,
-        sources: channels,
+        sources: channels + quiet_channels,
         tracks: window,
         track_kb: bulletin_kb,
         mix: vec![scenario::MixItem { label: "speech".into(), kb: bulletin_kb }],
@@ -1259,6 +1272,16 @@ fn run_dynamics(nodes: usize, area_km2: f64, stations: usize, channels: usize, f
             t += publish_ms;
         }
     }
+    if quiet_publish_h > 0.0 {
+        let quiet_ms = (quiet_publish_h * 3.6e6) as Millis;
+        for q in 0..quiet_channels {
+            let mut t = quiet_ms * (q as Millis + 1) / quiet_channels as Millis;
+            while t < until {
+                events.push((t, 0, channels + q));
+                t += quiet_ms;
+            }
+        }
+    }
     let mut t = churn_ms;
     while t < until {
         events.push((t, 1, 0));
@@ -1290,6 +1313,8 @@ fn run_dynamics(nodes: usize, area_km2: f64, stations: usize, channels: usize, f
     events.sort();
     let mut offline: Vec<usize> = Vec::new();
     let mut islands = (0usize, 0usize, 0usize, 0usize, 0usize);
+    // Every hour: how many nodes, and how many announcers, hold the newest root of each channel.
+    let mut menu = (0usize, 0f64, 0f64, 0f64);
     // When each node was switched off, and from when to when, for time that counts.
     let mut went_off: BTreeMap<usize, Millis> = BTreeMap::new();
     let mut switched_off: Vec<Vec<(Millis, Millis)>> = vec![Vec::new(); nodes];
@@ -1311,10 +1336,32 @@ fn run_dynamics(nodes: usize, area_km2: f64, stations: usize, channels: usize, f
                 islands.2 += apart;
                 islands.3 += partly;
                 islands.4 += (apart > 0) as usize;
+                let bulk_i = bulk;
+                let (mut k_all, mut n_all, mut k_ann, mut n_ann, mut held) = (0usize, 0usize, 0usize, 0usize, 0usize);
+                for src in &built.sources {
+                    for (i, n) in e.nodes.iter().enumerate() {
+                        if !n.alive || i == src.node {
+                            continue;
+                        }
+                        let knows = n.node.manifest_state(&src.channel).map(|m| m.0 >= src.seq && m.3).unwrap_or(false);
+                        n_all += 1;
+                        k_all += knows as usize;
+                        held += knows as usize;
+                        if n.node.role(bulk_i) == meshcast_core::node::Role::Announcer {
+                            n_ann += 1;
+                            k_ann += knows as usize;
+                        }
+                    }
+                }
+                let alive = e.nodes.iter().filter(|n| n.alive).count().max(1);
+                menu.0 += 1;
+                menu.1 += k_all as f64 / n_all.max(1) as f64;
+                menu.2 += k_ann as f64 / n_ann.max(1) as f64;
+                menu.3 += held as f64 / alive as f64;
             }
             0 => {
                 let src = &mut built.sources[c];
-                let o = track_object(common.seed, src.node, next_index[c], bulletin_kb * 1024, ContentType::Speech);
+                let o = track_object(common.seed, src.tag, next_index[c], bulletin_kb * 1024, ContentType::Speech);
                 next_index[c] += 1;
                 src.objects.push(o.clone());
                 while src.objects.len() > window {
@@ -1422,6 +1469,14 @@ fn run_dynamics(nodes: usize, area_km2: f64, stations: usize, channels: usize, f
         lat.sort_by(|a, b| a.partial_cmp(b).unwrap());
         total += followers.len();
         within += lat.iter().filter(|&&l| l <= publish_h).count();
+        if std::env::var("MESHCAST_TRACE_LATE").is_ok() {
+            for &f in followers.iter() {
+                let c = m.completions.get(&(f, *id)).map(|&t| (t.saturating_sub(*t_pub)) as f64 / 3.6e6);
+                if c.map(|l| l > publish_h).unwrap_or(true) {
+                    eprintln!("LATE pub={:.2}h id={:?} follower={} got={:?} alive={} follows={:?}", *t_pub as f64 / 3.6e6, id, f, c, eng.nodes[f].alive, eng.nodes[f].node.announcer_of(1));
+                }
+            }
+        }
         p50.push(percentile(&lat, 0.5));
         p90.push(percentile(&lat, 0.9));
     }
@@ -1603,6 +1658,9 @@ fn run_dynamics(nodes: usize, area_km2: f64, stations: usize, channels: usize, f
         let on_worst = catch_on_h.iter().cloned().fold(0.0f64, f64::max);
         println!("newcomers counting only the time they were switched on: mean {:.2} h, worst {:.2} h", on_mean, on_worst);
     }
+    if menu.0 > 0 {
+        println!("menu: nodes holding a channel's newest root, hourly mean {:.1} %, announcers {:.1} %; newest roots held per node {:.1} of {}", 100.0 * menu.1 / menu.0 as f64, 100.0 * menu.2 / menu.0 as f64, menu.3 / menu.0 as f64, built.sources.len());
+    }
     if islands.0 > 0 {
         println!("control carrier: announcer pairs that hear each other only there, hourly mean {:.1}; sharing no window in the next hour {:.1}, fewer than nine in ten {:.1}; hours with a pair sharing none {} of {}", islands.1 as f64 / islands.0 as f64, islands.2 as f64 / islands.0 as f64, islands.3 as f64 / islands.0 as f64, islands.4, islands.0);
     }
@@ -1625,6 +1683,8 @@ fn run_dynamics(nodes: usize, area_km2: f64, stations: usize, channels: usize, f
         let first: u64 = eng.nodes.iter().map(|n| n.node.stats.carousel_frames[0]).sum();
         let repeat: u64 = eng.nodes.iter().map(|n| n.node.stats.carousel_frames[1]).sum();
         println!("bulk frames: by announcers {} (carousel first passes {}, repeats {}), by others {} (uploads at their announcer {})", eng.metrics.bulk_sent_by[1], first, repeat, eng.metrics.bulk_sent_by[0], eng.metrics.upload_outcome.iter().sum::<u64>());
+        let k = eng.metrics.bulk_sent_kind;
+        println!("bulk frames by what they carry: announcers roots {}, collection manifests {}, pieces {}, unknown {}; others roots {}, collection manifests {}, pieces {}, unknown {}", k[1][0], k[1][1], k[1][2], k[1][3], k[0][0], k[0][1], k[0][2], k[0][3]);
         // How many nodes relayed each relayed object (FEASIBILITY.md §28).
         let rel = &eng.metrics.relayers;
         if !rel.is_empty() {

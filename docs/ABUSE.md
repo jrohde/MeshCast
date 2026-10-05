@@ -31,7 +31,7 @@ of yours can spend. Anything above one is a lever.
 
 | Attack | What you send | What it costs us | Amplification |
 |---|---|---|---|
-| **Channel flood** | Many signed channels with large catalogues | An announcer keeps the root and collection manifests of every channel it learns of, and every other node what comes by of them (PROTOCOL.md §2); pieces and covers an announcer fetches only when a follower asks for them | At an announcer, unbounded in manifests (PROTOCOL.md §9, question 14); at any other node, its carry budget. Content only on a listener's ask, which is the WANT flood. Before, an announcer fetched every piece of every channel it heard of |
+| **Channel flood** | Many signed channels with large catalogues | An announcer keeps current the root and collection manifests of the channels its cell asks for, publishes or follows, and every node, announcers too, keeps what comes by of the others (PROTOCOL.md §2); pieces and covers an announcer fetches only when a follower asks for them | At every node its carry budget; a follower, or a node posing as one, makes its announcer serve a channel for `cell_keep` by asking for it. Content only on a listener's ask, which is the WANT flood. Before, an announcer kept every channel it heard of current, and 400 channels nobody followed brought a sparse band L network from 99.8 % to 88.8 % delivered (FEASIBILITY.md §30); before that, it fetched every piece of every channel it heard of |
 | **WANT flood** | One 50-byte gossip asking for an object, or one 23-byte set asking for up to 64 pieces where sets are used (PROTOCOL.md §3.3) | The announcer puts a 42 kB track in its carousel (540 kB before the codec change), or every piece of a collection | ~800× per object; a set asks for more per frame, but the repetition backoff still applies per piece |
 | **Rendition flood** | WANTs, as a device that cannot decode, for the rendition of every object a channel lists | The cell's carousel carries each as Opus (PROTOCOL.md §1.2): 367 kB for a 3-minute song at 16 kbit/s | ~7 000× |
 | **NACK amplification** | One 30-byte NACK, claiming to be an announcer, or naming a holder as a follower whose announcer cannot repair | The holder named (or, unnamed, the best-placed one) sends up to 40 symbols | ~300× |
@@ -284,10 +284,11 @@ object; whether an encrypted channel's objects need names only its listeners can
    the request budget of item 1 with a limit that follows from what renditions are for.
 4. **Bounded generosity.** An announcer serves at most so many channels and collections, chosen
    by how many distinct followers asked and for how long, rather than everything it hears of.
-   *Partly done:* an announcer fetches pieces and covers only when a follower asks for them
-   (PROTOCOL.md §2), and what a node holds for others, the menu of channels it does not follow
-   included, is bounded by its carry budget (§4). An announcer still keeps the manifests of every
-   channel it hears of (PROTOCOL.md §9, question 14).
+   *Partly done:* an announcer fetches pieces and covers only when a follower asks for them, and
+   keeps current only the channels its cell asked for within `cell_keep`, publishes or follows
+   (PROTOCOL.md §2); what a node holds for others, the menu of channels it does not follow
+   included, is bounded by its carry budget (§4). Open: how many channels one follower can make
+   its announcer serve, which today only `cell_keep` bounds.
 5. **Someone else's firmware.** The rest of the requirements above, cheapest first: signed
    firmware images, verification in chunks, ids that change, airtime as evidence, and
    authenticated announcer frames with the bound on time they need. The decoders and the tables

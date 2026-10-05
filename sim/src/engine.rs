@@ -609,6 +609,16 @@ impl Engine {
             }
             let ann = self.nodes[from].node.role(carrier) == meshcast_core::node::Role::Announcer;
             self.metrics.bulk_sent_by[ann as usize] += 1;
+            if let Ok(Frame::Bulk(b)) = Frame::decode(&bytes) {
+                use meshcast_core::object::ContentType;
+                let k = match self.nodes[from].node.object_kind(&b.object) {
+                    Some(ContentType::Manifest) => 0,
+                    Some(ContentType::Collection) => 1,
+                    Some(_) => 2,
+                    None => 3,
+                };
+                self.metrics.bulk_sent_kind[ann as usize][k] += 1;
+            }
         }
         self.nodes[from].airtime_ms[carrier] += airtime_ms as u64;
         {
