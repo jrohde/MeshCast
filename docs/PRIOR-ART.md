@@ -28,6 +28,12 @@ Its open-source receiver `open-ondd` is the closest existing system to "the list
 distribution is not". MeshCast is Othernet without the satellite: many small terrestrial
 announcers instead of one big one in the sky.
 
+**Toosheh** (NetFreedom Pioneers, since 2016). Filecasting to Iran over free-to-air DVB-S2
+satellite television: an ordinary receiver records a daily bundle of news, video, software and
+music onto a USB stick, with no internet and no subscription
+([Wikipedia](https://en.wikipedia.org/wiki/Toosheh)). One-way and centrally curated; evidence
+that delayed bulk delivery is valued where the internet is blocked.
+
 ## Delay-tolerant networking
 
 **DTN Bundle Protocol** (RFC 9171; implementations ION, µD3TN for embedded). Store-carry-forward
@@ -35,6 +41,12 @@ for networks that are never fully connected: bundles wait at nodes until a conta
 DTN insight MeshCast relies on is that once latency is unconstrained, most hard networking problems
 become storage problems. We do not implement BP (its addressing and routing are more than we
 need), but the sneakernet carrier and the bridge-node behaviour are DTN by another name.
+
+**DakNet** (Pentland, Fletcher, Hasson, IEEE Computer, January 2004). Buses carrying Wi-Fi access
+points between village kiosks and a town with an internet link: store-carry-forward on a
+timetable. **El Paquete Semanal** (Cuba): a weekly bundle of media copied from hard disk to hard
+disk, hand to hand ([Wikipedia](https://en.wikipedia.org/wiki/El_Paquete_Semanal)). Both show
+that music and programmes travel well when nobody needs them live.
 
 ## Peer-to-peer content distribution
 
@@ -85,6 +97,57 @@ dedicated and do not run it alongside.
 **LoRa-APRS**. Amateur-radio position beacons over LoRa on 70 cm; evidence that these chips are
 already used under amateur licences at higher power, a possible future profile.
 
+## Sensor networks: one program, many roles
+
+The closest relatives of MeshCast's behaviour, as opposed to its purpose, are the dissemination and
+clustering protocols of wireless sensor networks: every node runs the same code, and what a node
+does follows from what it hears.
+
+**Trickle** (Levis, Patel, Culler, Shenker, NSDI 2004; RFC 6206). A node says what version it has
+at a random moment in each interval, and stays silent if it has already heard enough others say
+the same; while everyone agrees the interval doubles, and on hearing something older or newer it
+starts again from the shortest. The same rule makes a node quiet where neighbours are many and
+talkative where they are few. Hearing an older version and speaking up soon is the gap-driven
+push that FEASIBILITY.md §32.4 leaves open for roots on the control carrier.
+
+**Deluge** (Hui, Culler, ACM SenSys 2004, "The dynamic behavior of a data dissemination protocol
+for network programming at scale"). Spreads a firmware image through a sensor network in pages:
+advertise (with Trickle), request, data, so that a node passes on a page before it has the whole
+image. The closest existing design to MeshCast's carousel with its asks and repairs; but every
+node wants every image, so there are no subscriptions, no announcers and no relaying for others.
+
+**LEACH** (Heinzelman, Chandrakasan, Balakrishnan, HICSS 2000) and **HEED** (Younis, Fahmy, IEEE
+INFOCOM 2004). Nodes elect themselves cluster heads, by a draw weighted by remaining energy
+(LEACH) or by energy and a cost such as how many neighbours they have (HEED), and hand the role on
+over time. MeshCast's announcer election is of this kind, with capability (mains, budget) in the
+place of energy.
+
+**Connected dominating sets** (Wu, Li, DIAL-M 1999, "On calculating connected dominating set for
+efficient routing in ad hoc wireless networks"). A backbone: every node is in it or next to it,
+and it is connected. In Wu and Li's marking process a node joins the backbone when two of its
+neighbours do not hear each other; the rule is purely local, and the result is connected. MeshCast's
+announcers form a dominating set, not always a connected one: FEASIBILITY.md §33 found a band L
+valley whose cells were often joined only by two followers, or by their two announcers alone. A
+follower with two neighbours that do not hear each other is, in Wu and Li's sense, a backbone
+node; MeshCast makes it one only when a want stalls there (leaving to lead, PROTOCOL.md §5.2).
+
+**Response thresholds** (Bonabeau, Theraulaz, Deneubourg, Proc. R. Soc. Lond. B 263:1565–1569,
+1996). In insect societies, workers with the same genes take up a task when its stimulus exceeds
+their own threshold, and doing the task lowers the stimulus: division of labour without a plan.
+MeshCast's relays behave so: another cell's ask grows more urgent with age, and a node relays it
+once fewer than `relay_risk` of the asks of that age were met by others (PROTOCOL.md §4).
+
+## Named data and learned forwarding
+
+**Named Data Networking** (Jacobson et al., ACM CoNEXT 2009, "Networking named content"). Content
+is asked for by name, any node holding it may answer, the answer follows the trail of the ask back
+and every node may keep a copy. MeshCast's asks, relays and carrying are of this family, without
+forwarding tables, and with cells instead of links.
+
+**PRoPHET** (Lindgren, Doria, Schelén, 2003; RFC 6693). Delay-tolerant routing by a "delivery
+predictability" each node learns from whom it meets. MeshCast's relays learn something narrower:
+how often other cells' asks are met without them, by the age of the ask.
+
 ## Spectrum sharing
 
 **IEEE 802.11 DCF**. CSMA/CA with binary exponential backoff, thirty years of proof that
@@ -111,6 +174,10 @@ of a decoder too large for a microcontroller.
 from one model) but weaker per bit; Vocos is a very light decoder for EnCodec codes trained on
 speech; DAC is the architecture SNAC extends; Mimi is a speech codec. Rated or measured in
 FEASIBILITY.md §8.
+A hobby project squeezed a song with EnCodec from a 2.9 MB MP3 to 21.44 kB, printed it as QR
+codes on paper and sent it point to point over LoRa
+([Hackaday, 2026-08-18](https://hackaday.com/2026/08/18/store-tunes-on-paper-and-stream-them-over-lora/)):
+a demonstration, not a network, at about the size of a MeshCast bulletin.
 **Opus**. 16–24 kbit/s music, 8 kbit/s speech; decoders run on ESP32-class hardware. The codec
 MeshCast assumed until §8, and now the format of renditions for devices without a neural decoder
 (PROTOCOL.md §1.2).
