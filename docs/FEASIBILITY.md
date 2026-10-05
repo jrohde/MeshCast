@@ -3753,7 +3753,136 @@ from what neighbours carry.
 
 - **What still breaks down in band L at many channels** (30.5): not the passes of a node that
   steps up, nor its cold start. Followers leaving announcers that name no uploader remain the
-  sign; why they find none is the next thing to trace.
+  sign; why they find none is traced in §31.
 - **Heads instead of whole roots** for channels a node only keeps, and their budget, before tens
   of thousands of channels (30.5, 30.7).
 - **`cell_keep`** was measured at 24 hours only.
+
+## 31. Out of reach is not withheld
+
+§30 left band L delivering less with many channels than without (98.9 % with 400 quiet channels
+over 24 worlds, 97.5 % with 1000), and followers leaving an announcer that named no uploader for
+what they lacked 210 times per world at 400, against 10 without quiet channels (§30.5). This
+section traces those leaves, tries four remedies, and keeps two limits on the rule that makes them
+(PROTOCOL.md §5.2, "Asking is not getting", from §25). The world is that of §30.1; "before" is
+§30.
+
+### 31.1 One piece, 1,510 leaves
+
+The worst of the 24 worlds at 400 (95.5 % delivered) was traced at each leave (sim/README.md,
+`MESHCAST_TRACE_LEAVE`). Of its 1,843 leaves, 1,510 were for one bulletin, by 93 different nodes,
+and 1,366 of those by nodes that wanted it only to relay it to another cell (PROTOCOL.md §4). Only
+its source held it, and its source announced in a cell of its own: five nodes followed it, each
+briefly, in two days. Announcers asked for the bulletin 8,125 times in 30 hours, and nobody ever
+offered it. An announcer never uploads, and serves only the wants addressed to it, so what only an
+announcer holds leaves its cell through its followers, through nodes that visit it for it (an
+excursion, PROTOCOL.md §4), or through whoever hears its carousel pass it. A node visits an
+announcer whose HAVE lists what it wants, and an announcer's HAVE rotates over everything it holds,
+twelve ids a round. With 400 quiet channels an announcer held up to 2,387 objects (the mean over
+24 worlds of the largest store), against 125 without them, most of them menu manifests of channels
+it did not serve; the source's own new bulletin came round in its HAVE once in about fifteen hours
+(an estimate: 2,140 ids, twelve a round, a round every five minutes).
+
+Leaving did not help. The next announcer could not get the bulletin either, and the one after
+that; each leave made the leaving node a candidate or another announcer's follower, and every new
+announcer passed the menu again. That world had 3,736 role changes after the first hour, against
+613 on average.
+
+### 31.2 Four remedies
+
+Each paired with before world by world, band L, 24 worlds at 400 quiet channels and eight at
+1000; the difference in delivery is in points, with its standard error.
+
+| | Before | HAVE without the menu | Publications first | Relays do not leave | Doubling | Both limits | No leaving for what it lacks |
+|---|---|---|---|---|---|---|---|
+| 400: delivered (worst world) | 98.9 % (95.5) | 99.2 % (95.7) | 98.8 % (93.7) | 98.8 % (91.7) | 99.2 % (96.0) | 99.2 % (96.6) | 99.4 % (96.4) |
+| ... difference (se) | | +0.23 (0.25) | -0.15 (0.26) | -0.12 (0.26) | +0.26 (0.20) | +0.30 (0.15) | +0.47 (0.19) |
+| ... role changes after the first hour | 613 | 392 | 516 | 492 | 306 | 196 | 84 |
+| ... leaves for what the announcer lacked | 210 | 110 | 153 | 130 | 105 | 41 | 0 |
+| ... frames | 726,896 | 705,533 | 735,018 | 722,502 | 706,555 | 701,975 | 656,089 |
+| 1000: delivered (worst world) | 97.5 % (90.3) | 97.9 % (94.4) | 97.5 % (94.6) | 97.5 % (89.5) | 97.4 % (88.9) | 97.8 % (94.1) | 97.9 % (94.7) |
+| ... role changes after the first hour | 870 | 813 | 891 | 754 | 566 | 403 | 170 |
+| ... frames | 842,519 | 849,110 | 850,016 | 828,553 | 802,535 | 798,623 | 693,978 |
+
+- *A HAVE without the menu.* An announcer's HAVE left out the root and collection manifests of
+  channels it did not serve, so that what it served came round more often. The traced world went
+  from 95.5 % to 98.7 %, but over all worlds the gain was within its error, and under a carry
+  budget of 256 kB (§28.6) the sparse network lost 0.44 points (se 0.18), with four and nine times
+  the role changes in two of eight worlds. A likely cause, not traced: a follower whose menu
+  manifest was evicted fetches it from an announcer whose HAVE lists it, and none did. Not taken.
+- *Publications first.* What a node publishes led its HAVE as announcer for `T_grant`, as what it
+  completes does. Nothing changed beyond the error. Not taken.
+- *Relays do not leave.* What a follower only relays is no evidence against its own announcer:
+  leaving would not bring the object to the cell that asked, which an excursion does. Alone it
+  changed little: a fifth fewer role changes, and delivery within its error.
+- *Doubling.* A follower that left an announcer for an object that announcer did not list, and
+  finds the next one cannot get it either, has learned something of the object, not of the
+  announcers: each announcer it left for that object doubles how long it waits for it under the
+  next. Half the role changes; delivery within its error. Relays escaped it: a relay that is
+  dropped and taken on again starts its wait afresh, and each relay is another node.
+- *Both limits* together: two thirds fewer role changes than before, a fifth of the leaves, 3 %
+  fewer frames (se 1.1) at 400 and 5 % (2.1) at 1000, and the worst world at 96.6 % and 94.1 %
+  against 95.5 % and 90.3 %. Delivery gained 0.30 points (se 0.15) at 400. Against the doubling
+  alone, the relays gave 109 fewer role changes at 400 (se 45) and 163 at 1000 (69). Taken
+  (PROTOCOL.md §5.2, "Out of reach is not withheld").
+- *No leaving for what it lacks.* With the rule of §25 off, a follower left only an announcer that
+  listed what it wanted and did not send it. With many channels that did best of all; but the sparse
+  network without quiet channels lost: over sixteen worlds the worst delivered 96.5 % against
+  99.2 %, with real clocks 96.0 % against 99.9 %, and with 96 channels all followed 95.4 % against
+  97.9 %. In the worst of them the eight followers of one channel waited 44 hours for its first
+  pieces, which leading a cell of their own would have fetched (§25.3). The rule earns its place;
+  it is only kept from firing at what no announcer can get.
+
+### 31.3 Picked worlds regress
+
+Each remedy was first tried on the five worst worlds at 400, and each rescued the traced one
+(95.5 % to 98.7, 99.2, 99.3, and 96.6 with the relays alone) while moving the others by as much
+as three points up and five down. Over all 24 worlds, three of the first four differed from before by less than
+their standard error. The worst worlds of a sample are worst partly by chance, and any change
+reshuffles the sequence that made them so. Remedies here were judged on differences paired world
+by world, over every world measured. Small samples misled the other way too: under a carry budget
+of 64 kB the limits lost 0.26 points (se 0.13) over eight worlds, and gained 0.18 (se 0.17) over
+24 (31.4).
+
+### 31.4 The whole validation
+
+Both limits against §30, paired world by world; "one clock" and "real clocks" as in §26.3.
+
+- **Sparse** (no quiet channels): band L with one clock over sixteen worlds delivered as much to
+  the hundredth of a point (se 0.02), with 7 fewer role changes after the first hour (se 5); with
+  real clocks over eight worlds 0.03 points less (se 0.02), and over 24 more 0.02 less (se 0.02),
+  the worst of them 99.6 % against 99.4 %. Band O delivered as much throughout.
+- **Many channels**: as in 31.2. With 100 quiet channels band L delivered 0.03 points less
+  (se 0.03), with 40 fewer role changes (se 32) and 1.3 % fewer frames.
+- **Under a budget** (§28.6), band L: at 1 MB 0.04 points more (se 0.02) and 36 fewer role
+  changes (se 16), at 256 kB 0.10 less (se 0.10) and 50 fewer (se 17). At 64 kB, over 24 worlds,
+  99.2 % (worst world 97.9) against 99.0 % (96.9), 0.18 points more (se 0.17), with 516 fewer role
+  changes (se 189) and every follower holding its current window at the end against 99.4 %: four
+  of those worlds had 2,159 to 3,613 role changes before, and 331 to 639 now. Band O as before.
+- **More channels, all followed**: band L with 48 as much (se 0.03); with 96, 0.08 points less
+  (se 0.09), with 182 fewer role changes (se 48) and 2.6 % fewer frames (se 1.4).
+- **Scenario matrix, false announcers, living networks and the size sweep**: frame for frame the
+  same, but for the town in band L with real clocks (256 fewer frames of 382,536, playback as
+  soon) and one upload in one living network. **Collections**: where listeners pick single collections, which
+  relays carry most, every listener still had all it picked, playback started within 0.7 minutes
+  of before and frames were within 1.6 %; elsewhere the same.
+
+The smoke tests `a_relay_does_not_leave_its_announcer_for_what_it_relays` and
+`what_no_announcer_can_get_is_waited_for_longer` build the case from 31.1 small: a source that
+announces alone 2.5 km from a cell that relays, and a cell beyond whose listeners want its pieces.
+Leaving for what it relays, the node between left its announcer six times in six hours and ended
+up announcing; now it never does. Waiting as long each time, the two listeners left theirs 14 and
+24 times in a day; with the doubling, seven times each.
+
+### 31.5 Open
+
+- **What only a lone announcer holds** still leaves its cell only through visits. That world now
+  delivered 96.6 %. Neither a HAVE without the menu nor one led by what the source publishes was
+  the answer (31.2).
+- **A menu along a line.** In a test line of cells up to eight kilometres apart, a channel's root
+  stopped at the first announcer that held it: the next had heard of it but nobody in its cell
+  listened, so it did not fetch it, and so did not announce it, and a follower further down the
+  line never learned of the channel (§30.3 serves only what a cell listens to). The networks
+  measured here are dense enough that some announcer that holds a root is always within reach of
+  the control carrier; a sparse line is not.
+- **Band L at 1000 channels** still delivers 97.8 %, against 99.9 % without quiet channels.
