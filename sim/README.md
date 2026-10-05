@@ -22,6 +22,12 @@ delivery latency per publication, wasted receptions and orphaned objects.
 publish every H hours, spread over that span (0: never): the rest of a large menu
 (`docs/FEASIBILITY.md` §30). With more channels than nodes, a node runs several.
 
+`--strip-m W` places the nodes over a strip W metres wide instead of a square of the same area,
+with the stations spread along it: villages along a road or a valley (`docs/FEASIBILITY.md` §32).
+`dynamics` then also reports, with `MESHCAST_TRACE_SPREAD=1`, each hour for each publication in
+its period how far it has spread: its source, the span its holders cover, how many nodes want it
+and which followers hold it, all in kilometres along the strip.
+
 `--bulk` selects the content carrier: `gfsk-o` (EU band O, 500 mW, 10 % duty cycle), `gfsk-l`
 (EU band L, 25 mW, polite access hopping over 15 channels), `esp-now` (2.4 GHz long-range mode),
 `gfsk-us` (FCC 15.247, 1 W, no duty cycle), `lora-bulk` (LoRa SF7 as the only carrier, for sparse
@@ -95,6 +101,11 @@ what it hears (neighbours, ids they offered, asks recorded, store entries and so
 any honest node, sampled with the occupancy. They are what the caps of `docs/PROTOCOL.md` §8 were
 chosen against (`docs/ABUSE.md`, item 5).
 
+`dynamics` also reports a `bulk carrier` line: the parts of the network the bulk carrier joins
+(nodes that hear each other both ways), and the share of follower-publication pairs whose follower
+is in its source's part, the most any protocol could deliver without moving a node; and a `menu of
+followers` line: how often, hourly, a follower held the newest root of a channel it follows.
+
 `dynamics` also reports a `carrying` line: frames sent in all, bulk frames, what a node holds at
 the end (mean and most, in kB), relay wants taken on, objects that gave way to the carry budget,
 relays declined because the budget was full, relays handed on to the cell that asked, and relays
@@ -167,9 +178,8 @@ relays go (`docs/FEASIBILITY.md` §28):
   (`docs/FEASIBILITY.md` §30). `MESHCAST_TRACE_LATE=1` prints, in `dynamics`, each follower that
   did not hold a publication within its period: when it was published, what it was, whether the
   follower was on, and its announcer at the end.
-- `MESHCAST_RELAY_LEAVES=1` makes a follower leave its announcer for what it only relays too, and
-  `MESHCAST_LEAVE_BACKOFF=0` makes it wait as long for an object under every announcer, as before
-  `docs/FEASIBILITY.md` §31; `MESHCAST_LEAVE_LACKING=0` makes it leave only an announcer that lists
+- `MESHCAST_LEAVE_BACKOFF=0` makes a follower wait as long for an object under every announcer, as
+  before `docs/FEASIBILITY.md` §31; `MESHCAST_LEAVE_LACKING=0` makes it leave only an announcer that lists
   what it wants and does not send it. `MESHCAST_TRACE_LEAVE=1` prints a `LEAVE` line each time a
   follower leaves its announcer for what it does not get: the object, whether the announcer holds
   or wants it, whether the follower only relays it, how many nodes know it, how many bridges there
