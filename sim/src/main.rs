@@ -1034,6 +1034,15 @@ fn params() -> Params {
     if let Ok(v) = std::env::var("MESHCAST_ANNOUNCE_RECENT") {
         p.announce_recent = v != "0";
     }
+    if let Ok(v) = std::env::var("MESHCAST_LEAVE_LACKING") {
+        p.leave_lacking = v != "0";
+    }
+    if let Ok(v) = std::env::var("MESHCAST_RELAY_LEAVES") {
+        p.relay_leaves = v != "0";
+    }
+    if let Ok(v) = std::env::var("MESHCAST_LEAVE_BACKOFF") {
+        p.leave_backoff = v != "0";
+    }
     if let Ok(v) = std::env::var("MESHCAST_CELL_MENU") {
         p.cell_menu = v != "0";
     }

@@ -168,6 +168,17 @@ pub struct Params {
     /// root and never two rounds running, the roots it adopted last instead of the next stretch in
     /// channel order (PROTOCOL.md §3.4). Off: channel order only; kept to measure against.
     pub announce_recent: bool,
+    /// A follower leaves an announcer that neither serves nor gets what it wants (PROTOCOL.md §5.2,
+    /// "Asking is not getting"). Off: only one that lists it and does not send it; kept to
+    /// measure against (FEASIBILITY.md §31).
+    pub leave_lacking: bool,
+    /// A follower leaves its announcer for what it only relays too. Off: only for what it listens
+    /// to (PROTOCOL.md §5.2); kept to measure against.
+    pub relay_leaves: bool,
+    /// A follower waits for an object twice as long under each next announcer, for every
+    /// announcer it left for it that did not list it (PROTOCOL.md §5.2). Off: as long each time;
+    /// kept to measure against.
+    pub leave_backoff: bool,
     /// An announcer fetches every piece of every channel it hears of, asked for or not. Off: it
     /// fetches what a follower asks for (PROTOCOL.md §2, FEASIBILITY.md §27); kept to measure against.
     pub proactive: bool,
@@ -240,6 +251,9 @@ impl Default for Params {
             cell_menu: true,
             cell_keep_ms: 86_400_000,
             announce_recent: true,
+            leave_lacking: true,
+            relay_leaves: false,
+            leave_backoff: true,
             proactive: false,
             relay_unfollowed: true,
             t_relay_wait_ms: 600_000,
