@@ -4040,3 +4040,50 @@ of before and frames were within 0.7 %.
   hear everywhere, and relayed for each other everywhere. Not taken. An announcer that uploads to
   another as a last resort (PROTOCOL.md §9, question 11) is not measured. The narrow strip in band
   L delivers 81.7 % against 90.1 % within reach.
+
+## 34. A channel describes itself
+
+PROTOCOL.md §9 question 14 chose a direction for how everyone learns what is on the mesh: no
+directory, no key of the project's, and a guide each node builds from the channels it hears of,
+by how they describe themselves. The description is now the root's `card` (PROTOCOL.md §2), in
+vocabularies others already use: `podcast:medium` of the Podcasting 2.0 namespace for what a
+channel is, the programme types of the Radio Data System (IEC 62106) for its genre, ISO 639 for
+its language and ISO 3166 for where it is about, with one optional line of text. It is signed
+with the root and travels with it; a node reads codes it does not know as absent.
+
+### 34.1 What it weighs
+
+A root of one collection with a short title and no card is 185 bytes (one more than before: the
+empty field). A medium, one genre and one language add 10 bytes; three genres, three languages
+and an area 24 (core unit test `what_a_card_adds_to_a_root`). A symbol holds 200 bytes, so a
+small card can keep a root in one symbol, and a fuller card, a line of text or a long title takes
+it to two.
+
+### 34.2 What it costs on the air
+
+Every channel with no card, a small one (10 bytes) or a full one (24 bytes and a line of 60:
+two symbols a root), sim/README.md `MESHCAST_CARDS`; band L, paired world by world with no card:
+
+| | Square (16 worlds) | 400 quiet channels (24) | 1000 quiet channels (8) | Narrow strip (24, §32) |
+|---|---|---|---|---|
+| Root frames by announcers, none / small / full | 916 / 1,209 / 1,844 | 3,569 / 3,826 / 4,715 | 8,258 / 9,564 / 11,506 | 12,499 / 15,732 / 24,824 |
+| Root symbols pushed on the control carrier, none / full | 381 / 501 | 7,743 / 8,080 | 19,343 / 23,059 | 7,286 / 9,778 |
+| Roots in all frames, none / full | 0.2 % / 0.4 % | 1.1 % / 1.4 % | 2.1 % / 2.7 % | 1.2 % / 2.5 % |
+| Delivered, small card (se) | −0.04 (0.07) | +0.15 (0.23) | −0.24 (0.32) | −0.42 (0.88) |
+| Delivered, full card (se) | −0.09 (0.07) | +0.22 (0.20) | −0.69 (0.66) | +0.24 (0.81) |
+
+A full card doubles the root frames where roots are most of the menu, and a small one adds 7 to
+32 %; but roots are at most a few percent of all frames, the control carrier's share of airtime
+moved by at most 0.004 points (0.079 % to 0.083 % in the strip), and delivery moved within its
+error everywhere, band O too (within 0.01 points). The empty field alone changed nothing beyond the error either
+(square +0.01, se 0.05; 400 quiet channels −0.31, se 0.22; strip +0.30, se 0.50).
+
+### 34.3 Open
+
+- **How widely a channel is followed.** A guide orders by the card; ranking by how many cells
+  listen to a channel needs a signal of it, and one that a flood of self-promoting channels
+  cannot fake (ABUSE.md).
+- **Lists.** A channel whose pieces name other channels (`medium` with bit 7) needs a format for
+  those pieces.
+- **The menu after one hop** (§32.4) decides how much of the mesh a guide can show where the bulk
+  carrier does not join it.
