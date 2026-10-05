@@ -1448,7 +1448,7 @@ fn run_dynamics(nodes: usize, area_km2: f64, stations: usize, channels: usize, q
                 // and a new root that names it.
                 let series = Collection { cid: 1, kind: CollectionKind::Series, title: format!("Bulletins of channel {c}"), pieces: src.objects.clone(), schedule };
                 let cover = src.covers.first().copied().flatten();
-                let m = Manifest::sign(&src.key, src.seq, &format!("Channel {c}"), vec![series.reference(cover, true)], None, None);
+                let m = Manifest::sign_card(&src.key, src.seq, &format!("Channel {c}"), vec![series.reference(cover, true)], None, None, scenario::card_for(src.tag));
                 let node = src.node;
                 built.engine.nodes[node].node.publish(&m, std::slice::from_ref(&series), &[(o.meta(), None)]);
                 src.collections = vec![series];

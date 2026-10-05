@@ -22,6 +22,10 @@ delivery latency per publication, wasted receptions and orphaned objects.
 publish every H hours, spread over that span (0: never): the rest of a large menu
 (`docs/FEASIBILITY.md` §30). With more channels than nodes, a node runs several.
 
+`MESHCAST_CARDS=small` gives every channel's root a card (`docs/PROTOCOL.md` §2) of 10 bytes: a
+medium, one genre and one language; `MESHCAST_CARDS=full` one of three genres, three languages, an
+area and a line of 60 bytes, which takes a root to a second symbol (`docs/FEASIBILITY.md` §34).
+
 `--strip-m W` places the nodes over a strip W metres wide instead of a square of the same area,
 with the stations spread along it: villages along a road or a valley (`docs/FEASIBILITY.md` §32).
 `dynamics` then also reports, with `MESHCAST_TRACE_SPREAD=1`, each hour for each publication in

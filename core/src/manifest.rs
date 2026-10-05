@@ -100,7 +100,125 @@ pub struct Manifest {
     pub prev: Option<ObjectId>,
     /// The channel's rendition table, if it names renditions (PROTOCOL.md §1.2).
     pub renditions: Option<ObjectRef>,
+    /// The channel's description of itself, for guides (PROTOCOL.md §2).
+    pub card: Option<Card>,
     pub sig: [u8; 64],
+}
+
+/// What a channel says it is (PROTOCOL.md §2, "A channel describes itself"). Kept as signed, so
+/// that the signature still verifies; what a guide reads goes through the accessors, which
+/// read a code they do not know, or a field beyond its limits, as absent.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Card {
+    /// After `podcast:medium`; bit 7 marks a list of channels.
+    pub medium: u8,
+    /// RDS programme types (IEC 62106, the European table).
+    pub genres: Vec<u8>,
+    /// ISO 639-1 codes, or ISO 639-3 where a language has none.
+    pub langs: Vec<String>,
+    /// ISO 3166-1 country, optionally with an ISO 3166-2 subdivision.
+    pub area: Option<String>,
+    pub about: Option<String>,
+}
+
+/// What a card may hold at most on the air; beyond these the root is invalid. What a guide reads
+/// is narrower still (`Card::genres_known` and the others).
+const CARD_MAX_GENRES: usize = 16;
+const CARD_MAX_LANGS: u64 = 8;
+const CARD_MAX_SHORT: usize = 16;
+const CARD_MAX_ABOUT: usize = 255;
+
+impl Card {
+    /// The medium, 1 to 8, or none.
+    pub fn medium_known(&self) -> Option<u8> {
+        Some(self.medium & 0x7f).filter(|m| (1..=8).contains(m))
+    }
+
+    /// Whether the channel is a list of other channels.
+    pub fn is_list(&self) -> bool {
+        self.medium & 0x80 != 0 && self.medium_known().is_some()
+    }
+
+    /// At most three programme types, 1 to 29: not the alarm codes.
+    pub fn genres_known(&self) -> impl Iterator<Item = u8> + '_ {
+        self.genres.iter().copied().filter(|g| (1..=29).contains(g)).take(3)
+    }
+
+    /// At most three languages, two or three lower-case letters each.
+    pub fn langs_known(&self) -> impl Iterator<Item = &str> + '_ {
+        self.langs.iter().map(|l| l.as_str()).filter(|l| (2..=3).contains(&l.len()) && l.bytes().all(|b| b.is_ascii_lowercase())).take(3)
+    }
+
+    /// A country, optionally with a subdivision: `NL` or `NL-UT`.
+    pub fn area_known(&self) -> Option<&str> {
+        self.area.as_deref().filter(|a| {
+            let b = a.as_bytes();
+            b.len() >= 2 && b.len() <= 6 && b[..2].iter().all(|c| c.is_ascii_uppercase()) && (b.len() == 2 || (b.len() >= 4 && b[2] == b'-' && b[3..].iter().all(|c| c.is_ascii_alphanumeric())))
+        })
+    }
+
+    /// One line of at most 80 bytes.
+    pub fn about_known(&self) -> Option<&str> {
+        self.about.as_deref().filter(|a| a.len() <= 80 && !a.contains('\n'))
+    }
+
+    fn put(&self, e: &mut Encoder<Vec<u8>>) {
+        e.array(5).ok();
+        e.u8(self.medium).ok();
+        e.bytes(&self.genres).ok();
+        e.array(self.langs.len() as u64).ok();
+        for l in &self.langs {
+            e.str(l).ok();
+        }
+        for s in [&self.area, &self.about] {
+            match s {
+                Some(s) => {
+                    e.str(s).ok();
+                }
+                None => {
+                    e.null().ok();
+                }
+            }
+        }
+    }
+
+    fn get(d: &mut Decoder) -> Result<Card, ManifestError> {
+        if d.array().map_err(|_| ManifestError::Cbor)? != Some(5) {
+            return Err(ManifestError::Cbor);
+        }
+        let medium = d.u8().map_err(|_| ManifestError::Cbor)?;
+        let genres = d.bytes().map_err(|_| ManifestError::Cbor)?;
+        if genres.len() > CARD_MAX_GENRES {
+            return Err(ManifestError::BadLength);
+        }
+        let genres = genres.to_vec();
+        let n = d.array().map_err(|_| ManifestError::Cbor)?.ok_or(ManifestError::Cbor)?;
+        if n > CARD_MAX_LANGS {
+            return Err(ManifestError::BadLength);
+        }
+        let mut langs = Vec::new();
+        for _ in 0..n {
+            let l = d.str().map_err(|_| ManifestError::Cbor)?;
+            if l.len() > CARD_MAX_SHORT {
+                return Err(ManifestError::BadLength);
+            }
+            langs.push(String::from(l));
+        }
+        let mut text = |max: usize| -> Result<Option<String>, ManifestError> {
+            if d.datatype().map_err(|_| ManifestError::Cbor)? == Type::Null {
+                d.null().map_err(|_| ManifestError::Cbor)?;
+                return Ok(None);
+            }
+            let s = d.str().map_err(|_| ManifestError::Cbor)?;
+            if s.len() > max {
+                return Err(ManifestError::BadLength);
+            }
+            Ok(Some(String::from(s)))
+        };
+        let area = text(CARD_MAX_SHORT)?;
+        let about = text(CARD_MAX_ABOUT)?;
+        Ok(Card { medium, genres, langs, area, about })
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -241,9 +359,9 @@ impl Collection {
 }
 
 impl Manifest {
-    fn body_bytes(chan: &[u8; 32], seq: u32, title: &str, collections: &[CollectionRef], prev: &Option<ObjectId>, renditions: &Option<ObjectRef>) -> Vec<u8> {
+    fn body_bytes(chan: &[u8; 32], seq: u32, title: &str, collections: &[CollectionRef], prev: &Option<ObjectId>, renditions: &Option<ObjectRef>, card: &Option<Card>) -> Vec<u8> {
         let mut e = Encoder::new(Vec::new());
-        e.array(6).ok();
+        e.array(7).ok();
         e.bytes(chan).ok();
         e.u32(seq).ok();
         e.str(title).ok();
@@ -266,18 +384,29 @@ impl Manifest {
             }
         }
         put_ref(&mut e, renditions);
+        match card {
+            Some(c) => c.put(&mut e),
+            None => {
+                e.null().ok();
+            }
+        }
         e.into_writer()
     }
 
     pub fn sign(key: &SigningKey, seq: u32, title: &str, collections: Vec<CollectionRef>, prev: Option<ObjectId>, renditions: Option<ObjectRef>) -> Manifest {
+        Self::sign_card(key, seq, title, collections, prev, renditions, None)
+    }
+
+    /// A root with the channel's description of itself (PROTOCOL.md §2).
+    pub fn sign_card(key: &SigningKey, seq: u32, title: &str, collections: Vec<CollectionRef>, prev: Option<ObjectId>, renditions: Option<ObjectRef>, card: Option<Card>) -> Manifest {
         let chan = key.verifying_key().to_bytes();
-        let body = Self::body_bytes(&chan, seq, title, &collections, &prev, &renditions);
+        let body = Self::body_bytes(&chan, seq, title, &collections, &prev, &renditions, &card);
         let sig = key.sign(&body).to_bytes();
-        Manifest { chan, seq, title: String::from(title), collections, prev, renditions, sig }
+        Manifest { chan, seq, title: String::from(title), collections, prev, renditions, card, sig }
     }
 
     pub fn encode(&self) -> Vec<u8> {
-        let body = Self::body_bytes(&self.chan, self.seq, &self.title, &self.collections, &self.prev, &self.renditions);
+        let body = Self::body_bytes(&self.chan, self.seq, &self.title, &self.collections, &self.prev, &self.renditions, &self.card);
         let mut e = Encoder::new(Vec::new());
         e.array(2).ok();
         e.bytes(&body).ok();
@@ -299,7 +428,7 @@ impl Manifest {
         sig.copy_from_slice(sig_b);
 
         let mut b = Decoder::new(body);
-        if b.array().map_err(|_| ManifestError::Cbor)? != Some(6) {
+        if b.array().map_err(|_| ManifestError::Cbor)? != Some(7) {
             return Err(ManifestError::Cbor);
         }
         let chan_b = b.bytes().map_err(|_| ManifestError::Cbor)?;
@@ -333,7 +462,13 @@ impl Manifest {
             _ => Some(get_id(&mut b)?),
         };
         let renditions = get_ref(&mut b)?;
-        let m = Manifest { chan, seq, title, collections, prev, renditions, sig };
+        let card = if b.datatype().map_err(|_| ManifestError::Cbor)? == Type::Null {
+            b.null().map_err(|_| ManifestError::Cbor)?;
+            None
+        } else {
+            Some(Card::get(&mut b)?)
+        };
+        let m = Manifest { chan, seq, title, collections, prev, renditions, card, sig };
         if !m.verify() {
             return Err(ManifestError::BadSignature);
         }
@@ -342,7 +477,7 @@ impl Manifest {
 
     pub fn verify(&self) -> bool {
         let Ok(vk) = VerifyingKey::from_bytes(&self.chan) else { return false };
-        let body = Self::body_bytes(&self.chan, self.seq, &self.title, &self.collections, &self.prev, &self.renditions);
+        let body = Self::body_bytes(&self.chan, self.seq, &self.title, &self.collections, &self.prev, &self.renditions, &self.card);
         let sig = Signature::from_bytes(&self.sig);
         vk.verify(&body, &sig).is_ok()
     }
@@ -404,5 +539,68 @@ mod tests {
         let pos = bad.windows(4).position(|w| w == b"Test").unwrap();
         bad[pos] = b'X';
         assert_eq!(Manifest::decode(&bad), Err(ManifestError::BadSignature));
+    }
+
+    fn podcast_card() -> Card {
+        Card { medium: 1, genres: vec![1, 7], langs: vec![String::from("nl"), String::from("en")], area: None, about: None }
+    }
+
+    #[test]
+    fn a_card_is_signed_with_its_root() {
+        let key = SigningKey::from_bytes(&[7u8; 32]);
+        let c = album();
+        let m = Manifest::sign_card(&key, 3, "Test channel", vec![c.reference(None, true)], None, None, Some(podcast_card()));
+        let back = Manifest::decode(&m.encode()).unwrap();
+        assert_eq!(back.card, Some(podcast_card()));
+        // Changing the card breaks the signature: only the channel's key describes it.
+        let mut bytes = m.encode();
+        let pos = bytes.windows(2).position(|w| w == b"nl").unwrap();
+        bytes[pos] = b'd';
+        bytes[pos + 1] = b'e';
+        assert_eq!(Manifest::decode(&bytes), Err(ManifestError::BadSignature));
+    }
+
+    #[test]
+    fn a_guide_reads_what_it_does_not_know_as_absent() {
+        // Codes from a newer vocabulary, the alarm codes and fields over their limits are read as
+        // absent, and the root stays valid (PROTOCOL.md §2).
+        let key = SigningKey::from_bytes(&[7u8; 32]);
+        let card = Card { medium: 0x80 | 42, genres: vec![0, 31, 4, 40, 10, 11, 12], langs: vec![String::from("NL"), String::from("fy"), String::from("nds"), String::from("en"), String::from("de")], area: Some(String::from("NL-UTRECHT")), about: Some(String::from("x").repeat(81)) };
+        let m = Manifest::sign_card(&key, 1, "T", vec![], None, None, Some(card));
+        let back = Manifest::decode(&m.encode()).unwrap();
+        let c = back.card.unwrap();
+        assert_eq!(c.medium_known(), None);
+        assert!(!c.is_list());
+        assert_eq!(c.genres_known().collect::<Vec<_>>(), vec![4, 10, 11]);
+        assert_eq!(c.langs_known().collect::<Vec<_>>(), vec!["fy", "nds", "en"]);
+        assert_eq!(c.area_known(), None);
+        assert_eq!(c.about_known(), None);
+        let list = Card { medium: 0x80 | 2, area: Some(String::from("NL-UT")), ..Card::default() };
+        assert!(list.is_list() && list.medium_known() == Some(2) && list.area_known() == Some("NL-UT"));
+    }
+
+    #[test]
+    fn a_card_beyond_its_bounds_makes_the_root_invalid() {
+        let key = SigningKey::from_bytes(&[7u8; 32]);
+        let card = Card { genres: vec![1; 17], ..Card::default() };
+        let m = Manifest::sign_card(&key, 1, "T", vec![], None, None, Some(card));
+        assert_eq!(Manifest::decode(&m.encode()), Err(ManifestError::BadLength));
+    }
+
+    #[test]
+    fn what_a_card_adds_to_a_root() {
+        // PROTOCOL.md §2: a card without `about` is 10 to 25 bytes; a root of one collection with a
+        // short title and no card is 185 bytes.
+        let key = SigningKey::from_bytes(&[7u8; 32]);
+        let c = CollectionRef { cid: 1, kind: CollectionKind::Series, title: String::from("Bulletins of channel 3"), manifest: ObjectRef { id: ObjectId([1; 32]), len: 900 }, cover: None, changed: true };
+        let bare = Manifest::sign(&key, 12, "Channel 3", vec![c.clone()], None, None).encode().len();
+        assert_eq!(bare, 185);
+        let small = Card { medium: 7, genres: vec![1], langs: vec![String::from("nl")], area: None, about: None };
+        let big = Card { medium: 1, genres: vec![1, 7, 29], langs: vec![String::from("nl"), String::from("fy"), String::from("nds")], area: Some(String::from("NL-UT")), about: None };
+        for (card, lo, hi) in [(small, 10, 10), (big, 24, 24)] {
+            let with = Manifest::sign_card(&key, 12, "Channel 3", vec![c.clone()], None, None, Some(card)).encode().len();
+            let added = with - bare + 1; // the null it replaces
+            assert!(added >= lo && added <= hi, "a card adds {added} bytes");
+        }
     }
 }
