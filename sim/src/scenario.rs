@@ -159,6 +159,9 @@ pub struct TrackInfo {
 /// A publishing node and what it needs to publish again later.
 pub struct SourceInfo {
     pub node: usize,
+    /// What its key and objects are made from: the node for its first channel, and another value for
+    /// each further channel of the same node.
+    pub tag: usize,
     pub key: SigningKey,
     pub channel: meshcast_core::ids::ChannelId,
     pub objects: Vec<ManifestObject>,
@@ -250,7 +253,11 @@ pub fn build(spec: &ScenarioSpec, params: Params) -> Built {
     };
     let sources: Vec<usize> = match &spec.sources_at {
         Some(s) => s.clone(),
-        None => (0..n).filter(|i| !stations.contains(i)).take(spec.sources).collect(),
+        // More channels than nodes: a node publishes several, as a station of a broadcaster would.
+        None => {
+            let pool: Vec<usize> = (0..n).filter(|i| !stations.contains(i)).collect();
+            (0..spec.sources).map(|k| pool[k % pool.len().max(1)]).collect()
+        }
     };
 
     let profile = profile_for(spec.bulk);
@@ -316,10 +323,19 @@ pub fn build(spec: &ScenarioSpec, params: Params) -> Built {
     let mut source_infos = Vec::new();
     let mut rng2 = Rng::new(spec.seed ^ 0xF00D);
     let mut rc = Rng::new(spec.seed ^ 0xC011);
-    for &s in &sources {
+    for (ci, &s) in sources.iter().enumerate() {
+        // A node's first channel is made from the node; a further one from a tag of its own.
+        let rep = sources[..ci].iter().filter(|&&x| x == s).count();
+        let tag = if rep == 0 { s } else { s + rep * 100_000 };
         let mut kb = [0u8; 32];
         for (k, b) in kb.iter_mut().enumerate() {
             *b = (spec.seed as u8).wrapping_add(k as u8).wrapping_mul(31).wrapping_add(s as u8);
+        }
+        if rep > 0 {
+            for (k, b) in (tag as u64).to_le_bytes().iter().enumerate() {
+                kb[k] ^= *b;
+                kb[k + 8] = kb[k + 8].wrapping_add(*b).wrapping_mul(13);
+            }
         }
         let key = SigningKey::from_bytes(&kb);
         let mut objects = Vec::new();
@@ -330,7 +346,7 @@ pub fn build(spec: &ScenarioSpec, params: Params) -> Built {
         let mut table = RenditionTable::default();
         for t in 0..spec.tracks {
             let item = &mix[t % mix.len()];
-            let o = track_object(spec.seed, s, t, item.kb * 1024, item.kind());
+            let o = track_object(spec.seed, tag, t, item.kb * 1024, item.kind());
             if let Some(r) = spec.renditions.as_ref().and_then(|r| rendition_of(&o, r)) {
                 table.entries.push(r);
             }
@@ -347,14 +363,14 @@ pub fn build(spec: &ScenarioSpec, params: Params) -> Built {
         for (k, part) in objects.chunks(chunk).enumerate() {
             let ids: Vec<ShortId> = part.iter().map(|o| o.id.short()).collect();
             let kind = if spec.collections.singles { CollectionKind::Singles } else if per == 1 { CollectionKind::Series } else { CollectionKind::Album };
-            collections.push(Collection { cid: k as u32 + 1, kind, title: format!("Collection {k} of node {s}"), pieces: part.to_vec(), schedule: schedule.iter().filter(|e| ids.contains(&e.object)).cloned().collect() });
-            covers.push((spec.collections.cover_kb > 0).then(|| cover_object(spec.seed, s, k, spec.collections.cover_kb * 1024)));
+            collections.push(Collection { cid: k as u32 + 1, kind, title: format!("Collection {k} of node {tag}"), pieces: part.to_vec(), schedule: schedule.iter().filter(|e| ids.contains(&e.object)).cloned().collect() });
+            covers.push((spec.collections.cover_kb > 0).then(|| cover_object(spec.seed, tag, k, spec.collections.cover_kb * 1024)));
         }
         // The source names its renditions in a table; the manifest names the table.
         let (table_meta, table_bytes) = table.as_object();
         let table_ref = (!table.entries.is_empty()).then_some(ObjectRef { id: table_meta.id, len: table_meta.len });
         let refs: Vec<CollectionRef> = collections.iter().zip(&covers).map(|(c, v)| c.reference(v.as_ref().map(|(v, _)| ObjectRef { id: v.id, len: v.len }), true)).collect();
-        let m = Manifest::sign(&key, 1, &format!("Channel of node {s}"), refs, None, table_ref);
+        let m = Manifest::sign(&key, 1, &format!("Channel of node {tag}"), refs, None, table_ref);
         let chan = m.channel_id();
         if table_ref.is_some() {
             metas.push((table_meta, Some(&table_bytes[..])));
@@ -402,7 +418,7 @@ pub fn build(spec: &ScenarioSpec, params: Params) -> Built {
                 tracks.insert(v.id.short(), TrackInfo { label: COVER.into(), source: s, index: objects.len() + k, bytes: v.len, followers: of_collection[k].clone(), rendition: None, small: Vec::new(), slot_ms: None, collection: k, play_ms: 0 });
             }
         }
-        source_infos.push(SourceInfo { node: s, key, channel: chan, objects, collections, covers: covers.iter().map(|v| v.as_ref().map(|(v, _)| ObjectRef { id: v.id, len: v.len })).collect(), seq: 1 });
+        source_infos.push(SourceInfo { node: s, tag, key, channel: chan, objects, collections, covers: covers.iter().map(|v| v.as_ref().map(|(v, _)| ObjectRef { id: v.id, len: v.len })).collect(), seq: 1 });
     }
     engine.rendition_ids = tracks.values().filter_map(|t| t.rendition.map(|(id, _)| id)).collect();
     if let Some(a) = spec.attack.as_ref().filter(|a| a.attackers > 0) {

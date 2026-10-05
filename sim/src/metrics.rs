@@ -62,6 +62,8 @@ pub struct Metrics {
     pub bulk_collision_kinds: [[u64; 2]; 2],
     /// Bulk frames sent by announcers / by others.
     pub bulk_sent_by: [u64; 2],
+    /// The same by what the frame carries: [root manifest, collection manifest, piece or other, unknown].
+    pub bulk_sent_kind: [[u64; 4]; 2],
     /// Upload-upload collisions: same object (duplicate uploaders) vs different objects.
     pub upload_collision_same_object: u64,
     pub upload_collision_other_object: u64,

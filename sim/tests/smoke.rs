@@ -460,6 +460,7 @@ fn a_false_announcement_blocks_nothing() {
         node: NodeId(99),
         entries: vec![AnnounceEntry { channel: chan, manifest: ShortId([0xEE; 8]), seq: u32::MAX, len: 5_000 }],
         whole: false,
+        chosen: false,
     });
     for i in [1, 2] {
         let now = b.engine.now;
@@ -671,7 +672,7 @@ fn a_new_root_keeps_a_collection_until_its_manifest_is_held() {
     let f = &mut b.engine.nodes[1].node;
     f.store.insert_complete(meta, Some(&bytes));
     let now = b.engine.now;
-    let hint = Frame::ManifestAnnounce(ManifestAnnounce { node: NodeId(99), entries: vec![AnnounceEntry { channel: chan, manifest: meta.id.short(), seq: root.seq, len: meta.len }], whole: false });
+    let hint = Frame::ManifestAnnounce(ManifestAnnounce { node: NodeId(99), entries: vec![AnnounceEntry { channel: chan, manifest: meta.id.short(), seq: root.seq, len: meta.len }], whole: false, chosen: false });
     f.handle_frame(now, 1, &hint, -60);
     assert_eq!(f.manifest_state(&chan).map(|m| (m.0, m.2)), Some((root.seq, true)), "the new root should be adopted");
     b.engine.run(3 * 3_600_000, 600_000);
@@ -1404,4 +1405,80 @@ fn announcers_that_meet_only_on_the_control_carrier_share_its_window() {
     let (pairs, apart, partly) = b.engine.ctrl_only_pairs(ctrl, bulk);
     assert!(pairs >= 1, "the two cells should hear each other only on the control carrier");
     assert_eq!((apart, partly), (0, 0), "their control windows should meet");
+}
+
+/// Two band O cells that hear each other only on the control carrier, the second out of the
+/// control range of the first cell's source. In the first, node 0 publishes `channels` channels,
+/// node 1 follows them all and station 2 announces; in the second, station 3 announces and node 4
+/// follows nothing yet.
+fn two_cells(params: Params, channels: usize, hours: f64) -> meshcast_sim::scenario::Built {
+    let positions = vec![(0.0, 0.0), (1500.0, 0.0), (2500.0, 0.0), (11500.0, 0.0), (12000.0, 0.0)];
+    let mut s = spec(BulkPreset::GfskO, positions, vec![0; channels], vec![2, 3], hours);
+    s.tracks = 1;
+    s.track_kb = 2;
+    let mut b = build(&s, params);
+    for i in [3, 4] {
+        let all: Vec<_> = b.engine.nodes[i].node.follows().iter().copied().collect();
+        for c in all {
+            b.engine.nodes[i].node.unfollow(c);
+        }
+    }
+    b
+}
+
+#[test]
+fn an_announcer_serves_what_its_cell_listens_to() {
+    // An announcer served every channel it heard of: it kept each one's root current, fetched its
+    // collection manifests and passed every new manifest once, and with hundreds of channels that
+    // nobody near followed, the menu took the airtime its followers' uploads needed
+    // (FEASIBILITY.md §30). It now serves what a follower of its cell asked for or announced, and
+    // what it follows (PROTOCOL.md §2).
+    let (channels, j) = (40, 20);
+    let mut b = two_cells(Params::default(), channels, 3.0);
+    b.engine.run(2 * 3_600_000, 600_000);
+    let station = &b.engine.nodes[3].node;
+    assert!(station.is_announcing(), "the second cell's station should announce");
+    let chans: Vec<_> = b.sources.iter().map(|s| s.channel).collect();
+    let known = chans.iter().filter(|c| station.manifest_state(c).is_some()).count();
+    assert_eq!(known, channels, "the second cell should hear of every channel of the first");
+    let served = chans.iter().filter(|c| station.serves_channel(c)).count();
+    assert_eq!(served, 0, "it should serve none of them while its cell listens to none");
+    assert_eq!(station.wants_len(), 0, "it should fetch nothing for nobody");
+    // Its follower follows one: the announcer serves it from the first ask.
+    b.engine.nodes[4].node.follow(chans[j]);
+    b.engine.poke(4);
+    b.engine.run(2 * 3_600_000 + 600_000, 60_000);
+    let station = &b.engine.nodes[3].node;
+    let served: Vec<usize> = (0..channels).filter(|&i| station.serves_channel(&chans[i])).collect();
+    assert_eq!(served, vec![j], "it should serve the channel its follower asked for, and that one only");
+}
+
+#[test]
+fn a_new_root_is_announced_before_its_turn() {
+    // An announcer whose list does not fit one frame announced it in channel order, seven new
+    // entries a round: the new root of one channel among hundreds waited hours for its turn, in
+    // every cell on the way to its listeners (FEASIBILITY.md §30). In the round after it adopts a
+    // root it now announces the roots it adopted last (PROTOCOL.md §3.4). Six channels spread over
+    // eighty publish at once; in channel order the other cell would learn of all six only after
+    // most of a rotation, some fifty minutes.
+    use meshcast_core::manifest::{Collection, CollectionKind, Manifest};
+    use meshcast_core::object::ContentType;
+    let channels = 80;
+    let mut b = two_cells(Params::default(), channels, 4.0);
+    b.engine.run(3 * 3_600_000, 600_000);
+    let ks = [5, 18, 31, 44, 57, 70];
+    let seqs = |b: &meshcast_sim::scenario::Built| ks.map(|k| b.engine.nodes[3].node.manifest_state(&b.sources[k].channel).map(|m| m.0));
+    assert_eq!(seqs(&b), ks.map(|_| Some(1)), "the second cell's announcer should know the first roots");
+    for k in ks {
+        let src = &mut b.sources[k];
+        let o = meshcast_sim::scenario::track_object(42, src.tag, src.objects.len(), 2_000, ContentType::Speech);
+        src.objects.push(o.clone());
+        src.seq += 1;
+        let series = Collection { cid: 1, kind: CollectionKind::Series, title: "Series".into(), pieces: src.objects.clone(), schedule: Vec::new() };
+        let m = Manifest::sign(&src.key, src.seq, "Channel", vec![series.reference(None, true)], None, None);
+        b.engine.nodes[0].node.publish(&m, &[series], &[(o.meta(), None)]);
+    }
+    b.engine.poke(0);
+    b.engine.run(3 * 3_600_000 + 20 * 60_000, 60_000);
+    assert_eq!(seqs(&b), ks.map(|_| Some(2)), "the new roots should reach the other cell within twenty minutes");
 }
