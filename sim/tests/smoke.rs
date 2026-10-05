@@ -1482,3 +1482,48 @@ fn a_new_root_is_announced_before_its_turn() {
     b.engine.run(3 * 3_600_000 + 20 * 60_000, 60_000);
     assert_eq!(seqs(&b), ks.map(|_| Some(2)), "the new roots should reach the other cell within twenty minutes");
 }
+
+fn out_of_reach(params: Params, hours: f64) -> meshcast_sim::scenario::Built {
+    // As `bystander_bridge`, station A, a node between that hears both stations and follows A by
+    // signal, and station B with two listeners; but the source announces alone 2.5 km from A,
+    // out of reach on the bulk carrier of band L (about 985 m). Its roots reach everyone on the
+    // control carrier; what B's listeners want, nobody in reach holds.
+    let positions = vec![(-2500.0, 0.0), (0.0, 0.0), (450.0, 0.0), (1350.0, 0.0), (1500.0, 100.0), (1550.0, -100.0)];
+    let mut s = spec(BulkPreset::GfskL, positions, vec![0], vec![1, 3], hours);
+    s.mix = meshcast_sim::scenario::parse_mix("snac-music:42,snac-speech:22").unwrap();
+    let mut b = build(&s, params);
+    let chan = b.sources[0].channel;
+    for i in [1, 2, 3] {
+        b.engine.nodes[i].node.unfollow(chan);
+    }
+    b.engine.run((hours * 3.6e6) as u64, 600_000);
+    b
+}
+
+#[test]
+fn a_relay_does_not_leave_its_announcer_for_what_it_relays() {
+    // With 400 channels in a band L network, one piece that only its source held, an announcer
+    // nobody near followed, made 93 nodes leave their announcers 1,510 times in two days, 1,366
+    // of them for what they relayed for another cell (FEASIBILITY.md §31). What a follower only
+    // relays is no evidence against its own announcer (PROTOCOL.md §5.2); leaving for it, the
+    // node between left A six times in six hours here and ended up announcing.
+    let b = out_of_reach(Params::default(), 6.0);
+    let bridge = &b.engine.nodes[2].node;
+    assert!(bridge.stats.relay_wants > 0, "the node between should relay what B asks for");
+    assert_eq!(bridge.stats.left_lacking, 0, "it should not leave A for what it relays");
+    assert_eq!(bridge.announcer_of(1), b.engine.nodes[1].node.id(), "it should still follow A");
+}
+
+#[test]
+fn what_no_announcer_can_get_is_waited_for_longer() {
+    // A follower that left its announcer for an object that announcer did not list waits for it
+    // twice as long under the next, for every announcer it left for it (PROTOCOL.md §5.2): at
+    // most five leaves a day for each of the two pieces nobody in reach holds. Waiting as long
+    // each time, B's two listeners left 14 and 24 times in a day.
+    let b = out_of_reach(Params::default(), 24.0);
+    for f in [4, 5] {
+        let left = b.engine.nodes[f].node.stats.left_lacking;
+        assert!(left > 0, "listener {f} should still try another announcer");
+        assert!(left <= 10, "listener {f} left its announcer {left} times for two pieces out of reach");
+    }
+}

@@ -147,6 +147,10 @@ pub struct Engine {
     busy_from: VecDeque<(Millis, Millis, usize)>,
     pub busy_blame: std::collections::BTreeMap<usize, (u64, Millis, Millis)>,
     next_sample: Millis,
+    /// Diagnostic (MESHCAST_TRACE_LEAVE): each follower that leaves its announcer for what it does
+    /// not get, with who holds that object and who hears whom.
+    trace_leave: bool,
+    seen_leave: Vec<Millis>,
 }
 
 impl Engine {
@@ -208,7 +212,7 @@ impl Engine {
         }
         let mut metrics = Metrics::default();
         metrics.per_node_bulk = vec![(0, 0); n];
-        let mut e = Engine { attackers: Vec::new(), attack_ids: Vec::new(), rendition_ids: Default::default(), nodes, phys, heap: BinaryHeap::new(), seq: 0, tx_seq: 0, loss, reach, recent: HashMap::new(), txs: HashMap::new(), now: 0, metrics, verbose: false, trace_grants: std::env::var("MESHCAST_TRACE_GRANTS").is_ok(), trace_busy: std::env::var("MESHCAST_TRACE_BUSY").ok().and_then(|v| v.parse().ok()), busy_from: VecDeque::new(), busy_blame: Default::default(), next_sample: 0, lose: Vec::new(), trace_rx: std::env::var("MESHCAST_TRACE_RX").ok().and_then(|v| v.parse().ok()), no_ctrl_rx: std::env::var("MESHCAST_NO_CTRL_RX").is_ok(), clock_restart: restart };
+        let mut e = Engine { attackers: Vec::new(), attack_ids: Vec::new(), rendition_ids: Default::default(), nodes, phys, heap: BinaryHeap::new(), seq: 0, tx_seq: 0, loss, reach, recent: HashMap::new(), txs: HashMap::new(), now: 0, metrics, verbose: false, trace_grants: std::env::var("MESHCAST_TRACE_GRANTS").is_ok(), trace_busy: std::env::var("MESHCAST_TRACE_BUSY").ok().and_then(|v| v.parse().ok()), busy_from: VecDeque::new(), busy_blame: Default::default(), next_sample: 0, trace_leave: std::env::var("MESHCAST_TRACE_LEAVE").is_ok(), seen_leave: vec![0; n], lose: Vec::new(), trace_rx: std::env::var("MESHCAST_TRACE_RX").ok().and_then(|v| v.parse().ok()), no_ctrl_rx: std::env::var("MESHCAST_NO_CTRL_RX").is_ok(), clock_restart: restart };
         for i in 0..n {
             e.schedule_wake(i, 1);
         }
@@ -548,6 +552,14 @@ impl Engine {
     }
 
     fn apply(&mut self, i: usize, actions: Vec<Action>) {
+        if self.trace_leave {
+            if let Some((t, ann, x)) = self.nodes[i].node.last_leave() {
+                if t != self.seen_leave[i] {
+                    self.seen_leave[i] = t;
+                    self.trace_leave_of(i, ann, x);
+                }
+            }
+        }
         for a in actions {
             match a {
                 Action::Tx { .. } if self.nodes[i].mute => {}
@@ -800,6 +812,30 @@ impl Engine {
                 eprintln!("OX {} {} {} {:?} {} by={} meet={}", tx.start, tx.from, j, o, outcome, by, self.nodes[j].node.in_meeting(tx.carrier, self.nodes[j].clock.local(tx.start)));
             }
         }
+    }
+
+    /// One line for MESHCAST_TRACE_LEAVE: follower `i` left announcer `ann` waiting for `x`. Every
+    /// node that holds `x`, with its role, its announcer, and whether it and `ann` hear each other on
+    /// the bulk carrier and how strongly `i` hears it.
+    fn trace_leave_of(&self, i: usize, ann: meshcast_core::ids::NodeId, x: meshcast_core::ids::ShortId) {
+        let bulk = self.phys.len() - 1;
+        let sens = self.phys[bulk].sensitivity_dbm;
+        let a = (ann.0 as usize).wrapping_sub(1);
+        let ok = a < self.nodes.len();
+        let holders: Vec<String> = (0..self.nodes.len()).filter(|&j| self.nodes[j].alive && self.nodes[j].node.holds(&x)).map(|j| {
+            let n = &self.nodes[j].node;
+            let hears = ok && self.rx_dbm(j, a, bulk) >= sens && self.rx_dbm(a, j, bulk) >= sens;
+            format!("{}:{:?}:ann{}:{}:{:.0}", j, n.role(bulk), n.announcer_of(bulk).0, if hears { "heard" } else { "apart" }, self.rx_dbm(j, i, bulk))
+        }).collect();
+        let (alive, holds, wants) = if ok { let n = &self.nodes[a].node; (self.nodes[a].alive, n.holds(&x), n.wants_object(&x)) } else { (false, false, false) };
+        // Bridges: nodes that hear, and are heard by, both `ann` and some holder; and of them, those
+        // that know `x` well enough to name it (its length, from a manifest), and those that hold it.
+        let hear = |p: usize, q: usize| self.rx_dbm(p, q, bulk) >= sens && self.rx_dbm(q, p, bulk) >= sens;
+        let held: Vec<usize> = (0..self.nodes.len()).filter(|&j| self.nodes[j].alive && self.nodes[j].node.holds(&x)).collect();
+        let bridges: Vec<usize> = if ok { (0..self.nodes.len()).filter(|&j| j != a && self.nodes[j].alive && hear(j, a) && held.iter().any(|&h| h != j && hear(j, h))).collect() } else { Vec::new() };
+        let knowing = bridges.iter().filter(|&&j| self.nodes[j].node.object_kind(&x).is_some()).count();
+        let knowers = (0..self.nodes.len()).filter(|&j| self.nodes[j].alive && self.nodes[j].node.object_kind(&x).is_some()).count();
+        eprintln!("LEAVE {} {} ann={} alive={} holds={} wants={} relay={} {:?} {:?} knowers={} bridges={} knowing={} holders=[{}]", self.now, i, ann.0, alive, holds, wants, self.nodes[i].node.relays(&x), x, self.nodes[i].node.object_kind(&x), knowers, bridges.len(), knowing, holders.join(" "));
     }
 
     fn rx_dbm(&self, from: usize, to: usize, carrier: usize) -> f64 {

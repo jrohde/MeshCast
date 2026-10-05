@@ -343,6 +343,8 @@ struct Progress {
     last_progress: Millis,
     last_nack: Millis,
     last_want: Millis,
+    /// How many announcers we left for it that did not list it.
+    left: u8,
 }
 
 impl CarrierRt {
@@ -531,6 +533,8 @@ pub struct Node {
     last_probe: Millis,
     /// The want we ask our announcer for as proof, and since when (§5.2).
     probing: Option<(ShortId, Millis)>,
+    /// Diagnostic: when we last left our announcer for what it did not get us, whom, and for what.
+    last_leave: Option<(Millis, NodeId, ShortId)>,
     /// The announcer that answered our proof NACK since we began to follow it, and when (§5.2).
     proven: Option<(NodeId, Millis)>,
     /// What the latest shared time heard adds to our own clock (PROTOCOL.md §6).
@@ -677,6 +681,7 @@ impl Node {
             following_since: now,
             last_probe: 0,
             probing: None,
+            last_leave: None,
             proven: None,
             mesh_off: 0,
             time_pending: 0,
@@ -976,6 +981,16 @@ impl Node {
     /// Diagnostic: the content type we know for `id`.
     pub fn object_kind(&self, id: &ShortId) -> Option<crate::object::ContentType> {
         self.store.entry(id).filter(|e| e.len().is_some()).map(|e| e.kind())
+    }
+
+    /// Diagnostic: when we last left our announcer for what it did not get us, whom, and for what.
+    pub fn last_leave(&self) -> Option<(Millis, NodeId, ShortId)> {
+        self.last_leave
+    }
+
+    /// Diagnostic: whether we want `id` only to relay it to another cell (PROTOCOL.md §4).
+    pub fn relays(&self, id: &ShortId) -> bool {
+        self.relayed.contains(id)
     }
 
     /// Diagnostic: whether, as announcer, we serve channel `chan` (PROTOCOL.md §2).
@@ -1856,6 +1871,7 @@ impl Node {
             p.wanted_at = now;
             p.last_progress = 0;
             p.last_want = 0;
+            p.left = 0;
             if self.is_announcing() {
                 self.gossip_soon();
             }
@@ -2154,9 +2170,25 @@ impl Node {
         let w = crate::carousel::longest_spacing(self.cfg.params.t_want_min_ms) + self.cfg.params.t_want_min_ms;
         let from = self.following_since;
         let own_haves = self.neighbors.get(&own).map(|n| n.haves.clone()).unwrap_or_default();
-        let claims_or_lacks = |x: &ShortId| own_haves.contains_key(x) || !self.ann_granted_within(x, t);
-        let never_served = self.wants.iter().any(|x| claims_or_lacks(x) && self.progress.get(x).map(|p| p.last_progress == 0 && now >= p.wanted_at.max(from) + w).unwrap_or(false))
-            || self.pending_ack.iter().any(|(p, since)| own_haves.contains_key(p) && now >= *since + w);
+        let lacking = self.cfg.params.leave_lacking;
+        let claims_or_lacks = |x: &ShortId| own_haves.contains_key(x) || (lacking && !self.ann_granted_within(x, t));
+        // Two limits keep leaving to what it is for (FEASIBILITY.md §31). What we only relay for
+        // another cell is no evidence against our own announcer: leaving would not bring it to
+        // the cell that asked, an excursion does that, and it shakes our own cell. And what the
+        // next announcer cannot get either is out of reach, not withheld: each announcer we left
+        // for it that did not list it doubles how long we wait for it under the next. One that
+        // lists it and does not send it is waited for as long as ever. Without them, one piece
+        // that only its source held, an announcer nobody near followed, made 93 nodes leave
+        // their announcers 1,510 times in two days, 1,366 of them for what they relayed.
+        let relay_leaves = self.cfg.params.relay_leaves;
+        let ours = |x: &ShortId| relay_leaves || !self.relayed.contains(x);
+        let backoff = self.cfg.params.leave_backoff;
+        let patience = |x: &ShortId, d: Millis| match self.progress.get(x) {
+            Some(p) if backoff && !own_haves.contains_key(x) => d.saturating_mul(1u64.checked_shl(p.left as u32).unwrap_or(u64::MAX)),
+            _ => d,
+        };
+        let never_served_for = self.wants.iter().find(|x| ours(x) && claims_or_lacks(x) && self.progress.get(x).map(|p| p.last_progress == 0 && now >= p.wanted_at.max(from).saturating_add(patience(x, w))).unwrap_or(false)).copied();
+        let never_served = never_served_for.is_some() || self.pending_ack.iter().any(|(p, since)| own_haves.contains_key(p) && now >= *since + w);
         // Sooner by asking: an announcer that has listed what we wait for since we began to wait,
         // and has not sent one symbol of it for `T_want_min`, the time after which we would ask for
         // it again, or that has named no uploader for it for `T_excursion`. Waiting alone proves
@@ -2176,15 +2208,15 @@ impl Node {
         // probe could follow every answer at once (§25).
         let proven = self.proven.filter(|(a, at)| *a == own && *at >= from).map(|(_, at)| at);
         let waiting = self.wants.iter().find(|x| {
-            claims_or_lacks(x)
+            ours(x) && claims_or_lacks(x)
                 && self.progress.get(x).map(|p| {
                     let start = since(p).max(from);
                     // Listed since we began to wait: what it listed before, it may have dropped since.
                     let claims = own_haves.get(x).map(|at| *at >= start).unwrap_or(false);
                     now >= match proven {
-                        Some(at) => start.max(at) + t,
+                        Some(at) => start.max(at).saturating_add(patience(x, t)),
                         None if claims => start + self.cfg.params.t_want_min_ms,
-                        None => start + t,
+                        None => start.saturating_add(patience(x, t)),
                     }
                 })
                 .unwrap_or(false)
@@ -2222,12 +2254,17 @@ impl Node {
             None => self.probing = None,
         }
         if never_served || silent {
+            let lacked = never_served_for.or(waiting.filter(|_| silent && !silent_listed)).filter(|x| !own_haves.contains_key(x));
+            if let Some(p) = lacked.and_then(|x| self.progress.get_mut(&x)) {
+                p.left = p.left.saturating_add(1);
+            }
             if never_served {
                 self.stats.left_never_served += 1;
             } else if silent_listed {
                 self.stats.left_unanswered_listed += 1;
             } else {
                 self.stats.left_lacking += 1;
+                self.last_leave = waiting.map(|x| (now, own, x));
             }
             let (score, caps) = (self.score, self.caps());
             let tr = self.carriers[i].election.as_mut().and_then(|e| e.shun(now, own, now + ttl, score, caps, &mut self.rng));

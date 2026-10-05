@@ -167,6 +167,15 @@ relays go (`docs/FEASIBILITY.md` §28):
   (`docs/FEASIBILITY.md` §30). `MESHCAST_TRACE_LATE=1` prints, in `dynamics`, each follower that
   did not hold a publication within its period: when it was published, what it was, whether the
   follower was on, and its announcer at the end.
+- `MESHCAST_RELAY_LEAVES=1` makes a follower leave its announcer for what it only relays too, and
+  `MESHCAST_LEAVE_BACKOFF=0` makes it wait as long for an object under every announcer, as before
+  `docs/FEASIBILITY.md` §31; `MESHCAST_LEAVE_LACKING=0` makes it leave only an announcer that lists
+  what it wants and does not send it. `MESHCAST_TRACE_LEAVE=1` prints a `LEAVE` line each time a
+  follower leaves its announcer for what it does not get: the object, whether the announcer holds
+  or wants it, whether the follower only relays it, how many nodes know it, how many bridges there
+  are (nodes that hear, and are heard by, both the announcer and a holder) and how many of them
+  know it, and every holder with its role, its announcer, whether the announcer hears it, and how
+  strongly the follower does.
 - `MESHCAST_CARRY_BUDGET_KB=256` gives every node a carry budget, in kB (0: no relays);
   `MESHCAST_T_RELAY_WAIT_S` overrides `T_relay_wait`. `MESHCAST_PROACTIVE=1` makes announcers fetch
   every piece of every channel they hear of, and `MESHCAST_RELAY_ANY=0` makes nodes relay only for
