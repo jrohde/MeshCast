@@ -346,6 +346,12 @@ impl Engine {
     /// and announcements only in a window both are in, for a second at least.
     /// Diagnostic: the parts of the network that carrier `c` joins, every node labelled with the
     /// smallest index in its part; two nodes are joined when each hears the other.
+    /// Diagnostic: whether nodes `a` and `b` hear each other on carrier `c`.
+    pub fn hear_each_other(&self, a: usize, b: usize, c: usize) -> bool {
+        let s = self.phys[c].sensitivity_dbm;
+        self.rx_dbm(a, b, c) >= s && self.rx_dbm(b, a, c) >= s
+    }
+
     pub fn components(&self, c: usize) -> Vec<usize> {
         let n = self.nodes.len();
         let mut part: Vec<usize> = (0..n).collect();
@@ -601,6 +607,9 @@ impl Engine {
                     }
                 }
                 Action::Relayed { id } => {
+                    if self.trace_grants {
+                        eprintln!("RW {} {} {:?}", self.now, i, id);
+                    }
                     let r = self.metrics.relayers.entry(id).or_default();
                     r.0 += 1;
                     r.1.insert(i);

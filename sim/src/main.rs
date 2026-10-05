@@ -1044,6 +1044,9 @@ fn params() -> Params {
     if let Ok(v) = std::env::var("MESHCAST_LEAVE_BACKOFF") {
         p.leave_backoff = v != "0";
     }
+    if let Ok(v) = std::env::var("MESHCAST_MARK_RELAYED") {
+        p.mark_relayed = v != "0";
+    }
     if let Ok(v) = std::env::var("MESHCAST_CELL_MENU") {
         p.cell_menu = v != "0";
     }
@@ -1266,6 +1269,17 @@ fn run_dynamics(nodes: usize, area_km2: f64, stations: usize, channels: usize, q
     };
     let params = params();
     let mut built = build(&spec, params);
+    if xs.is_some() {
+        let e = &built.engine;
+        let bulk = e.phys.iter().position(|p| p.kind != CarrierKind::LoraControl).unwrap_or(0);
+        for a in 0..nodes {
+            for b in a + 1..nodes {
+                if e.hear_each_other(a, b, bulk) {
+                    eprintln!("LINK {} {}", a, b);
+                }
+            }
+        }
+    }
     built.engine.verbose = common.verbose;
     let mut rng = Rng::new(common.seed ^ 0xD1);
     // Initial subscriptions: each node follows `follows` distinct channels.
@@ -1385,6 +1399,8 @@ fn run_dynamics(nodes: usize, area_km2: f64, stations: usize, channels: usize, q
                     }
                 }
                 if let Some(xs) = &xs {
+                    let roles: Vec<String> = (0..e.nodes.len()).map(|i| format!("{}:{}{}", i, if e.nodes[i].node.role(bulk_i) == meshcast_core::node::Role::Announcer { "A" } else { "f" }, e.nodes[i].node.announcer_of(bulk_i).0)).collect();
+                    eprintln!("ROLES {:.0}h {}", t as f64 / 3.6e6, roles.join(" "));
                     let period = (publish_h * 3.6e6) as Millis;
                     for (id, t_pub, followers) in pubs.iter().filter(|(_, tp, _)| *tp <= t && t < *tp + period) {
                         let alive = |i: usize| e.nodes[i].alive;
