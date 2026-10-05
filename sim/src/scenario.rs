@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use meshcast_core::ed25519_dalek::SigningKey;
 use meshcast_core::ids::{NodeId, ObjectId, ShortId};
-use meshcast_core::manifest::{Collection, CollectionKind, CollectionRef, Manifest, ManifestObject, ObjectRef, ScheduleEntry};
+use meshcast_core::manifest::{Card, Collection, CollectionKind, CollectionRef, Manifest, ManifestObject, ObjectRef, ScheduleEntry};
 use meshcast_core::rendition::{Rendition, RenditionTable};
 use meshcast_core::node::NodeConfig;
 use meshcast_core::object::{ContentType, ObjectMeta};
@@ -176,6 +176,27 @@ pub struct Built {
     pub tracks: BTreeMap<ShortId, TrackInfo>,
     pub phys: Vec<Phy>,
     pub sources: Vec<SourceInfo>,
+}
+
+/// The card a simulated channel describes itself with (PROTOCOL.md §2), as MESHCAST_CARDS asks:
+/// none (the default), `small` (medium, one genre, one language: 10 bytes) or `full` (three
+/// genres, three languages, an area and a line of 60 bytes).
+pub fn card_for(tag: usize) -> Option<Card> {
+    let which = std::env::var("MESHCAST_CARDS").ok()?;
+    let medium = [1u8, 7, 2][tag % 3];
+    let genre = 1 + (tag % 29) as u8;
+    let langs = ["nl", "en", "de", "fr", "fy", "nds"];
+    match which.as_str() {
+        "small" => Some(Card { medium, genres: vec![genre], langs: vec![String::from(langs[tag % 2])], area: None, about: None }),
+        "full" => Some(Card {
+            medium,
+            genres: vec![genre, 1 + ((tag + 7) % 29) as u8, 1 + ((tag + 13) % 29) as u8],
+            langs: (0..3).map(|k| String::from(langs[(tag + k) % langs.len()])).collect(),
+            area: Some(String::from("NL-UT")),
+            about: Some(format!("{:<60}", format!("Channel {tag}: news and music from around here"))),
+        }),
+        _ => None,
+    }
 }
 
 pub fn track_object(seed: u64, source: usize, index: usize, len: u32, kind: ContentType) -> ManifestObject {
@@ -370,7 +391,7 @@ pub fn build(spec: &ScenarioSpec, params: Params) -> Built {
         let (table_meta, table_bytes) = table.as_object();
         let table_ref = (!table.entries.is_empty()).then_some(ObjectRef { id: table_meta.id, len: table_meta.len });
         let refs: Vec<CollectionRef> = collections.iter().zip(&covers).map(|(c, v)| c.reference(v.as_ref().map(|(v, _)| ObjectRef { id: v.id, len: v.len }), true)).collect();
-        let m = Manifest::sign(&key, 1, &format!("Channel of node {tag}"), refs, None, table_ref);
+        let m = Manifest::sign_card(&key, 1, &format!("Channel of node {tag}"), refs, None, table_ref, card_for(tag));
         let chan = m.channel_id();
         if table_ref.is_some() {
             metas.push((table_meta, Some(&table_bytes[..])));

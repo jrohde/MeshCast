@@ -187,6 +187,7 @@ index, CBOR-encoded:
 | `collections` | list of {`cid` u32, `kind` u8, `title`, `manifest` {`id` 32 B, `len` u32}, `cover` {`id` 32 B, `len` u32} or null, `changed` bool} | the channel's collections; `cid` is chosen by the provider and stays the same across versions, `kind` is 1 album, 2 series, 3 singles, and `changed` says the collection manifest is new in this root (a new collection, or a new version of its manifest): a holder brings those with the root (§4) |
 | `prev` | 32 B optional | id of the previous root manifest, for history |
 | `renditions` | {`id` 32 B, `len` u32} optional | the channel's rendition table (§1.2) |
+| `card` | {`medium` u8, `genres` bytes, `langs` list of text, `area` text or null, `about` text or null} or null | the channel's description of itself, for guides (below) |
 | `sig` | 64 B | Ed25519 signature over everything above |
 
 A **collection manifest** (content type 5, `application/meshcast-collection`) lists one
@@ -201,6 +202,43 @@ collection's pieces, CBOR-encoded:
 A collection manifest is not signed: the root names it by its full hash, so it is exactly as
 authentic as the root, and a node reads one only once it holds a valid root that names it. A
 cover is an object of content type 6 (§1.1).
+
+**A channel describes itself.** A provider says what its channel is in the root's `card`, in a
+fixed vocabulary that existing systems already use, so that a node can build a guide of what is
+on the mesh without anyone keeping a directory (§9, question 14):
+
+- `medium`, after the Podcasting 2.0 namespace's `podcast:medium`
+  ([spec](https://github.com/Podcastindex-org/podcast-namespace/blob/main/docs/tags/medium.md)):
+  1 podcast, 2 music, 3 audiobook, 4 course, 5 newsletter, 6 blog, 7 radio (a series played as a
+  station by its schedule, which `podcast:medium` has no word for), 8 publisher (a provider's
+  channel of its channels); 0 says nothing. Bit 7 set marks a list: a channel whose pieces name
+  other channels of that medium, as `podcast:medium`'s list variants do (the format of a list is
+  §9, question 14).
+- `genres`: at most three programme types of the Radio Data System, as car radios have used them
+  for decades (IEC 62106, the European table;
+  [a list](https://www.electronics-notes.com/articles/audio-video/broadcast-audio/rds-radio-data-system-pty-codes.php)): 1 news, 2 current affairs, 3 information, 4 sport,
+  5 education, 6 drama, 7 culture, 8 science, 9 varied, 10 pop music, 11 rock music, 12 easy
+  listening, 13 light classical, 14 serious classical, 15 other music, 16 weather, 17 finance,
+  18 children's programmes, 19 social affairs, 20 religion, 21 phone-in, 22 travel, 23 leisure,
+  24 jazz, 25 country, 26 national music, 27 oldies, 28 folk, 29 documentary. Not 0, and not 30
+  or 31, the alarm codes: no channel declares itself an alarm.
+- `langs`: at most three languages, as ISO 639-1 codes, or ISO 639-3 where a language has none,
+  in lower case.
+- `area`: where it is about, if anywhere: an ISO 3166-1 country code, optionally with an ISO
+  3166-2 subdivision (`NL-UT`), at most six characters.
+- `about`: one line, at most 80 bytes of UTF-8.
+
+The card is signed with the root, so only the channel's key changes it, and it travels with the
+root wherever the root goes (below). A node reads a code it does not know, or a field beyond its
+limits, as absent, and keeps the root: a newer vocabulary does not make older nodes drop
+channels. A card without `about` is 10 to 25 bytes: medium, one genre and one language take 10,
+three genres, three languages and an area 24. A root of one collection with a short title and no
+card is 185 bytes, so the small card keeps it within one symbol of 200 bytes (§3.2), and the
+fuller card, `about` or a long title takes it to a second.
+
+A node's **guide** is local: the channels whose roots it keeps (below), sorted and filtered by
+their cards on the device. Nobody else can edit a channel's card, and nothing about what a
+listener looks at is sent (receivers do not transmit).
 
 The order of `pieces` is the order a listener plays them in, and the network delivers in it: a
 piece's **place** is its position in the list, and the earlier place goes first wherever a node
@@ -1515,5 +1553,8 @@ simulator has no node with one.
       of the self-descriptions its neighbours carry, ordered by that taxonomy and by how widely a
       channel is followed. Nobody can edit another's description; a listener can order and hide
       locally, and a curated list is a channel like any other, found the same way or by QR code.
-    Open: the taxonomy and its encoding, the heads budget at tens of thousands of channels, and
-    how far popularity can rank without inviting a flood of self-promoting channels (ABUSE.md).
+    The taxonomy is now the root's `card` (§2): `podcast:medium` for what a channel is, RDS
+    programme types for its genre, ISO 639 for its language. Open: the format of a list (a
+    channel whose pieces name other channels), the heads budget at tens of thousands of channels,
+    and how a guide can tell how widely a channel is followed, and rank by it, without inviting a
+    flood of self-promoting channels (ABUSE.md).
