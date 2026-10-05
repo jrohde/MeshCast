@@ -4031,7 +4031,12 @@ of before and frames were within 0.7 %.
 
 - **Two cells joined only by two followers, or only by their announcers.** What crosses there is
   what leaving to lead makes of it, at twice the role changes (§32.3). Two followers that relay
-  for each other, the one asking the other by name and handing on what it gets to its own
-  announcer, would carry it; so would an announcer that uploads to another as a last resort
-  (PROTOCOL.md §9, question 11). The narrow strip in band L delivers 81.7 % against 90.1 % within
-  reach.
+  for each other were measured: a follower relayed what it heard a follower of another cell want
+  whose announcer it did not hear, listed what it relayed in its HAVE, and a follower whose
+  announcer could not get an object fetched it whole, by name, from a holder of another cell that
+  listed it. The narrow strip in band L delivered 0.56 points more (se 1.11) over 24 worlds, with
+  17 % more frames; 400 quiet channels 0.10 less (se 0.18) with 25 % more, and the square as much
+  with 38 % more: in a dense network followers hear followers of cells whose announcer they do not
+  hear everywhere, and relayed for each other everywhere. Not taken. An announcer that uploads to
+  another as a last resort (PROTOCOL.md §9, question 11) is not measured. The narrow strip in band
+  L delivers 81.7 % against 90.1 % within reach.
