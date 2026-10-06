@@ -4087,3 +4087,56 @@ error everywhere, band O too (within 0.01 points). The empty field alone changed
   those pieces.
 - **The menu after one hop** (§32.4) decides how much of the mesh a guide can show where the bulk
   carrier does not join it.
+
+## 35. A guide's reach, and news ahead of the goods
+
+A guide shows the channels whose roots a node holds (§34). Every node keeps the roots that come by
+(PROTOCOL.md §2), and roots of channels nobody near listens to come by only through the push on
+the control carrier, which crosses one hop (§32.4). With 100 channels that nobody follows besides
+the 24 that are, eight worlds each, nodes held the newest root of this share of all channels:
+
+| | Square | Strip 30 km × 500 m (§32) |
+|---|---|---|
+| Band O | 94.9 % | 62.0 % |
+| Band L | 96.3 % | 91.8 % |
+
+In band O the strip has few, large cells; a root from beyond the control carrier's reach, about
+ten kilometres, reached a node only if someone on the way listened to its channel. Band L's
+many small cells carried more roots through their relays.
+
+### 35.1 A root where it is missing
+
+Two forms of one rule were measured. An announcer that hears another announcer's list on the
+control carrier lack a root it holds (absent where the frame shows the gap, or older, as a
+follower tells of its own announcer, PROTOCOL.md §2) pushes the root after a random wait of up to
+`T_offer`, unless someone sends it first, at most one a minute. (Beacons heard only on the control
+carrier had to be noted for this: the neighbour table, which describes cells, ignores them.)
+
+| | Pushed on the control carrier | Pushed through its cell (bulk) |
+|---|---|---|
+| Strip, band O: roots held | 62.0 % → 94.7 % | 62.0 % → 76.6 % |
+| ... delivered, difference (se) | +1.3 (0.9) | +1.5 (0.7) |
+| Strip, band L: roots held | 91.8 % → 94.2 % | 91.8 % → 93.8 % |
+| ... delivered, difference (se) | −17.4 (7.1) | −2.2 (1.2) |
+| 400 quiet channels, band L: delivered (se) | −0.50 (0.28) | −0.24 (0.31) |
+| 1000 quiet channels, band L: delivered (se) | −0.26 (0.81) | −0.98 (0.48) |
+| ... frames | −1 % | +9 % |
+
+Pushed on the control carrier, the root reached the band O strip's guides as fully as the
+square's, but the band L strip lost 17 points: its two worst worlds fell from 91.4 % and 89.4 % to
+52.0 % and 32.5 %. Not the load: one push in ten minutes instead of one a minute still left them
+at 65.2 % and 59.1 %. Not keeping the roots either: the same pushes sent through the cell left
+85.3 % and 81.5 %. In the worst of them the announcers' carousels sent half as many frames,
+uploads fell by more than half, grants that never brought a symbol rose from 231 to 1,015, and
+asks met at the announcer fell from 89 % to 55 %. The likeliest reading, not traced to the end: on the control
+carrier the news of a new bulletin outran its content by many hours in a band L strip, where
+content crosses at about a kilometre an hour (§32.2), and cells along the whole strip asked,
+relayed and waited for what could not yet come. Neither form was taken.
+
+### 35.2 Open
+
+A complete guide does not ride on every root at every node: at a thousand channels that is a few
+hundred kilobytes a node and the frames above. PROTOCOL.md §9 question 14 already points to small
+heads (channel, seq, card) for what exists, kept apart from roots, which carry what to fetch; a
+head heard from far away would tell a guide of a channel without starting anyone's asks for its
+bulletins. That, and whether news ahead of the goods is what broke the band L strip, are open.

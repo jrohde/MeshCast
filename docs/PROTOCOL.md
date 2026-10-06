@@ -1556,5 +1556,7 @@ simulator has no node with one.
     The taxonomy is now the root's `card` (§2): `podcast:medium` for what a channel is, RDS
     programme types for its genre, ISO 639 for its language. Open: the format of a list (a
     channel whose pieces name other channels), the heads budget at tens of thousands of channels,
-    and how a guide can tell how widely a channel is followed, and rank by it, without inviting a
-    flood of self-promoting channels (ABUSE.md).
+    how a guide can tell how widely a channel is followed, and rank by it, without inviting a flood
+    of self-promoting channels (ABUSE.md), and how far a guide reaches: in a band O valley nodes
+    held the roots of 62 % of the channels, and pushing roots where they were missing broke a band
+    L valley (FEASIBILITY.md §35).
