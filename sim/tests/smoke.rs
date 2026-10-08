@@ -1513,3 +1513,24 @@ fn what_no_announcer_can_get_is_waited_for_longer() {
         assert!(left <= 10, "listener {f} left its announcer {left} times for two pieces out of reach");
     }
 }
+
+#[test]
+fn a_track_of_several_blocks_crosses_a_slow_carrier() {
+    // Two nodes 5 km apart with LoRa as the bulk carrier, three tracks of 540 kB (three blocks
+    // each). A pass or an upload asked for again starts at the first block; at 10 % duty cycle a
+    // block takes a little over an hour, and role changes cut every attempt short before the
+    // later blocks came: in this world (seed 1) the first track never arrived (FEASIBILITY.md
+    // §36.4). A node that holds the first blocks whole NACKs the next one (PROTOCOL.md §3.5).
+    let missing = |block_nack: bool| {
+        let mut s = spec(BulkPreset::LoraBulk, vec![(0.0, 0.0), (5000.0, 0.0)], vec![0], vec![], 12.0);
+        s.tracks = 3;
+        s.track_kb = 540;
+        s.seed = 1;
+        let mut b = build(&s, Params { block_nack, ..Params::default() });
+        b.engine.run(12 * 3_600_000, 600_000);
+        assert_eq!(b.tracks.len(), 3);
+        b.tracks.keys().filter(|id| !b.engine.metrics.completions.contains_key(&(1, **id))).count()
+    };
+    assert_eq!(missing(true), 0, "with the block NACK every track should reach the follower");
+    assert!(missing(false) > 0, "without the block NACK this world should still lose a track, or the test no longer tests it");
+}

@@ -22,6 +22,20 @@ delivery latency per publication, wasted receptions and orphaned objects.
 publish every H hours, spread over that span (0: never): the rest of a large menu
 (`docs/FEASIBILITY.md` §30). With more channels than nodes, a node runs several.
 
+`MESHCAST_IP_STATIONS=1` gives every station what every source publishes as it is published, as
+if it had fetched it over the internet: the catalogue at the start and, in `dynamics`, each later
+bulletin to the stations that are on (`docs/FEASIBILITY.md` §36.3); the radio does the rest. Unset
+or `0`: no internet.
+`MESHCAST_BLOCK_NACK=0` makes a node NACK only what is nearly complete, as before
+`docs/FEASIBILITY.md` §36.4.
+
+A `cell` report also gives the busiest 10 s of the bulk carrier at each node, measured at every
+frame a node hears (the occupancy line above it samples every ten minutes); how many parts the
+bulk carrier joins the nodes into, and how many others each node hears both ways; and the
+repairs: NACKs sent, full passes a NACK moved on, repair phases shared with a holder's, and
+checks that found a NACK due but no phase left. `failover` also gives the longest stretch with
+more than one announcer after the loss.
+
 `MESHCAST_CARDS=small` gives every channel's root a card (`docs/PROTOCOL.md` §2) of 10 bytes: a
 medium, one genre and one language; `MESHCAST_CARDS=full` one of three genres, three languages, an
 area and a line of 60 bytes, which takes a root to a second symbol (`docs/FEASIBILITY.md` §34).
