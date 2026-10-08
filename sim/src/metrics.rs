@@ -118,3 +118,41 @@ pub fn percentile(sorted: &[f64], p: f64) -> Option<f64> {
     let idx = ((sorted.len() as f64 - 1.0) * p).round() as usize;
     Some(sorted[idx.min(sorted.len() - 1)])
 }
+
+/// Replay role events on carrier `c` after `victim` is switched off at `kill_ms`: the most
+/// announcers at once and the longest stretch, until `until`, with more than one. The victim stops
+/// announcing at the kill, which is counted then, and counts again from its own first role event
+/// after it comes back: a dead node and a reboot emit none.
+pub fn several_announcers(events: &[RoleEvent], c: usize, victim: u32, kill_ms: Millis, until: Millis) -> (usize, Millis) {
+    fn tally(current: &BTreeMap<u32, bool>, t: Millis, max_sim: &mut usize, since: &mut Option<Millis>, longest: &mut Millis) {
+        let n = current.values().filter(|&&a| a).count();
+        *max_sim = (*max_sim).max(n);
+        if n > 1 {
+            since.get_or_insert(t);
+        } else if let Some(s) = since.take() {
+            *longest = (*longest).max(t - s);
+        }
+    }
+    let mut current: BTreeMap<u32, bool> = BTreeMap::new();
+    let (mut max_sim, mut since, mut longest) = (0usize, None, 0);
+    let mut killed = false;
+    for e in events.iter().filter(|e| e.carrier == c) {
+        if !killed && e.t_ms >= kill_ms {
+            current.insert(victim, false);
+            killed = true;
+            tally(&current, kill_ms, &mut max_sim, &mut since, &mut longest);
+        }
+        current.insert(e.node, e.role == "Announcer");
+        if killed {
+            tally(&current, e.t_ms, &mut max_sim, &mut since, &mut longest);
+        }
+    }
+    if !killed {
+        current.insert(victim, false);
+        tally(&current, kill_ms, &mut max_sim, &mut since, &mut longest);
+    }
+    if let Some(s) = since {
+        longest = longest.max(until.saturating_sub(s));
+    }
+    (max_sim, longest)
+}

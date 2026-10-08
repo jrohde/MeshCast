@@ -882,42 +882,7 @@ fn simulate(spec: ScenarioSpec, verbose: bool, failover: Option<(f64, f64)>) -> 
         let revive_ms = (revive_h * 3.6e6) as Millis;
         let victim_id = eng.nodes[victim].node.id().0;
         let first_new = m.role_events.iter().find(|e| e.t_ms >= kill_ms && e.role == "Announcer" && e.node != victim_id);
-        // Count simultaneous announcers after the kill by replaying role events, and how long more
-        // than one lasted at a stretch. The victim stops announcing at the kill, which is counted
-        // then, and counts again from its own first role event after the revive: a dead node and a
-        // reboot emit none.
-        fn tally(current: &BTreeMap<u32, bool>, t: Millis, max_sim: &mut usize, since: &mut Option<Millis>, longest: &mut Millis) {
-            let n = current.values().filter(|&&a| a).count();
-            *max_sim = (*max_sim).max(n);
-            if n > 1 {
-                since.get_or_insert(t);
-            } else if let Some(s) = since.take() {
-                *longest = (*longest).max(t - s);
-            }
-        }
-        let mut current: BTreeMap<u32, bool> = BTreeMap::new();
-        let mut max_sim = 0usize;
-        let mut killed = false;
-        let mut several_since: Option<Millis> = None;
-        let mut several_longest: Millis = 0;
-        for e in m.role_events.iter().filter(|e| e.carrier == bulk_c) {
-            if !killed && e.t_ms >= kill_ms {
-                current.insert(victim_id, false);
-                killed = true;
-                tally(&current, kill_ms, &mut max_sim, &mut several_since, &mut several_longest);
-            }
-            current.insert(e.node, e.role == "Announcer");
-            if killed {
-                tally(&current, e.t_ms, &mut max_sim, &mut several_since, &mut several_longest);
-            }
-        }
-        if !killed {
-            current.insert(victim_id, false);
-            tally(&current, kill_ms, &mut max_sim, &mut several_since, &mut several_longest);
-        }
-        if let Some(s) = several_since {
-            several_longest = several_longest.max(until.saturating_sub(s));
-        }
+        let (max_sim, several_longest) = metrics::several_announcers(&m.role_events, bulk_c, victim_id, kill_ms, until);
         let after_revive = m.role_events.iter().filter(|e| e.t_ms >= revive_ms && e.role == "Announcer").last().map(|e| e.node);
         FailoverReport {
             killed_node: victim,
@@ -1110,6 +1075,12 @@ fn params() -> Params {
     }
     if let Ok(v) = std::env::var("MESHCAST_BLOCK_NACK") {
         p.block_nack = v != "0";
+    }
+    if let Ok(v) = std::env::var("MESHCAST_ORDER_BY_LOST") {
+        p.election.order_by_lost = v != "0";
+    }
+    if let Ok(v) = std::env::var("MESHCAST_FRESH_TIE") {
+        p.election.fresh_tie = v != "0";
     }
     if let Ok(v) = std::env::var("MESHCAST_MARK_RELAYED") {
         p.mark_relayed = v != "0";

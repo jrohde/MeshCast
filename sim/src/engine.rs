@@ -294,7 +294,7 @@ impl Engine {
         let id = node.id();
         let channel = node.channel(carrier, self.nodes[i].clock.local(now));
         let kind = self.phys[carrier].kind;
-        let b = meshcast_core::frame::Beacon { carrier: kind, announcer: id, score, caps, next_ms: 60_000, round: 0, time: node.shared_time(self.nodes[i].clock.local(now)), time_quality: 1, colour: 0, colours: 1, upload_phases: 1, occupancy: [0; 4] };
+        let b = meshcast_core::frame::Beacon { carrier: kind, announcer: id, score, caps, next_ms: 60_000, round: 0, time: node.shared_time(self.nodes[i].clock.local(now)), time_quality: 1, colour: 0, colours: 1, upload_phases: 1, occupancy: [0; 4], fresh: false };
         let g = meshcast_core::frame::Gossip { node: id, announcer: id, announcer_colour: 0, announcer_colours: 1, heard: Vec::new(), have, have_sets: Vec::new(), want: Vec::new(), sets: Vec::new() };
         let (f, ft) = if beacon { (Frame::Beacon(b), FrameType::Beacon) } else { (Frame::Gossip(g), FrameType::Gossip) };
         let bytes = f.encode();
@@ -323,6 +323,9 @@ impl Engine {
         }
         self.nodes[node].alive = alive;
         self.nodes[node].next_wake = Millis::MAX;
+        if std::env::var("MESHCAST_TRACE_ROLES").is_ok() {
+            println!("ALIVE {} {} {}", self.now, self.nodes[node].node.id().0, alive);
+        }
         if alive {
             let now = self.now;
             self.restart_clock(node);
@@ -335,6 +338,9 @@ impl Engine {
     /// Replace a node by a newcomer: same hardware and place, nothing learned.
     pub fn replace_with_newcomer(&mut self, node: usize) {
         let now = self.now;
+        if std::env::var("MESHCAST_TRACE_ROLES").is_ok() {
+            println!("NEWCOMER {} {}", now, self.nodes[node].node.id().0);
+        }
         self.nodes[node].alive = true;
         self.nodes[node].next_wake = Millis::MAX;
         self.restart_clock(node);
@@ -467,20 +473,9 @@ impl Engine {
             match ev {
                 Ev::Wake(i, s) => self.wake(i, s),
                 Ev::TxEnd(id) => self.tx_end(id),
-                Ev::Kill(i) => {
-                    self.nodes[i].alive = false;
-                    self.nodes[i].next_wake = Millis::MAX;
-                }
+                Ev::Kill(i) => self.set_alive(i, false),
                 Ev::Attack(k) => self.attack(k),
-                Ev::Revive(i) => {
-                    self.nodes[i].alive = true;
-                    self.nodes[i].next_wake = Millis::MAX;
-                    let now = self.now;
-                    self.restart_clock(i);
-                    let local = self.nodes[i].clock.local(now);
-                    self.nodes[i].node.reboot(local);
-                    self.schedule_wake(i, self.now + 1);
-                }
+                Ev::Revive(i) => self.set_alive(i, true),
             }
         }
         self.now = until;
@@ -510,6 +505,45 @@ impl Engine {
             for c in 0..self.phys.len() {
                 let occ = self.occupancy(i, c, now);
                 self.metrics.occupancy_samples.push((now, i, c, occ));
+            }
+        }
+        if std::env::var("MESHCAST_TRACE_PAIRS").is_ok() {
+            self.trace_pairs();
+        }
+        if std::env::var("MESHCAST_TRACE_NB").is_ok() {
+            let v: Vec<String> = self.nodes.iter().map(|n| n.node.table_sizes()[0].1.to_string()).collect();
+            println!("NB {} {}", self.now, v.join(" "));
+        }
+    }
+
+    /// Diagnostic (MESHCAST_TRACE_PAIRS): every pair of announcers on a bulk carrier, whether they
+    /// hear each other or not (`hear=`), with each one's view of the other against its typical
+    /// neighbour (the tie-break's same-cell judgement), whether either shuns the other (`shun=`),
+    /// and the share of each one's followers that hear the other (0 for one without followers).
+    /// PAIR t carrier a b score_a score_b rx_ab rx_ba a_heard_b a_median b_heard_a b_median
+    /// followers_a share_of_a_hearing_b followers_b share_of_b_hearing_a hear= shun=
+    fn trace_pairs(&self) {
+        use meshcast_core::node::Role;
+        for c in 0..self.phys.len() {
+            if self.phys[c].kind == meshcast_core::frame::CarrierKind::LoraControl {
+                continue;
+            }
+            let s = self.phys[c].sensitivity_dbm;
+            let anns: Vec<usize> = (0..self.nodes.len()).filter(|&i| self.nodes[i].alive && self.nodes[i].node.role(c) == Role::Announcer).collect();
+            for (k, &a) in anns.iter().enumerate() {
+                for &b in &anns[k + 1..] {
+                    let (ida, idb) = (self.nodes[a].node.id(), self.nodes[b].node.id());
+                    let followers = |x: usize, idx| (0..self.nodes.len()).filter(|&f| f != x && self.nodes[f].alive && self.nodes[f].node.role(c) == Role::Follower && self.nodes[f].node.announcer_of(c) == idx).collect::<Vec<_>>();
+                    let (fa, fb) = (followers(a, ida), followers(b, idb));
+                    let share = |fs: &Vec<usize>, other: usize| if fs.is_empty() { 0.0 } else { fs.iter().filter(|&&f| self.rx_dbm(other, f, c) >= s).count() as f64 / fs.len() as f64 };
+                    let (ab, am, ash) = self.nodes[a].node.same_cell_view(c, idb);
+                    let (ba, bm, bsh) = self.nodes[b].node.same_cell_view(c, ida);
+                    println!(
+                        "PAIR {} {} {} {} {} {} {:.0} {:.0} {} {} {} {} {} {:.2} {} {:.2} hear={} shun={}{}",
+                        self.now, c, ida.0, idb.0, self.nodes[a].node.score(), self.nodes[b].node.score(), self.rx_dbm(b, a, c), self.rx_dbm(a, b, c),
+                        ab.map(|v| v.to_string()).unwrap_or("-".into()), am, ba.map(|v| v.to_string()).unwrap_or("-".into()), bm, fa.len(), share(&fa, b), fb.len(), share(&fb, a), self.hear_each_other(a, b, c) as u8, ash as u8, bsh as u8
+                    );
+                }
             }
         }
     }

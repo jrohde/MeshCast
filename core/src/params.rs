@@ -14,11 +14,17 @@ pub struct ElectionParams {
     pub rssi_hysteresis_db: u8,
     /// Beacons in a row with a clearly lower score than ours before we challenge the incumbent.
     pub challenge_beacons: u8,
+    /// Candidates that lost their announcer step up in the order they heard it, the loudest first
+    /// (PROTOCOL.md §5.2). Off: by chance, as before; kept to measure against.
+    pub order_by_lost: bool,
+    /// Two announcers that stepped up in the same election settle a near-tie by id, near or far
+    /// (PROTOCOL.md §5.2). Off: only one in its own cell yields; kept to measure against.
+    pub fresh_tie: bool,
 }
 
 impl Default for ElectionParams {
     fn default() -> Self {
-        ElectionParams { t_beacon_ms: 60_000, n_miss: 3, t_base_ms: 60_000, t_jitter_ms: 10_000, hysteresis: SCORE_MAX / 10, rssi_hysteresis_db: 6, challenge_beacons: 3 }
+        ElectionParams { t_beacon_ms: 60_000, n_miss: 3, t_base_ms: 60_000, t_jitter_ms: 10_000, hysteresis: SCORE_MAX / 10, rssi_hysteresis_db: 6, challenge_beacons: 3, order_by_lost: true, fresh_tie: true }
     }
 }
 

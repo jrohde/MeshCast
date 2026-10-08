@@ -18,14 +18,26 @@ use crate::Millis;
 const GRACE_MS: Millis = 5_000;
 
 /// When, within a span of time, a candidate steps up: in the order an announcer yields in
-/// (§5.2), capability first, then score, then chance. The span has a band per capability
+/// (§5.2), capability first, then score, then where it stands. The span has a band per capability
 /// (mains and uplink, mains, uplink, neither); within its band a candidate waits less the higher
-/// its score, plus a jitter of a third of the band. A more capable node can never step up after
-/// a less capable one and then displace it, orphaning the followers it had just gathered.
-pub fn step_up_order(caps: u8, score: u16, span: Millis, rng: &mut Rng) -> Millis {
+/// its score, and over the last third of the band less the louder it heard the announcer the cell
+/// lost (`closeness`, dBm), with a little chance; with no announcer lost, by chance alone. A more
+/// capable node can never step up after a less capable one and then displace it, orphaning the
+/// followers it had just gathered. Followers are silent, so in a quiet cell a node knows little of
+/// its neighbours; how it heard the lost announcer says how near it stood to it, and the nearest
+/// is heard by the most of that announcer's followers.
+pub fn step_up_order(caps: u8, score: u16, closeness: Option<i16>, span: Millis, rng: &mut Rng) -> Millis {
     let band = span / 4;
+    let third = (band / 3).max(1);
     let s = score.min(SCORE_MAX) as u64;
-    (3 - caps.min(3) as u64) * band + (band * 2 / 3) * (SCORE_MAX as u64 - s) / SCORE_MAX as u64 + rng.below((band / 3).max(1))
+    let rest = match closeness {
+        Some(rssi) => {
+            let below = (-20 - rssi as i64).clamp(0, 120) as u64;
+            third * 7 / 8 * below / 120 + rng.below((third / 8).max(1))
+        }
+        None => rng.below(third),
+    };
+    (3 - caps.min(3) as u64) * band + (band * 2 / 3) * (SCORE_MAX as u64 - s) / SCORE_MAX as u64 + rest
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -72,6 +84,10 @@ pub struct Election {
     pinned: bool,
     /// Announcers that listed what they did not serve us, and until when we ignore them.
     shunned: BTreeMap<NodeId, Millis>,
+    /// How we heard the announcer whose loss made us a candidate: our place in the step-up order.
+    lost_rssi: Option<i16>,
+    /// When we last became announcer.
+    announcing_since: Millis,
 }
 
 impl Election {
@@ -88,6 +104,8 @@ impl Election {
             challenges: 0,
             pinned: false,
             shunned: BTreeMap::new(),
+            lost_rssi: None,
+            announcing_since: 0,
         }
     }
 
@@ -100,7 +118,18 @@ impl Election {
     }
 
     fn wait_for(&self, score: u16, caps: u8, rng: &mut Rng) -> Millis {
-        step_up_order(caps, score, self.p.t_base_ms + self.p.t_jitter_ms, rng)
+        step_up_order(caps, score, self.closeness(), self.p.t_base_ms + self.p.t_jitter_ms, rng)
+    }
+
+    /// How we heard the announcer the cell lost, if the step-up order goes by it.
+    pub fn closeness(&self) -> Option<i16> {
+        if self.p.order_by_lost { self.lost_rssi } else { None }
+    }
+
+    /// Whether we became announcer within the last `N_miss` beacon intervals: in the same election
+    /// as any announcer that also did, before followers have settled on either.
+    pub fn is_fresh(&self, now: Millis) -> bool {
+        matches!(self.state, State::Announcer) && now < self.announcing_since + self.p.t_beacon_ms * self.p.n_miss as Millis
     }
 
     fn follow(&mut self, now: Millis, from: NodeId) {
@@ -144,6 +173,7 @@ impl Election {
             self.follow(now, alt);
             return Some(Transition::AnnouncerChanged(alt));
         }
+        self.lost_rssi = self.heard.get(&id).map(|h| h.rssi);
         let until = now + self.wait_for(my_score, my_caps, rng);
         self.state = State::Candidate { until };
         self.announcer = NodeId::NONE;
@@ -151,8 +181,8 @@ impl Election {
     }
 
     /// A beacon heard at `rssi`. `near`: the caller judges this announcer to be in our own cell
-    /// (heard at least as well as our typical neighbour); only then does a near-tie yield to the
-    /// lower id.
+    /// (heard at least as well as our typical neighbour); a near-tie yields to the lower id only
+    /// then, or when both stepped up in the same election (`fresh_tie`).
     ///
     /// `caps` is what a node is (mains, uplink); `score` adds what it happens to experience in its
     /// role: who it hears, how much budget it has left. Two announcers compare capability, then
@@ -179,10 +209,15 @@ impl Election {
             State::Announcer => {
                 let d = score as i32 - my_score as i32;
                 // More capability counts like a clearly higher score: yield, near or far.
+                // Two announcers that stepped up in the same election settle a near-tie by id, near or
+                // far: followers chose between them only moments ago, and most hear both. In a
+                // square kilometre of 200 nodes two stepped up 3 ms apart, each judged the other to be
+                // in another cell, and both announced for four hours (FEASIBILITY.md §36.5).
+                let together = self.p.fresh_tie && b.fresh && self.is_fresh(now);
                 let yields = match caps.cmp(&my_caps) {
                     core::cmp::Ordering::Greater => true,
                     core::cmp::Ordering::Less => false,
-                    core::cmp::Ordering::Equal => d > hy || (d >= -hy && from.0 < me.0 && near),
+                    core::cmp::Ordering::Equal => d > hy || (d >= -hy && from.0 < me.0 && (near || together)),
                 };
                 if yields {
                     self.follow(now, from);
@@ -265,9 +300,11 @@ impl Election {
         match self.state {
             State::Follower => {
                 if self.low_count >= self.p.challenge_beacons {
-                    // We are more capable than the incumbent: step up; it will yield.
+                    // We are more capable than the incumbent: step up; it will yield. Nobody was
+                    // lost, so the step-up order has no announcer to go by.
                     self.low_count = 0;
                     self.challenges += 1;
+                    self.lost_rssi = None;
                     let until = now + rng.below(self.p.t_jitter_ms.max(1));
                     self.state = State::Candidate { until };
                     return Some(Transition::BecameCandidate);
@@ -276,6 +313,7 @@ impl Election {
                     self.missed = self.missed.saturating_add(1);
                     self.expected_next = now + self.p.t_beacon_ms;
                     if self.missed >= self.p.n_miss {
+                        self.lost_rssi = self.heard.get(&self.announcer).map(|h| h.rssi);
                         self.prune(now);
                         if let Some(alt) = self.best_heard(now, self.announcer) {
                             self.follow(now, alt);
@@ -291,6 +329,7 @@ impl Election {
             State::Candidate { until } => {
                 if now >= until {
                     self.state = State::Announcer;
+                    self.announcing_since = now;
                     self.announcer = NodeId::NONE;
                     self.missed = 0;
                     self.low_count = 0;
@@ -376,7 +415,7 @@ mod tests {
     use crate::frame::{CarrierKind, CAP_MAINS};
 
     fn beacon(from: NodeId, score: u16, caps: u8) -> Beacon {
-        Beacon { carrier: CarrierKind::GfskBulk, announcer: from, score, caps, next_ms: 60000, round: 0, time: 0, time_quality: 0, colour: 0, colours: 1, upload_phases: 1, occupancy: [0; 4] }
+        Beacon { carrier: CarrierKind::GfskBulk, announcer: from, score, caps, next_ms: 60000, round: 0, time: 0, time_quality: 0, colour: 0, colours: 1, upload_phases: 1, occupancy: [0; 4], fresh: false }
     }
 
     #[test]

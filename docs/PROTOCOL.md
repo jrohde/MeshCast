@@ -402,7 +402,7 @@ frequency of the bulk carrier, the window also keeps the two from overlapping.
 
 | Offset | Size | Field |
 |---|---|---|
-| 1 | 1 | flags: bulk carrier kind (bits 0–2), capability (bits 3–4: mains power ×2 + IP uplink; §5.1) |
+| 1 | 1 | flags: bulk carrier kind (bits 0–2), capability (bits 3–4: mains power ×2 + IP uplink; §5.1), fresh (bit 5: stepped up within the last `N_miss` beacon intervals; §5.2) |
 | 2 | 4 | `announcer_id` (first 4 bytes of the node's public key hash) |
 | 6 | 2 | `score` (see §5) |
 | 8 | 2 | `next_ms` — milliseconds until the next beacon from this announcer |
@@ -1079,7 +1079,7 @@ CANDIDATE ── timer expires, still no BEACON it stands down for ────�
 CANDIDATE ── hears BEACON of an announcer at least as capable ────────────────────────────▶ FOLLOWER
 ANNOUNCER ── hears BEACON of a more capable announcer ────────────────────────────────────▶ FOLLOWER
 ANNOUNCER ── hears BEACON, same capability, clearly higher score ─────────────────────────▶ FOLLOWER
-ANNOUNCER ── hears BEACON, same capability, similar score and lower id, in its own cell ──▶ FOLLOWER
+ANNOUNCER ── hears BEACON, same capability, similar score and lower id, in its own cell or both fresh ──▶ FOLLOWER
 ```
 
 **Following is by signal and by evidence, stepping up is by capability and score.** A follower
@@ -1095,19 +1095,30 @@ followers would be orphaned and re-elect, which the simulator showed as thousand
 per day. So on a near-tie an announcer yields to the lower id only if the other is *in its own
 cell*, judged relatively: it hears the other announcer at least as well as its typical (median)
 neighbour. No absolute signal threshold, so the rule holds on every carrier; a node that has
-heard nobody else treats any peer as near, since there is nobody to orphan. Otherwise both
-persist and EtherFatsoen shares the channel between them.
+heard nobody else treats any peer as near, since there is nobody to orphan. Two that stepped up in
+the same election yield by id near or far, since their followers have not settled yet (the
+tie-break, below). Otherwise both persist and EtherFatsoen shares the channel between them.
 
 - **N_miss** (draft 3): consecutive expected beacons missed (using the announcer's own `next_ms`).
   With `T_beacon = 60 s` that is about three minutes of silence before anyone acts. Nothing is
   urgent, so this is deliberately slow; the simulator will tune it.
 - **Candidates step up in the order announcers yield in**: capability first, then score, then
-  chance. A span of time is divided into four bands, one per capability (mains and uplink, mains,
-  uplink, neither); within its band a candidate waits less the higher its score, over two thirds
-  of the band, plus a jitter over the last third. A more capable node therefore always speaks
-  before a less capable one; when a jitter that spanned the bands let a battery node step up a
-  few seconds before the station, the station stepped up anyway, the battery node yielded, and
-  its new followers waited out `N_miss` beacons (FEASIBILITY.md §12).
+  where they stand. A span of time is divided into four bands, one per capability (mains and
+  uplink, mains, uplink, neither); within its band a candidate waits less the higher its score,
+  over two thirds of the band. Over the last third a candidate that lost its announcer waits less
+  the louder it heard it on average, linearly from no wait at −20 dBm to seven eighths of that
+  third at −140 dBm, with chance over the last eighth; one that lost none, at a cold start or in a
+  challenge, waits by chance alone. A more capable node therefore always speaks before a less
+  capable one; when a jitter that spanned the bands let a battery node step up a few seconds
+  before the station, the station stepped up anyway, the battery node yielded, and its new
+  followers waited out `N_miss` beacons (FEASIBILITY.md §12). A score cannot tell a node in the
+  middle of a dense cell from one at its edge: it counts at most 64 neighbours, and followers are
+  silent, so in a quiet cell a node has heard few. When a station that served a square kilometre
+  of 200 nodes went off, two battery nodes with the same score stepped up 3 ms apart within each
+  other's hearing (tracks of 540 kB), or two far apart out of each other's hearing (42 kB, where
+  each node had heard only the station), and both announced for hours (FEASIBILITY.md §36.5,
+  §37). How loud a node heard the lost announcer says how near it stood to it; the nearest is
+  heard by most of its followers, and the cell keeps its shape.
 - **A candidate steps up where every other candidate hears it.** On a carrier that does not hop,
   that is any moment, and the span is `T_base + T_jitter` (draft 60 s + 10 s) after the candidacy
   began. Two candidates collide only if they step up within one beacon's airtime of each other,
@@ -1130,7 +1141,11 @@ persist and EtherFatsoen shares the channel between them.
   a more capable announcer, near or far, and never to a less capable one. Between equals it
   compares scores: it yields if the other score exceeds its own by more than `H` (draft 10 % of
   the max), or if scores are within `H` and the other `announcer_id` is numerically lower and the
-  other is in its own cell. Two announcers that cannot hear each other but
+  other is in its own cell, or both are fresh: stepped up within the last `N_miss` beacon
+  intervals, as the beacon's flag says. Two announcers that stepped up in the same election have
+  followers that chose between them moments ago and mostly hear both; their followers are not
+  yet the overlapping cells the same-cell rule protects (FEASIBILITY.md §37). Two announcers that
+  cannot hear each other but
   are both heard by a node in between are detected by that node's GOSSIP (`announcer_id` field
   differs from the announcer's own id). That report makes them colour themselves apart (§5.3);
   it is not a reason to yield. An announcer yields only to a beacon it hears itself: it cannot
@@ -1440,10 +1455,10 @@ simulator has no node with one.
 | `T_base`, election jitter | 60 s, 10 s | together the span of a candidate's wait on a carrier that does not hop |
 | `H` | 10 % of `score_max` | yield hysteresis between announcers of equal capability |
 | `challenge_beacons` | 3 | beacons from a less capable announcer before a follower challenges it |
-| step-up order | span in 4 capability bands; in a band, 2/3 by score + 1/3 jitter | span `T_base + T_jitter` from the candidacy, or 7/10 of the meeting dwell after its first fifth on a hopping carrier |
+| step-up order | span in 4 capability bands; in a band, 2/3 by score + 1/3 by how loud the lost announcer was heard (7/8) and chance (1/8), or by chance alone at a cold start | span `T_base + T_jitter` from the candidacy, or 7/10 of the meeting dwell after its first fifth on a hopping carrier |
 | `T_excursion` | 40 min | a want without a symbol, and without a grant by our announcer, this long sends a follower to another announcer that has it; a visit without a symbol this long ends, and one that brought none is not repeated for `want_ttl`; with nobody to visit, and one `T_want_min` more, it makes the follower leave its announcer, twice as long for each announcer it already left for that object that did not list it (§5.2); and what was asked for and neither granted nor arriving this long is stuck, and asked for last (§4) |
 | `rssi_hysteresis` | 6 dB | a follower switches announcer only for a clearly stronger one |
-| "same cell" | heard at least as well as the median neighbour | when an equal announcer yields on the tie-break (§5.2); relative, not a configured level: it holds on every carrier, and in a dense cell it is the rule FEASIBILITY.md §36.5 found splitting one cell in two |
+| "same cell" | heard at least as well as the median neighbour | one of the two conditions on which an equal announcer yields on the tie-break (§5.2), the other that both are fresh; relative, not a configured level: it holds on every carrier. In a dense cell it judged two announcers that stepped up together to be in two cells (FEASIBILITY.md §36.5, §37) |
 | `max_passes` | 1 | carousel passes per object unless re-wanted |
 | repetition spacing | 0, then `T_want_min` × 1, 2, 4, 8 | wait before an object is passed again; the level climbs with each repetition and resets after a rest of twice the wait |
 | `T_nack_stall` | 60 s | no progress on a nearly complete object (≥ 80 %, or all but one symbol) before a NACK |

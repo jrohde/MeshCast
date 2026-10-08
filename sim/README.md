@@ -27,7 +27,10 @@ if it had fetched it over the internet: the catalogue at the start and, in `dyna
 bulletin to the stations that are on (`docs/FEASIBILITY.md` §36.3); the radio does the rest. Unset
 or `0`: no internet.
 `MESHCAST_BLOCK_NACK=0` makes a node NACK only what is nearly complete, as before
-`docs/FEASIBILITY.md` §36.4.
+`docs/FEASIBILITY.md` §36.4. `MESHCAST_ORDER_BY_LOST=0` lets candidates step up by chance instead
+of by how loud they heard the announcer they lost, and `MESHCAST_FRESH_TIE=0` keeps two announcers
+that stepped up together from settling a near-tie by id when they judge each other far, as before
+`docs/FEASIBILITY.md` §37.
 
 A `cell` report also gives the busiest 10 s of the bulk carrier at each node, measured at every
 frame a node hears (the occupancy line above it samples every ten minutes); how many parts the
@@ -176,7 +179,14 @@ relays go (`docs/FEASIBILITY.md` §28):
   want whose length the wanter does not know.
 - `MESHCAST_DEBUG_WANTS=1` traces each announcer's want list; `MESHCAST_DEBUG_NODE=4` adds node
   index 4's.
-- `MESHCAST_TRACE_ROLES=1` prints every role change as `ROLE t node carrier role announcer`.
+- `MESHCAST_TRACE_ROLES=1` prints every role change as `ROLE t node carrier role announcer`, and
+  every node switched off or on (`ALIVE t node bool`) or replaced by a newcomer (`NEWCOMER t node`).
+- `MESHCAST_TRACE_PAIRS=1` prints, every ten minutes, every pair of announcers on a bulk carrier:
+  `PAIR t carrier a b score_a score_b rx_ab rx_ba a_heard_b a_median b_heard_a b_median
+  followers_a share_of_a_hearing_b followers_b share_of_b_hearing_a hear= shun=`, the same-cell
+  judgement of the tie-break and the share of each one's followers that hear the other
+  (`docs/FEASIBILITY.md` §37.1); an announcer without followers shares nothing (0).
+  `MESHCAST_TRACE_NB=1` prints every node's neighbour count then.
 - `MESHCAST_TRACE_BEACONS=1` prints every beacon with its score, channel and colour, and every
   node that receives it above sensitivity with its own score; an `x` after a node means it was
   tuned to another channel and missed it, a `d` that it was listening on its other carrier.
