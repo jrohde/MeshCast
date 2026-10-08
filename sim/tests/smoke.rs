@@ -1109,7 +1109,7 @@ fn an_upload_to_another_cell_outlives_a_change_of_announcer() {
     let before = src.announcer_of(1);
     src.handle_frame(now, 1, &grant_frame(other, me, &[p[0]]), -60);
     assert_eq!(src.uploads(1), vec![(p[0], other)]);
-    let beacon = Beacon { carrier: CarrierKind::GfskBulk, announcer: louder, score: 1000, caps: 0, next_ms: 30_000, round: 0, time: 0, time_quality: 0, colour: 0, colours: 1, upload_phases: 1, occupancy: [0; 4] };
+    let beacon = Beacon { carrier: CarrierKind::GfskBulk, announcer: louder, score: 1000, caps: 0, next_ms: 30_000, round: 0, time: 0, time_quality: 0, colour: 0, colours: 1, upload_phases: 1, occupancy: [0; 4], fresh: false };
     src.handle_frame(now + 10, 1, &Frame::Beacon(beacon), -20);
     assert!(src.announcer_of(1) == louder && before != louder, "the source should now follow the louder announcer");
     assert_eq!(src.uploads(1), vec![(p[0], other)], "the upload to another cell should go on");
@@ -1460,12 +1460,14 @@ fn a_new_root_is_announced_before_its_turn() {
     // every cell on the way to its listeners (FEASIBILITY.md §30). In the round after it adopts a
     // root it now announces the roots it adopted last (PROTOCOL.md §3.4). Six channels spread over
     // eighty publish at once; in channel order the other cell would learn of all six only after
-    // most of a rotation, some fifty minutes.
+    // most of a rotation, some fifty minutes. They are published at 3 h 10 min: the node between
+    // source and station steps up seconds after 3 h, and a publication in the middle of an
+    // election tests the election, not the order of announcements.
     use meshcast_core::manifest::{Collection, CollectionKind, Manifest};
     use meshcast_core::object::ContentType;
     let channels = 80;
     let mut b = two_cells(Params::default(), channels, 4.0);
-    b.engine.run(3 * 3_600_000, 600_000);
+    b.engine.run(3 * 3_600_000 + 600_000, 600_000);
     let ks = [5, 18, 31, 44, 57, 70];
     let seqs = |b: &meshcast_sim::scenario::Built| ks.map(|k| b.engine.nodes[3].node.manifest_state(&b.sources[k].channel).map(|m| m.0));
     assert_eq!(seqs(&b), ks.map(|_| Some(1)), "the second cell's announcer should know the first roots");
@@ -1479,7 +1481,7 @@ fn a_new_root_is_announced_before_its_turn() {
         b.engine.nodes[0].node.publish(&m, &[series], &[(o.meta(), None)]);
     }
     b.engine.poke(0);
-    b.engine.run(3 * 3_600_000 + 20 * 60_000, 60_000);
+    b.engine.run(3 * 3_600_000 + 600_000 + 20 * 60_000, 60_000);
     assert_eq!(seqs(&b), ks.map(|_| Some(2)), "the new roots should reach the other cell within twenty minutes");
 }
 
@@ -1533,4 +1535,52 @@ fn a_track_of_several_blocks_crosses_a_slow_carrier() {
     };
     assert_eq!(missing(true), 0, "with the block NACK every track should reach the follower");
     assert!(missing(false) > 0, "without the block NACK this world should still lose a track, or the test no longer tests it");
+}
+
+#[test]
+fn a_failover_leaves_one_announcer_where_all_hear_it() {
+    // A square kilometre of 200 nodes and one station, switched off at 2 h and on again at 6 h,
+    // tracks of 42 kB, seed 1. Every node then knew one neighbour, the station; two far apart, out
+    // of each other's hearing, stepped up by the jitter's chance and both announced until the
+    // station came back (FEASIBILITY.md §37). Now candidates step up in the order they heard the
+    // station, the nearest first, and the others hear it; two that step up together settle by id
+    // (PROTOCOL.md §5.2).
+    let longest = |order_by_lost: bool, fresh_tie: bool| {
+        let s = ScenarioSpec {
+            nodes: 200,
+            area_km2: 1.0,
+            stations: 1,
+            sources: 1,
+            tracks: 10,
+            track_kb: 42,
+            mix: Vec::new(),
+            hours: 10.0,
+            seed: 1,
+            bulk: BulkPreset::GfskO,
+            control_sf: 7,
+            exponent: 3.0,
+            shadow_db: 6.0,
+            follow_fraction: 1.0,
+            positions: None,
+            stations_at: None,
+            sources_at: None,
+            renditions: None,
+            attack: None,
+            clocks: Default::default(),
+            collections: Default::default(),
+        };
+        let mut p = Params::default();
+        p.election.order_by_lost = order_by_lost;
+        p.election.fresh_tie = fresh_tie;
+        let mut b = build(&s, p);
+        let victim = (0..200).find(|&i| b.engine.nodes[i].mains).unwrap();
+        b.engine.schedule_kill(victim, 2 * 3_600_000);
+        b.engine.schedule_revive(victim, 6 * 3_600_000);
+        b.engine.run(10 * 3_600_000, 600_000);
+        let bulk = b.engine.phys.iter().position(|p| p.kind != meshcast_core::frame::CarrierKind::LoraControl).unwrap();
+        let id = b.engine.nodes[victim].node.id().0;
+        meshcast_sim::metrics::several_announcers(&b.engine.metrics.role_events, bulk, id, 2 * 3_600_000, 10 * 3_600_000).1
+    };
+    assert!(longest(true, true) < 120_000, "two announcers should settle within two beacon intervals");
+    assert!(longest(false, false) > 3_600_000, "without the two rules this world should keep two announcers for hours, or the test no longer tests them");
 }

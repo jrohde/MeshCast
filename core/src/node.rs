@@ -921,9 +921,10 @@ impl Node {
     /// On a hopping carrier a candidate steps up in a meeting dwell, where every candidate is on
     /// one channel and hears the first of them: after the announcers' meeting beacons, in the
     /// order of `step_up_order` over most of the rest of the dwell.
-    fn step_up_time(&mut self, now: Millis, score: u16, caps: u8) -> Millis {
+    fn step_up_time(&mut self, carrier: usize, now: Millis, score: u16, caps: u8) -> Millis {
         let dwell = self.cfg.params.dwell_ms.max(1);
-        let off = dwell / 5 + step_up_order(caps, score, dwell * 7 / 10, &mut self.rng);
+        let closeness = self.carriers[carrier].election.as_ref().and_then(|e| e.closeness());
+        let off = dwell / 5 + step_up_order(caps, score, closeness, dwell * 7 / 10, &mut self.rng);
         let m = self.mesh(now);
         let this = if self.is_meeting_dwell(m / dwell) { (m / dwell) * dwell + off } else { 0 };
         if this > m { self.local_at(this) } else { self.next_meeting_start(now) + off }
@@ -1529,7 +1530,7 @@ impl Node {
         let cell = self.cell_carrier();
         if step.unsigned_abs() > self.cfg.params.t_guard_ms && self.hops(cell) && self.role(cell) == Role::Candidate {
             let (score, caps) = (self.score, self.caps());
-            let at = self.step_up_time(self.now, score, caps);
+            let at = self.step_up_time(cell, self.now, score, caps);
             if let Some(e) = self.carriers[cell].election.as_mut() {
                 e.step_up_at(at);
             }
@@ -1960,7 +1961,7 @@ impl Node {
             };
             if let Some(t) = t {
                 if t == Transition::BecameCandidate && self.hops(i) {
-                    let at = self.step_up_time(now, score, caps);
+                    let at = self.step_up_time(i, now, score, caps);
                     if let Some(e) = self.carriers[i].election.as_mut() {
                         e.step_up_at(at);
                     }
@@ -1971,7 +1972,7 @@ impl Node {
                 let gate = self.booted_at + self.cfg.params.t_acquire_ms;
                 if t == Transition::BecameCandidate && self.acquiring() && now < gate {
                     if self.hops(i) {
-                        let at = self.step_up_time(gate, score, caps);
+                        let at = self.step_up_time(i, gate, score, caps);
                         if let Some(e) = self.carriers[i].election.as_mut() {
                             e.step_up_at(at);
                         }
@@ -2306,7 +2307,7 @@ impl Node {
             let tr = self.carriers[i].election.as_mut().and_then(|e| e.shun(now, own, now + ttl, score, caps, &mut self.rng));
             if let Some(tr) = tr {
                 if tr == Transition::BecameCandidate && self.hops(i) {
-                    let at = self.step_up_time(now, score, caps);
+                    let at = self.step_up_time(i, now, score, caps);
                     if let Some(e) = self.carriers[i].election.as_mut() {
                         e.step_up_at(at);
                     }
@@ -2391,6 +2392,7 @@ impl Node {
             colours: self.colours(),
             upload_phases: if self.divides_listening_time(carrier) { self.upload_phase_count() } else { 1 },
             occupancy,
+            fresh: c.election.as_ref().map_or(false, |e| e.is_fresh(self.now)),
         }
     }
 
@@ -3516,6 +3518,7 @@ impl Node {
                 if p.frame_type == FrameType::Beacon {
                     if let Ok(Frame::Beacon(mut b)) = Frame::decode(&bytes) {
                         b.time = self.mesh(now) + self.time_pending;
+                        b.fresh = self.carriers[i].election.as_ref().map_or(false, |e| e.is_fresh(self.now));
                         bytes = Frame::Beacon(b).encode();
                     }
                 }
@@ -3948,6 +3951,13 @@ impl Node {
         }
         let better = self.neighbors.values().filter(|nb| nb.rssi > rssi).count();
         (better as u64 * 1000) / n as u64
+    }
+
+    /// Diagnostic: how we hear `other` (averaged) and our typical neighbour, the two sides of the
+    /// same-cell judgement of the tie-break (PROTOCOL.md §5.2), and whether we shun `other`.
+    pub fn same_cell_view(&self, carrier: usize, other: NodeId) -> (Option<i16>, i16, bool) {
+        let shunned = self.carriers.get(carrier).and_then(|c| c.election.as_ref()).map_or(false, |e| e.is_shunned(other, self.now));
+        (self.neighbors.get(&other).map(|n| n.rssi), self.typical_neighbor_rssi(other), shunned)
     }
 
     /// RSSI of our typical (median) neighbour: the yardstick for "same cell". A node that has

@@ -112,6 +112,7 @@ fn seeds() -> Vec<(&'static str, Vec<u8>)> {
             colours: 5,
             upload_phases: 3,
             occupancy: [10, 20, 30, 40],
+            fresh: true,
         }),
         Frame::Bulk(Bulk { object: ShortId([1; 8]), block: 2, esi: 3, len: 500_000, payload: vec![9u8; SYMBOL_SIZE] }),
         Frame::Gossip(Gossip {

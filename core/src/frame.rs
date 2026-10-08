@@ -152,6 +152,8 @@ pub struct Beacon {
     pub upload_phases: u8,
     /// Spectrum weather: measured occupancy (percent) on up to four bulk channels.
     pub occupancy: [u8; 4],
+    /// The announcer stepped up within the last `N_miss` beacon intervals (flags bit 5).
+    pub fresh: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -276,7 +278,7 @@ impl Frame {
         match self {
             Frame::Beacon(b) => {
                 out.push((VERSION << 4) | FrameType::Beacon as u8);
-                out.push((b.carrier as u8 & 0x07) | (b.caps & 0x03) << 3);
+                out.push((b.carrier as u8 & 0x07) | (b.caps & 0x03) << 3 | (b.fresh as u8) << 5);
                 out.extend_from_slice(&b.announcer.0.to_le_bytes());
                 out.extend_from_slice(&b.score.to_le_bytes());
                 out.extend_from_slice(&b.next_ms.to_le_bytes());
@@ -403,7 +405,7 @@ impl Frame {
                 let occ = c.bytes(4)?;
                 let mut occupancy = [0u8; 4];
                 occupancy.copy_from_slice(occ);
-                Frame::Beacon(Beacon { carrier, announcer, score, caps, next_ms, round, time, time_quality, colour, colours, upload_phases, occupancy })
+                Frame::Beacon(Beacon { carrier, announcer, score, caps, next_ms, round, time, time_quality, colour, colours, upload_phases, occupancy, fresh: flags & 0x20 != 0 })
             }
             2 => {
                 let object = c.short()?;
@@ -573,6 +575,7 @@ mod tests {
                 colours: 5,
                 upload_phases: 3,
                 occupancy: [10, 20, 30, 40],
+                fresh: true,
             }),
             Frame::Bulk(Bulk { object: ShortId([1; 8]), block: 2, esi: 3, len: 500_000, payload: vec![9u8; SYMBOL_SIZE] }),
             Frame::Gossip(Gossip { node: NodeId(1), announcer: NodeId(2), announcer_colour: 1, announcer_colours: 4, heard: vec![(NodeId(7), 0, 3), (NodeId(8), 1, 3), (NodeId(9), 2, 3)], have: vec![ShortId([3; 8]); 12], have_sets: vec![], want: vec![(ShortId([4; 8]), NodeId(5), 2); 8], sets: vec![] }),
@@ -607,7 +610,7 @@ mod tests {
 
     #[test]
     fn sizes() {
-        let b = Frame::Beacon(Beacon { carrier: CarrierKind::GfskBulk, announcer: NodeId(1), score: 0, caps: 0, next_ms: 0, round: 0, time: 0, time_quality: 0, colour: 0, colours: 1, upload_phases: 1, occupancy: [0; 4] });
+        let b = Frame::Beacon(Beacon { carrier: CarrierKind::GfskBulk, announcer: NodeId(1), score: 0, caps: 0, next_ms: 0, round: 0, time: 0, time_quality: 0, colour: 0, colours: 1, upload_phases: 1, occupancy: [0; 4], fresh: false });
         assert_eq!(b.encode().len(), 30);
         let k = Frame::Bulk(Bulk { object: ShortId([0; 8]), block: 0, esi: 0, len: 1, payload: vec![] });
         assert_eq!(k.encode().len(), 220);
