@@ -58,9 +58,9 @@ three hours before the end (FEASIBILITY.md §9.6).
 
 **Polite to strangers, fair among ourselves.** The node separates occupancy into energy it could
 decode as MeshCast frames and energy it could not. Foreign energy (LoRaWAN, Helium, anything
-else) is judged strictly: MeshCast yields to everything it does not understand. Occupancy caused
-by other MeshCast nodes is judged loosely, with a higher threshold and a higher rate floor,
-because those nodes run the same congestion control and the goal among them is fair sharing, not
+else) is judged strictly: MeshCast yields to everything it does not understand. Occupancy as a
+whole, other MeshCast nodes' frames included, is judged loosely, against higher thresholds and with
+a higher rate floor, because those nodes run the same congestion control and the goal among them is fair sharing, not
 retreat. Without this distinction five carousels on one channel throttled each other, and the
 sources between them, to the floor.
 
@@ -95,18 +95,23 @@ elif occ_ewma < OCC_LOW:
 //   and occ_ewma < OCC_CONTENT
 ```
 
-Draft parameters:
+Parameters, all but the CCA sample rate as the simulator runs them (`core/src/params.rs`):
 
-| Name | Draft | Meaning |
+| Name | Value | Meaning |
 |---|---|---|
 | `W` | 10 s | measurement window |
 | `ALPHA` | 0.3 | EWMA weight |
 | `OCC_HIGH` | 0.30 | above this, halve own rate |
 | `OCC_LOW` | 0.15 | below this, increase own rate |
-| `OCC_CONTENT` | 0.25 | content frames only below this occupancy |
+| `OCC_CONTENT` | 0.25 | repeated content only below this occupancy; fresh content and metadata up to `OCC_HIGH` |
 | `RATE_MIN`, `RATE_MAX` | 0.05, 1.0 | bounds on the budget fraction |
 | `RATE_STEP` | 0.05 | additive increase per window |
 | CCA sample rate | 1 kHz | RSSI samples per second while idle |
+| `OCC_HIGH_OWN`, `OCC_LOW_OWN` | 0.50, 0.35 | the same for all occupancy, MeshCast frames and foreign energy together; the thresholds above then hold for the foreign part alone ("Polite to strangers", above) |
+| `OCC_CONTENT_OWN` | 0.45 | repeated content only below this occupancy as a whole |
+| `RATE_MIN_OWN` | 0.25 | the rate floor when the whole, not the foreign part, is too high |
+| `MAX_OWN_SHARE` | 0.50 | own share of airtime on a carrier without a regulatory duty cycle |
+| `BURST` | 2 s, or one cycle while taking turns | token-bucket burst, in airtime: raised to one cycle of upload phases or of slots while the node uploads in phases or announces in a slot, so that what it saved while waiting can be spent in its turn |
 
 **Two ceilings, the lower wins.** A node paces its content to the smaller of (a) the regulatory
 budget of the band minus a reserve for control frames, and (b) a fair share of the channel's
@@ -126,8 +131,12 @@ concluded the announcer had vanished.
 
 The target aggregate occupancy per cell is **≤ 30 %** including foreign traffic. That number
 comes from the Meshtastic experience (trouble above ~40 %, collapse above ~65 %) and from slotted
-ALOHA theory (throughput peaks near 37 % offered load and falls beyond it). The simulator will
-confirm or move it.
+ALOHA theory (throughput peaks near 37 % offered load and falls beyond it). The simulator kept it
+for foreign energy and holds occupancy as a whole, MeshCast's and foreign together, to 50 % ("fair
+among ourselves", FEASIBILITY.md §7.1). It is not a ceiling on every 10 s: the gate acts on the
+smoothed occupancy, and in its busiest 10 s a lone cell was busy about a third of the time at 10
+and 100 nodes per km² (29 to 38 % over the worlds) and up to 66 % at 1000, without delivery time
+doubling (FEASIBILITY.md §36.2).
 
 ### 5. The announcer as weather station, not as boss
 

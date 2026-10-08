@@ -361,7 +361,7 @@ Frame types:
 | 0x2 | `BULK` | announcer, or a source uploading to the announcer; a node that announces a root on the control carrier for the first time (§2) | bulk carriers; the symbols of a root and of the collection manifests new in it also on the control carrier | one symbol of one object |
 | 0x3 | `GOSSIP` | sources, the announcer, and followers with unserved wants | bulk carrier | HAVE / WANT summaries |
 | 0x4 | `MANIFEST_ANNOUNCE` | sources, the announcer, and followers whose announcer is behind (§2) | bulk carrier; a source's or announcer's copy **also** on the long-range control carrier | newest manifest id per channel; the control-carrier copy is discovery for other cells |
-| 0x5 | `NACK` | any node that is nearly complete on an object and sees no progress; a follower asking a silent announcer for proof (§5.2) | bulk carrier, rare | compact repair request, answered by the carousel or by the uploading source |
+| 0x5 | `NACK` | any node that is nearly complete on an object, or holds its first blocks whole and lacks a later one, and sees no progress; a follower asking a silent announcer for proof (§5.2) | bulk carrier, rare | compact repair request, answered by the carousel or by the uploading source |
 
 **A cell is what hears each other on the bulk carrier.** The Phase 0 simulator showed that
 running the election over a long-range control carrier elects announcers that most of their
@@ -513,7 +513,18 @@ a new root only, as much (FEASIBILITY.md §30).
 | … | 2 | CRC-16 |
 
 Draft cap 40 ranges, 183 bytes. Sent by a node that is nearly complete on an object (draft 80 %,
-or all of it but one symbol, §4) and has seen no progress for `T_nack_stall`. A follower's NACK
+or all of it but one symbol, §4) and has seen no progress for `T_nack_stall`. Or by a node that
+holds an object's first blocks whole and lacks a later one, once it has seen no progress for
+`T_want_min`, the time after which it would ask for the object again. Either names the first
+block it lacks symbols of, so a NACK also says that every block before it is held. Asked for
+again in full, a pass or an upload starts at the first block, which it has. Over LoRa at 10 % a
+block of a 540 kB track took a little over an hour, role changes cut every attempt short before
+the later blocks came, and the track never arrived; with the block NACK all three arrived, the
+last after nine hours (541 minutes). After `T_nack_stall` instead, the NACKs came while a pass
+would have brought the block anyway (FEASIBILITY.md §36.4). A NACK of a block nothing of which
+has arrived names all of it, up to 1,024 symbols, and the carousel sends them before its round
+(§4; its front queue holds at most 4,096): on a slow carrier that holds the round back by a
+block's airtime. A follower's NACK
 goes to its announcer, whose carousel sends the missing symbols first, before the rest of its round;
 but if that announcer is itself asking for the object (its WANT lists it) and has granted it to
 nobody for `T_grant`, nobody in
@@ -636,8 +647,12 @@ own announcers.
 
 **Repair.** Any node, follower or announcer, that holds at least 80 % of an object, or all of it
 but one symbol, and has seen no new symbol for `T_nack_stall` (draft 60 s) sends one NACK listing
-the missing symbols. The announcer's carousel answers from its front queue; a holder whose upload
-the announcer is missing answers with exactly those symbols. Stall detection is time-based, not
+the missing symbols. So does one that holds an object's first blocks whole and lacks a later one,
+after `T_want_min` without a new symbol (§3.5). Either NACKs the first block it has gaps in. The
+announcer's carousel answers from its front queue; a holder whose upload
+the announcer is missing answers with exactly those symbols, and a holder whose full pass of the
+object to the asker is still on an earlier block moves it on to the block the NACK names: the
+asker holds every block before it. Stall detection is time-based, not
 round-based, so it also works when the carousel is idle. A NACK for one symbol is the smallest
 repair there is: under the fraction alone an object of two to four symbols, such as a collection
 manifest, could not be repaired at all, and one that had lost one of its two symbols waited for
@@ -693,11 +708,11 @@ ABUSE.md lists what a forged name can do.
 each other, so carrier sensing cannot make them take turns, and their uploads collide at the
 announcer. The announcer, the only one that can tell, divides its listening time among those it
 asks to speak. Each grant carries a phase, in the WANT entry that names the holder: the phase of
-that holder's running grants if it has any, otherwise the lowest one no running grant uses.
-Listening time is divided among those who speak, not among the objects they bring: a holder
-uploads one object at a time, so a phase per object left most of each cycle idle while a holder
-with several objects waited its turn in each of them, and an hour of music in 3-minute pieces
-reached a band L neighbourhood in 70 minutes instead of 27 (FEASIBILITY.md §13). The announcer's beacon carries `upload_phases`, K = the highest
+that holder's running grants or reserved repairs if it has any, otherwise the lowest one no
+running grant or repair uses. Listening time is divided among those who speak, not among the
+objects they bring: a holder uploads one object at a time, so a phase per object left most of
+each cycle idle while a holder with several objects waited its turn in each of them, and an
+hour of music in 3-minute pieces reached a band L neighbourhood in 70 minutes instead of 27 (FEASIBILITY.md §13). The announcer's beacon carries `upload_phases`, K = the highest
 phase in use + 1, counting only grants it has named in a WANT and repairs it has reserved: a grant
 that did not fit its asks yet raised K in the beacon while its holder kept silent, and the
 uploaders that had heard the beacon and one that had not divided the time differently and
@@ -742,9 +757,10 @@ needed; FEASIBILITY.md §9.7.
 grant names both in the WANT. An announcer's NACK names both too (§3.5): the granted uploader and
 its phase if the object has one, otherwise the holder it hears best and a phase chosen as for a
 grant to that holder, reserved for repairs of that object until it completes or `T_grant` passes
-without a symbol. Answers that
-nobody named, from holders that cannot hear each other, were nearly all the collisions left in
-band L after grants had phases; FEASIBILITY.md §9.6.
+without a symbol; a NACK that names another holder than the last moves the reservation to that
+holder's own phase if it has one. With no phase left, that NACK waits and the next object's may
+go. Answers that nobody named, from holders that cannot hear each other, were nearly all the
+collisions left in band L after grants had phases; FEASIBILITY.md §9.6.
 
 **An upload keeps out of the phases other announcers gave away.** Phases are slots of one grid on
 the shared time (§6), `T_upload_phase` wide, so the slot tells which phase every announcer is in. A
@@ -1427,11 +1443,11 @@ simulator has no node with one.
 | step-up order | span in 4 capability bands; in a band, 2/3 by score + 1/3 jitter | span `T_base + T_jitter` from the candidacy, or 7/10 of the meeting dwell after its first fifth on a hopping carrier |
 | `T_excursion` | 40 min | a want without a symbol, and without a grant by our announcer, this long sends a follower to another announcer that has it; a visit without a symbol this long ends, and one that brought none is not repeated for `want_ttl`; with nobody to visit, and one `T_want_min` more, it makes the follower leave its announcer, twice as long for each announcer it already left for that object that did not list it (§5.2); and what was asked for and neither granted nor arriving this long is stuck, and asked for last (§4) |
 | `rssi_hysteresis` | 6 dB | a follower switches announcer only for a clearly stronger one |
-| `near_rssi` | sensitivity + 17 dB | beacon strength that means "same cell" for the tie-break |
+| "same cell" | heard at least as well as the median neighbour | when an equal announcer yields on the tie-break (§5.2); relative, not a configured level: it holds on every carrier, and in a dense cell it is the rule FEASIBILITY.md §36.5 found splitting one cell in two |
 | `max_passes` | 1 | carousel passes per object unless re-wanted |
 | repetition spacing | 0, then `T_want_min` × 1, 2, 4, 8 | wait before an object is passed again; the level climbs with each repetition and resets after a rest of twice the wait |
 | `T_nack_stall` | 60 s | no progress on a nearly complete object (≥ 80 %, or all but one symbol) before a NACK |
-| `T_want_min` | 10 min | minimum interval between a follower's WANT frames, except an ask for what a new manifest names (§4); also how long a want its announcer lists may bring nothing before the follower asks it for proof (§5.2) |
+| `T_want_min` | 10 min | minimum interval between a follower's WANT frames, except an ask for what a new manifest names (§4); also how long a want its announcer lists may bring nothing before the follower asks it for proof (§5.2); and how long an object whose first blocks a node holds, and that is not nearly complete, may bring nothing before it NACKs a later block (§3.5) |
 | `T_relay_wait` | 10 min | what a node expects of other cells' asks before it has heard any: met half the time within it, never after (§4) |
 | `relay_risk` | 5 % | a node relays another cell's ask once fewer than this share of the asks of its age were met by others before twice that age, as it learned from the asks it heard (§4) |
 | `carry_budget` | per device | bytes a node keeps for others, beyond what it listens to; what has not been of use for `want_ttl` gives way, the menu first, then relays another cell's announcer lists, then the least recently used, and a full budget takes on no more relays (§4). The simulator's default is no limit |
