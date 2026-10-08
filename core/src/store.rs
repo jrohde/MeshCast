@@ -114,6 +114,11 @@ impl Entry {
     pub fn known_blocks(&self) -> u16 {
         self.blocks.len() as u16
     }
+    /// The first block not yet held whole, if any: what `MemStore::missing` would find first,
+    /// without listing it.
+    pub fn first_gap_block(&self) -> Option<u16> {
+        self.blocks.iter().position(|b| b.as_ref().map_or(true, |b| !b.complete())).map(|b| b as u16)
+    }
 }
 
 #[derive(Clone, Debug)]

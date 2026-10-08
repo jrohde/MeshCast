@@ -177,6 +177,12 @@ pub struct Stats {
     pub carousel_frames: [u64; 2],
     /// Repair answers lined up; most are cancelled by hearing another holder answer first.
     pub repairs_queued: u64,
+    /// Full passes a NACK moved on to the block it named (PROTOCOL.md §3.5).
+    pub passes_skipped: u64,
+    /// Repair phases shared with what the named holder already brings us; and checks that found a
+    /// NACK due but no phase left, once per object and check, so one NACK put off counts often (§4).
+    pub repair_phases_shared: u64,
+    pub nacks_without_phase: u64,
     pub manifests_adopted: u64,
     pub conflict_reports_sent: u64,
     /// Manifest announcements sent to bring our announcer up to date.
@@ -327,6 +333,18 @@ struct Upload {
     manifest: bool,
     /// Its place among the uploads of its rank: lower goes first (PROTOCOL.md §4).
     order: u64,
+}
+
+impl Upload {
+    /// A full pass behind `block` moves on to its start: the receiver holds what lies before.
+    fn skip_to(&mut self, block: u16) -> bool {
+        let behind = self.list.is_none() && self.block < block;
+        if behind {
+            self.block = block;
+            self.esi = 0;
+        }
+        behind
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -492,8 +510,8 @@ pub struct Node {
     /// announces (§4), since the holder of any other does not know it may speak.
     told: BTreeSet<ShortId>,
     /// Phases an announcer reserved for answers to its NACK of an object nobody is granted:
-    /// object -> (phase, since).
-    repair_phases: BTreeMap<ShortId, (u8, Millis)>,
+    /// object -> (phase, since, the holder its NACK named).
+    repair_phases: BTreeMap<ShortId, (u8, Millis, NodeId)>,
     /// Renditions named by the manifests we hold: rendition -> (the object it is made from,
     /// its metadata).
     renditions: BTreeMap<ShortId, (ShortId, ObjectMeta)>,
@@ -1699,6 +1717,26 @@ impl Node {
         self.store.complete_ids().filter(|id| !keep.contains(id)).copied().collect()
     }
 
+    /// A whole object that came another way than over the air: an IP link, or a card from someone
+    /// else's device (TRANSPORTS.md). Checked against its id like one that completed on the radio,
+    /// then kept and read like one: a root is adopted if its signature holds, a collection
+    /// manifest once a root names it. Bytes that do not match are dropped, and an object nodes
+    /// must read is not taken without its bytes; other content without them (the simulator's) is
+    /// taken on trust, as `publish` takes our own.
+    pub fn receive_whole(&mut self, meta: ObjectMeta, bytes: Option<&[u8]>) -> Vec<Action> {
+        let id = meta.id.short();
+        let mut out = Vec::new();
+        let sound = match bytes {
+            Some(b) => b.len() == meta.len as usize && crate::ids::ObjectId::of(b) == meta.id,
+            None => !meta.kind.is_read_by_nodes(),
+        };
+        if sound && !self.store.has_complete(&id) {
+            self.store.insert_complete(meta, bytes);
+            self.on_complete(id, &mut out);
+        }
+        out
+    }
+
     /// Publish a channel: its root manifest, the collection manifests it names and the objects
     /// they list (we own them, complete). A collection manifest already published need not be
     /// passed again.
@@ -2377,12 +2415,12 @@ impl Node {
         // in our beacon while its holder kept silent, and uploaders that heard the beacon and one
         // that had not divided the time differently and collided frame for frame.
         let told = self.grants.iter().filter(|(id, _)| self.told.contains(id)).map(|(_, (_, _, p))| *p);
-        told.chain(self.repair_phases.values().map(|(p, _)| *p)).map(|p| p + 1).max().unwrap_or(1).max(1)
+        told.chain(self.repair_phases.values().map(|(p, _, _)| *p)).map(|p| p + 1).max().unwrap_or(1).max(1)
     }
 
     /// Phases held by running grants and by reserved repairs.
     fn phases_in_use(&self) -> impl Iterator<Item = u8> + '_ {
-        self.grants.values().map(|(_, _, p)| *p).chain(self.repair_phases.values().map(|(p, _)| *p))
+        self.grants.values().map(|(_, _, p)| *p).chain(self.repair_phases.values().map(|(p, _, _)| *p))
     }
 
     /// `node` no longer announces: stop uploading to it and forget the grants it gave us.
@@ -2539,8 +2577,17 @@ impl Node {
     /// objects they bring. A holder uploads one object at a time, so every grant to it shares the
     /// phase of its first; a phase per object left most of a cycle idle and made an hour of
     /// music in 3-minute pieces arrive three times later than in one piece (FEASIBILITY.md §13).
+    /// The same holds for the repairs a NACK asks of it.
     fn phase_for(&self, holder: NodeId) -> Option<u8> {
-        self.grants.values().find(|(h, _, _)| *h == holder && !holder.is_none()).map(|(_, _, p)| *p).or_else(|| self.free_upload_phase())
+        self.holder_phase(holder).or_else(|| self.free_upload_phase())
+    }
+
+    /// The phase `holder` already speaks in for us: that of a grant to it or of a repair we asked
+    /// of it.
+    fn holder_phase(&self, holder: NodeId) -> Option<u8> {
+        let granted = self.grants.values().map(|(h, _, p)| (*h, *p));
+        let repairing = self.repair_phases.values().map(|(p, _, h)| (*h, *p));
+        granted.chain(repairing).find(|(h, _)| *h == holder && !holder.is_none()).map(|(_, p)| p)
     }
 
     fn enqueue(&mut self, carrier: usize, f: Frame) {
@@ -3122,7 +3169,7 @@ impl Node {
         let grants = &self.grants;
         self.told.retain(|id| grants.contains_key(id));
         let wants = &self.wants;
-        self.repair_phases.retain(|id, (_, t)| {
+        self.repair_phases.retain(|id, (_, t, _)| {
             let p = progress.get(id).copied().unwrap_or_default();
             wants.contains(id) && now < (*t).max(p.last_progress) + t_grant
         });
@@ -3274,8 +3321,9 @@ impl Node {
         self.ask_rest_home = false;
     }
 
-    /// Any node (follower or announcer) that is nearly complete on an object and sees no progress
-    /// asks for the missing symbols. The carousel or the uploading source answers.
+    /// Any node (follower or announcer) that is nearly complete on an object, or holds its first
+    /// blocks whole and lacks a later one, and sees no progress asks for the missing symbols of
+    /// the first block with gaps. The carousel or the uploading source answers.
     fn nack_check(&mut self) {
         let Some(pb) = self.primary_bulk() else { return };
         let announcing = self.role(pb) == Role::Announcer;
@@ -3290,44 +3338,63 @@ impl Node {
         }
         let now = self.now;
         let stall = self.cfg.params.t_nack_stall_ms;
-        let mut to_send: Option<(ShortId, u16, Vec<(u16, u16)>)> = None;
+        let mut to_send: Option<(ShortId, u16, Vec<(u16, u16)>, u8, bool)> = None;
+        let (mut shared, mut without) = (0, 0);
         for id in self.wants.iter() {
             let Some(e) = self.store.entry(id) else { continue };
             let (have, total) = e.progress();
             let Some(total) = total else { continue };
-            if !self.nearly_complete(have, total) {
+            // Or it holds its first blocks whole and lacks a later one (PROTOCOL.md §3.5). Asked for
+            // again in full, a pass or an upload starts at the first block, which it has; over LoRa
+            // at 10 % a block of a 540 kB track took a little over an hour, every pass and upload
+            // was cut short by a role change before it got further, and the track never arrived
+            // (FEASIBILITY.md §36).
+            let later_block = self.cfg.params.block_nack && e.first_gap_block().map_or(false, |b| b > 0);
+            let nearly = self.nearly_complete(have, total);
+            if !nearly && !later_block {
                 continue;
             }
+            // A later block waits as long as a want would before it is asked for again.
+            let wait = if nearly { stall } else { self.cfg.params.t_want_min_ms };
             let p = self.progress.get(id).copied().unwrap_or_default();
-            if now < p.last_progress + stall || now < p.last_nack + stall {
+            if now < p.last_progress + wait || now < p.last_nack + wait {
                 continue;
             }
-            for block in 0..e.known_blocks() {
-                let missing = self.store.missing(id, block);
-                if !missing.is_empty() {
-                    to_send = Some((*id, block, compress_ranges(&missing)));
-                    break;
-                }
-            }
-            if to_send.is_some() {
-                break;
-            }
-        }
-        if let Some((id, block, ranges)) = to_send {
+            let Some(block) = e.first_gap_block() else { continue };
             // An announcer's NACK names the phase its answers use: the grant's, or one reserved
-            // for this repair.
+            // for this repair, shared with what the holder already brings us. With none left,
+            // the next object may still be asked for.
             let phase = if !announcing {
-                0
-            } else if let Some((_, _, p)) = self.grants.get(&id) {
-                *p
-            } else if let Some((p, _)) = self.repair_phases.get(&id) {
-                *p
-            } else if let Some(p) = self.phase_for(self.best_holder(&id)) {
-                self.repair_phases.insert(id, (p, now));
-                p
+                Some((0, false))
+            } else if let Some((_, _, p)) = self.grants.get(id) {
+                Some((*p, false))
+            } else if let Some((p, _, h)) = self.repair_phases.get(id) {
+                // The holder we hear best may have changed since: the phase goes with the holder
+                // the NACK names, its own if it has one.
+                let holder = self.best_holder(id);
+                if *h == holder {
+                    Some((*p, false))
+                } else {
+                    let own = self.holder_phase(holder);
+                    shared += own.is_some() as u64;
+                    Some((own.unwrap_or(*p), true))
+                }
             } else {
-                return;
+                let holder = self.best_holder(id);
+                let own = self.holder_phase(holder);
+                shared += own.is_some() as u64;
+                own.or_else(|| self.free_upload_phase()).map(|p| (p, true))
             };
+            let Some((phase, reserve)) = phase else {
+                without += 1;
+                continue;
+            };
+            to_send = Some((*id, block, compress_ranges(&self.store.missing(id, block)), phase, reserve));
+            break;
+        }
+        self.stats.repair_phases_shared += shared;
+        self.stats.nacks_without_phase += without;
+        if let Some((id, block, ranges, phase, reserve)) = to_send {
             self.progress.entry(id).or_default().last_nack = now;
             let cell = self.cell_carrier();
             // A follower asks its announcer; but where the announcer is itself asking for the
@@ -3343,6 +3410,9 @@ impl Node {
             } else {
                 self.best_holder(&id)
             };
+            if reserve {
+                self.repair_phases.insert(id, (phase, now, answerer));
+            }
             self.enqueue(cell, Frame::Nack(Nack { node: self.cfg.id, object: id, block, answerer, phase, missing: ranges }));
             self.stats.nacks_sent += 1;
         }
@@ -3979,7 +4049,7 @@ impl Node {
         // A symbol of an object we granted or asked to repair is an upload to us: the phase it
         // uses is in use.
         if matches!(put, Put::New | Put::Complete | Put::Duplicate) && self.is_announcing() {
-            let phase = self.grants.get(&b.object).map(|(_, _, p)| *p).or_else(|| self.repair_phases.get(&b.object).map(|(p, _)| *p));
+            let phase = self.grants.get(&b.object).map(|(_, _, p)| *p).or_else(|| self.repair_phases.get(&b.object).map(|(p, _, _)| *p));
             if let Some(p) = phase {
                 self.phase_heard[p as usize] = now;
             }
@@ -5120,9 +5190,20 @@ impl Node {
                         u.phase = phase;
                     }
                     Some(u) if u.object == n.object && u.to == n.node => {
-                        // A full pass is in progress; it will cover these.
+                        // A full pass is in progress; it will cover these. The asker NACKs the
+                        // first block it lacks symbols of and holds every block before it, so a
+                        // pass still behind that block moves on to it (PROTOCOL.md §3.5).
+                        if u.skip_to(n.block) {
+                            self.stats.passes_skipped += 1;
+                        }
                     }
-                    _ if c.upload_queue.iter().any(|u| u.object == n.object && u.to == n.node) => {}
+                    _ if c.upload_queue.iter().any(|u| u.object == n.object && u.to == n.node) => {
+                        for u in c.upload_queue.iter_mut().filter(|u| u.object == n.object && u.to == n.node) {
+                            if u.skip_to(n.block) {
+                                self.stats.passes_skipped += 1;
+                            }
+                        }
+                    }
                     _ => {
                         c.add_upload(Upload { object: n.object, to: n.node, start_at, started: false, block: n.block, esi: 0, list: Some(list), phase, manifest: false, order: 0 }, true, NodeId::NONE);
                         self.stats.repairs_queued += 1;

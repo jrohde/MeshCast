@@ -176,6 +176,10 @@ pub struct Params {
     /// announcer it left for it that did not list it (PROTOCOL.md §5.2). Off: as long each time;
     /// kept to measure against.
     pub leave_backoff: bool,
+    /// A node that holds an object's first blocks whole and lacks a later one NACKs it after
+    /// `T_want_min` without progress (PROTOCOL.md §3.5). Off: only nearly complete objects are
+    /// repaired by NACK; kept to measure against.
+    pub block_nack: bool,
     /// An announcer marks what it relays as asked for listeners (PROTOCOL.md §4). Off: only what it
     /// or its followers listen to; kept to measure against.
     pub mark_relayed: bool,
@@ -253,6 +257,7 @@ impl Default for Params {
             announce_recent: true,
             leave_lacking: true,
             leave_backoff: true,
+            block_nack: true,
             mark_relayed: true,
             proactive: false,
             relay_unfollowed: true,

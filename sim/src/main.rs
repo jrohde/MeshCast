@@ -263,7 +263,13 @@ struct Report {
     airtime_share: Vec<(usize, Vec<f64>)>,
     occupancy_p50_bulk: f64,
     occupancy_max_bulk: f64,
+    /// Over nodes, the busiest `OCC_WINDOW_MS` each heard on the bulk carrier, in per cent.
+    occupancy_peak_p50_bulk: f64,
+    occupancy_peak_max_bulk: f64,
+    connectivity: Connectivity,
     delivered_bytes_per_hour_per_announcer: f64,
+    /// NACKs sent, full passes moved on, repair phases shared, checks that found no phase left.
+    repairs: [u64; 4],
     failover: Option<FailoverReport>,
     core_stats: Vec<(usize, String)>,
     /// Mean bytes a follower holds complete at the end, in kB.
@@ -448,6 +454,8 @@ struct FailoverReport {
     new_announcer: Option<u32>,
     recovered_after_s: Option<f64>,
     max_simultaneous_announcers_after: usize,
+    /// The longest stretch after the kill with more than one announcer on the bulk carrier.
+    longest_several_announcers_s: f64,
     announcer_after_revive: Option<u32>,
 }
 
@@ -838,6 +846,23 @@ fn simulate(spec: ScenarioSpec, verbose: bool, failover: Option<(f64, f64)>) -> 
     occ.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let occ_p50 = percentile(&occ, 0.5).unwrap_or(0.0);
     let occ_max = occ.last().copied().unwrap_or(0.0);
+    let mut peaks: Vec<f64> = eng.nodes.iter().map(|n| n.occupancy_peak[bulk_c] as f64 / 10.0).collect();
+    peaks.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let peak_p50 = percentile(&peaks, 0.5).unwrap_or(0.0);
+    let peak_max = peaks.last().copied().unwrap_or(0.0);
+    // What the bulk carrier allows at all: who hears whom, and whether a follower is in the same
+    // part of the network as the source of what it follows.
+    let parts = eng.components(bulk_c);
+    let n_nodes = eng.nodes.len();
+    let heard: usize = (0..n_nodes).map(|a| (0..n_nodes).filter(|&b| b != a && eng.hear_each_other(a, b, bulk_c)).count()).sum();
+    let (mut joined, mut pairs) = (0usize, 0usize);
+    for tr in built.tracks.values() {
+        for &f in &tr.followers {
+            pairs += 1;
+            joined += (parts[f] == parts[tr.source]) as usize;
+        }
+    }
+    let connectivity = Connectivity { parts: parts.iter().enumerate().filter(|(i, p)| *i == **p).count(), neighbours_mean: heard as f64 / n_nodes.max(1) as f64, followers_with_source: joined as f64 / pairs.max(1) as f64 };
 
     // Delivered bytes per announcer-hour: unique (node, object) completions × bytes / announcer hours.
     let delivered_bytes: f64 = m.completions.keys().filter_map(|(_, id)| built.tracks.get(id).map(|t| t.bytes as f64)).sum();
@@ -857,19 +882,41 @@ fn simulate(spec: ScenarioSpec, verbose: bool, failover: Option<(f64, f64)>) -> 
         let revive_ms = (revive_h * 3.6e6) as Millis;
         let victim_id = eng.nodes[victim].node.id().0;
         let first_new = m.role_events.iter().find(|e| e.t_ms >= kill_ms && e.role == "Announcer" && e.node != victim_id);
-        // Count simultaneous announcers after the kill by replaying role events.
+        // Count simultaneous announcers after the kill by replaying role events, and how long more
+        // than one lasted at a stretch. The victim stops announcing at the kill, which is counted
+        // then, and counts again from its own first role event after the revive: a dead node and a
+        // reboot emit none.
+        fn tally(current: &BTreeMap<u32, bool>, t: Millis, max_sim: &mut usize, since: &mut Option<Millis>, longest: &mut Millis) {
+            let n = current.values().filter(|&&a| a).count();
+            *max_sim = (*max_sim).max(n);
+            if n > 1 {
+                since.get_or_insert(t);
+            } else if let Some(s) = since.take() {
+                *longest = (*longest).max(t - s);
+            }
+        }
         let mut current: BTreeMap<u32, bool> = BTreeMap::new();
         let mut max_sim = 0usize;
-        for e in &m.role_events {
-            if e.carrier != bulk_c {
-                continue;
+        let mut killed = false;
+        let mut several_since: Option<Millis> = None;
+        let mut several_longest: Millis = 0;
+        for e in m.role_events.iter().filter(|e| e.carrier == bulk_c) {
+            if !killed && e.t_ms >= kill_ms {
+                current.insert(victim_id, false);
+                killed = true;
+                tally(&current, kill_ms, &mut max_sim, &mut several_since, &mut several_longest);
             }
             current.insert(e.node, e.role == "Announcer");
-            if e.t_ms >= kill_ms {
-                current.insert(victim_id, e.node == victim_id && e.role == "Announcer" && e.t_ms >= revive_ms);
-                let n = current.values().filter(|&&a| a).count();
-                max_sim = max_sim.max(n);
+            if killed {
+                tally(&current, e.t_ms, &mut max_sim, &mut several_since, &mut several_longest);
             }
+        }
+        if !killed {
+            current.insert(victim_id, false);
+            tally(&current, kill_ms, &mut max_sim, &mut several_since, &mut several_longest);
+        }
+        if let Some(s) = several_since {
+            several_longest = several_longest.max(until.saturating_sub(s));
         }
         let after_revive = m.role_events.iter().filter(|e| e.t_ms >= revive_ms && e.role == "Announcer").last().map(|e| e.node);
         FailoverReport {
@@ -878,6 +925,7 @@ fn simulate(spec: ScenarioSpec, verbose: bool, failover: Option<(f64, f64)>) -> 
             new_announcer: first_new.map(|e| e.node),
             recovered_after_s: first_new.map(|e| (e.t_ms - kill_ms) as f64 / 1000.0),
             max_simultaneous_announcers_after: max_sim,
+            longest_several_announcers_s: several_longest as f64 / 1000.0,
             announcer_after_revive: after_revive,
         }
     });
@@ -958,7 +1006,11 @@ fn simulate(spec: ScenarioSpec, verbose: bool, failover: Option<(f64, f64)>) -> 
         by_kind: kinds,
         occupancy_p50_bulk: occ_p50,
         occupancy_max_bulk: occ_max,
+        occupancy_peak_p50_bulk: peak_p50,
+        occupancy_peak_max_bulk: peak_max,
+        connectivity,
         delivered_bytes_per_hour_per_announcer: dbph,
+        repairs: [sum_stats(&eng, |s| s.nacks_sent), sum_stats(&eng, |s| s.passes_skipped), sum_stats(&eng, |s| s.repair_phases_shared), sum_stats(&eng, |s| s.nacks_without_phase)],
         failover: fo,
         core_stats,
         held_kb_per_follower,
@@ -997,6 +1049,18 @@ struct SeedLine {
     held_kb_per_follower: f64,
     #[serde(default)]
     table_peaks: BTreeMap<String, usize>,
+    #[serde(default)]
+    frames_delivered: u64,
+    #[serde(default)]
+    frames_collided: u64,
+    #[serde(default)]
+    occupancy_peak_p50_bulk: f64,
+    #[serde(default)]
+    occupancy_peak_max_bulk: f64,
+    #[serde(default)]
+    connectivity: Connectivity,
+    #[serde(default)]
+    repairs: [u64; 4],
 }
 
 /// Several seeds of one scenario: the spread is the result, not any single run.
@@ -1044,6 +1108,9 @@ fn params() -> Params {
     if let Ok(v) = std::env::var("MESHCAST_LEAVE_BACKOFF") {
         p.leave_backoff = v != "0";
     }
+    if let Ok(v) = std::env::var("MESHCAST_BLOCK_NACK") {
+        p.block_nack = v != "0";
+    }
     if let Ok(v) = std::env::var("MESHCAST_MARK_RELAYED") {
         p.mark_relayed = v != "0";
     }
@@ -1084,7 +1151,7 @@ impl Ensemble {
             spec: reports[0].spec.clone(),
             seeds: reports
                 .iter()
-                .map(|r| SeedLine { seed: r.spec.seed, delivered: delivered(r), bulk_sent: r.bulk_sent, by_kind: by_kind(&r.objects), renditions: r.renditions.clone(), attack_frames: r.attack_frames, carousel_first: r.carousel_first, carousel_repeat: r.carousel_repeat, role_events: r.role_events, challenges: r.challenges, excursions: r.excursions, frames_sent: r.frames_sent, whole: r.whole.clone(), held_kb_per_follower: r.held_kb_per_follower, table_peaks: r.table_peaks.clone() })
+                .map(|r| SeedLine { seed: r.spec.seed, delivered: delivered(r), bulk_sent: r.bulk_sent, by_kind: by_kind(&r.objects), renditions: r.renditions.clone(), attack_frames: r.attack_frames, carousel_first: r.carousel_first, carousel_repeat: r.carousel_repeat, role_events: r.role_events, challenges: r.challenges, excursions: r.excursions, frames_sent: r.frames_sent, whole: r.whole.clone(), held_kb_per_follower: r.held_kb_per_follower, table_peaks: r.table_peaks.clone(), frames_delivered: r.frames_delivered, frames_collided: r.frames_collided, occupancy_peak_p50_bulk: r.occupancy_peak_p50_bulk, occupancy_peak_max_bulk: r.occupancy_peak_max_bulk, connectivity: r.connectivity.clone(), repairs: r.repairs })
                 .collect(),
         }
     }
@@ -1166,7 +1233,10 @@ fn print_report(r: &Report, wall: std::time::Duration) {
     }
     println!("bulk sent by [others, announcers]: {:?}; bulk collisions [sender other/announcer][interferer other/announcer]: {:?}; upload-upload same object {} / other object {}; same-announcer causes [phase count out of date, ungranted answer, phases never heard, both current] {:?}", r.bulk_sent_by, r.bulk_collision_kinds, r.upload_same, r.upload_other, r.upload_cause);
     println!("bulk-channel occupancy at nodes: p50 {:.1} %, max {:.1} %", r.occupancy_p50_bulk, r.occupancy_max_bulk);
+    println!("bulk-channel occupancy, busiest 10 s at each node: p50 {:.1} %, max {:.1} %", r.occupancy_peak_p50_bulk, r.occupancy_peak_max_bulk);
+    println!("bulk carrier: {} parts, {:.1} nodes heard each way per node; followers in the same part as the source: {:.1} % of follower-track pairs", r.connectivity.parts, r.connectivity.neighbours_mean, 100.0 * r.connectivity.followers_with_source);
     println!("delivered to followers: {:.2} MB per hour per announcer", r.delivered_bytes_per_hour_per_announcer / 1e6);
+    println!("repairs: NACKs sent {}, full passes moved on {}, repair phases shared with a holder's {}, checks that found no phase left {}", r.repairs[0], r.repairs[1], r.repairs[2], r.repairs[3]);
     println!("\nairtime share per transmitting node, busiest first (control, bulk):");
     for (i, s) in r.airtime_share.iter().take(12) {
         println!("  node {:>4}: {}", i, s.iter().map(|x| format!("{:.2} %", x * 100.0)).collect::<Vec<_>>().join(", "));
@@ -1451,6 +1521,12 @@ fn run_dynamics(nodes: usize, area_km2: f64, stations: usize, channels: usize, q
                 let m = Manifest::sign_card(&src.key, src.seq, &format!("Channel {c}"), vec![series.reference(cover, true)], None, None, scenario::card_for(src.tag));
                 let node = src.node;
                 built.engine.nodes[node].node.publish(&m, std::slice::from_ref(&series), &[(o.meta(), None)]);
+                if scenario::ip_stations() {
+                    scenario::over_ip(&mut built.engine, &built.stations, node, &m, std::slice::from_ref(&series), &[(o.meta(), None)]);
+                    for &st in &built.stations {
+                        built.engine.poke(st);
+                    }
+                }
                 src.collections = vec![series];
                 built.engine.poke(node);
                 let followers: Vec<usize> = (0..nodes).filter(|&i| subs[i].contains(&c)).collect();
@@ -1888,4 +1964,17 @@ fn run_dynamics(nodes: usize, area_km2: f64, stations: usize, channels: usize, q
 /// Whether node `id` was ever announcer (from the recorded role events).
 fn m_role_ever_announced(m: &meshcast_sim::metrics::Metrics, id: u32) -> bool {
     m.role_events.iter().any(|e| e.node == id && e.role == "Announcer")
+}
+
+/// A core counter summed over every node.
+fn sum_stats(eng: &meshcast_sim::engine::Engine, f: impl Fn(&meshcast_core::node::Stats) -> u64) -> u64 {
+    eng.nodes.iter().map(|n| f(&n.node.stats)).sum()
+}
+
+/// Who hears whom on the bulk carrier, from the radio model alone.
+#[derive(Serialize, serde::Deserialize, Clone, Default)]
+struct Connectivity {
+    parts: usize,
+    neighbours_mean: f64,
+    followers_with_source: f64,
 }

@@ -58,6 +58,8 @@ pub struct SimNode {
     own_tx: Vec<VecDeque<(Millis, Millis)>>,
     /// Others' energy above CCA threshold per carrier (start, end), recent only.
     busy: Vec<VecDeque<(Millis, Millis)>>,
+    /// Per carrier, the busiest `OCC_WINDOW_MS` heard: the occupancy at its peak, in permille.
+    pub occupancy_peak: Vec<u16>,
     pub airtime_ms: Vec<u64>,
     pub clock: Clock,
 }
@@ -206,6 +208,7 @@ impl Engine {
                 next_wake: Millis::MAX,
                 own_tx: vec![VecDeque::new(); phys.len()],
                 busy: vec![VecDeque::new(); phys.len()],
+                occupancy_peak: vec![0; phys.len()],
                 airtime_ms: vec![0; phys.len()],
                 clock,
             });
@@ -531,6 +534,11 @@ impl Engine {
         let from = now.saturating_sub(OCC_WINDOW_MS);
         let q = &mut self.nodes[i].busy[c];
         Self::prune(q, from);
+        Self::busy_permille(q, from, now)
+    }
+
+    /// Share of `from..to` covered by the intervals in `q` (sorted by start), in permille.
+    fn busy_permille(q: &VecDeque<(Millis, Millis)>, from: Millis, now: Millis) -> u16 {
         let mut total = 0u64;
         let mut cur_s = 0u64;
         let mut cur_e = 0u64;
@@ -816,7 +824,13 @@ impl Engine {
                 continue;
             }
             if rx >= phy.cca_threshold_dbm {
-                self.nodes[j].busy[carrier].push_back((now, end));
+                // The window that ends with this frame, as far as is known now: a lower bound on
+                // the busiest window by at most the frames that start before it ends.
+                let n = &mut self.nodes[j];
+                Self::prune(&mut n.busy[carrier], now.saturating_sub(OCC_WINDOW_MS));
+                n.busy[carrier].push_back((now, end));
+                let occ = Self::busy_permille(&n.busy[carrier], end.saturating_sub(OCC_WINDOW_MS), end);
+                n.occupancy_peak[carrier] = n.occupancy_peak[carrier].max(occ);
                 if self.trace_busy == Some(j) {
                     self.busy_from.push_back((now, end, from));
                 }
@@ -922,7 +936,7 @@ impl Engine {
             }
             // The symbol trace says what became of each frame that reached the node.
             let rx_trace = match (&decoded, self.trace_rx == Some(j)) {
-                (Some(Frame::Bulk(b)), true) => Some(format!("RX {} {} from {} {:?} esi={} before={:?}", now, j, tx.from, b.object, b.esi, self.nodes[j].node.object_progress(&b.object))),
+                (Some(Frame::Bulk(b)), true) => Some(format!("RX {} {} from {} {:?} block={} esi={} before={:?}", now, j, tx.from, b.object, b.block, b.esi, self.nodes[j].node.object_progress(&b.object))),
                 _ => None,
             };
             // One radio: a receiver hears a carrier only while it listens there, the whole frame.

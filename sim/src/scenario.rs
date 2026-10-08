@@ -6,7 +6,7 @@ use meshcast_core::ed25519_dalek::SigningKey;
 use meshcast_core::ids::{NodeId, ObjectId, ShortId};
 use meshcast_core::manifest::{Card, Collection, CollectionKind, CollectionRef, Manifest, ManifestObject, ObjectRef, ScheduleEntry};
 use meshcast_core::rendition::{Rendition, RenditionTable};
-use meshcast_core::node::NodeConfig;
+use meshcast_core::node::{Action, NodeConfig};
 use meshcast_core::object::{ContentType, ObjectMeta};
 use meshcast_core::params::Params;
 use meshcast_core::rng::Rng;
@@ -176,6 +176,38 @@ pub struct Built {
     pub tracks: BTreeMap<ShortId, TrackInfo>,
     pub phys: Vec<Phy>,
     pub sources: Vec<SourceInfo>,
+    pub stations: Vec<usize>,
+}
+
+/// MESHCAST_IP_STATIONS: the stations have internet (ROADMAP.md, Phase 0 definition of done 2).
+/// Unset or 0: they do not.
+pub fn ip_stations() -> bool {
+    std::env::var("MESHCAST_IP_STATIONS").map_or(false, |v| v != "0")
+}
+
+/// What `source` publishes reaches every other station that is on over its internet link at once:
+/// root, collection manifests and objects, each checked and kept as if it had completed on the
+/// radio, and recorded so. A station that is off then gets it later by radio, like a newcomer.
+pub fn over_ip(engine: &mut Engine, stations: &[usize], source: usize, root: &Manifest, collections: &[Collection], objects: &[(ObjectMeta, Option<&[u8]>)]) {
+    let (root_meta, root_bytes) = root.as_object();
+    let colls: Vec<(ObjectMeta, Vec<u8>)> = collections.iter().map(|c| c.as_object()).collect();
+    let now = engine.now;
+    let on: Vec<usize> = stations.iter().copied().filter(|&st| st != source && engine.nodes[st].alive).collect();
+    for st in on {
+        let node = &mut engine.nodes[st].node;
+        let mut done = node.receive_whole(root_meta, Some(&root_bytes));
+        for (cm, cb) in &colls {
+            done.extend(node.receive_whole(*cm, Some(cb)));
+        }
+        for (om, ob) in objects {
+            done.extend(node.receive_whole(*om, *ob));
+        }
+        for a in done {
+            if let Action::ObjectComplete { id, .. } = a {
+                engine.metrics.completions.entry((st, id)).or_insert(now);
+            }
+        }
+    }
 }
 
 /// The card a simulated channel describes itself with (PROTOCOL.md §2), as MESHCAST_CARDS asks:
@@ -400,6 +432,9 @@ pub fn build(spec: &ScenarioSpec, params: Params) -> Built {
             metas.push((v.0, Some(&v.1[..])));
         }
         engine.nodes[s].node.publish(&m, &collections, &metas);
+        if ip_stations() {
+            over_ip(&mut engine, &stations, s, &m, &collections, &metas);
+        }
         // Followers of the channel, and of each collection: the whole channel, or a few of its
         // collections chosen at random.
         let mut followers = Vec::new();
@@ -459,5 +494,5 @@ pub fn build(spec: &ScenarioSpec, params: Params) -> Built {
         engine.attack_ids = ids;
         engine.start_attacks();
     }
-    Built { small, engine, tracks, phys, sources: source_infos }
+    Built { small, engine, tracks, phys, sources: source_infos, stations }
 }
