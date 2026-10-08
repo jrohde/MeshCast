@@ -163,8 +163,9 @@ listeners (the system naturally favours popular content, like Usenet did).
 The simulator in `sim/` runs the real `meshcast-core` protocol on modelled radios (log-distance
 path loss, exponent 3, 6 dB shadowing, capture, half-duplex, CCA, per-band accounting). Tracks are
 540 kB (3 minutes of Opus at 24 kbit/s). §8 later replaced Opus by SNAC, which makes a track
-42 kB, so these runs load the network about 13 times harder than the chosen codec will; they
-have not been re-run at the new size yet. Every number below is reproducible with the command
+42 kB, so these runs load the network about 13 times harder than the chosen codec will. §9 ran
+the scenarios again at 42 kB as ensembles, and §36 runs these commands again; the numbers below
+stand as first measured. Every number below is reproducible with the command
 shown; seeds are fixed. These are simulation results, not measurements: Phase 1 checks them
 against real radios.
 
@@ -334,7 +335,8 @@ in the time allowed (tens of announcers each at a 50 % airtime share generate fa
 than a duty-cycled carrier), and the model says the outcome anyway: ESP-NOW cannot bridge the
 gaps between islands. It is a neighbourhood carrier, not a town carrier; the sub-GHz carrier
 carries content across the gaps and ESP-NOW distributes it within a street. The dense-town run
-below shows it in its element.
+below shows it in its element. (§36.3 ran it to the end at 42 kB: in the simulator's radio model
+the town is one large part and at most three small ones, and ESP-NOW delivered 99.2 %.)
 
 ### 7.6 A living network: many channels, changing subscriptions, daily bulletins
 
@@ -605,7 +607,7 @@ PROTOCOL.md §1.1 pins both models to exact weights and defines the payload layo
   the decoding cost. Vocos shows the size (8 M parameters, 0.6 G multiply-adds per second) is
   possible; whether the quality is, nobody has measured.
 - Opus as a fallback for players without a neural decoder: resolved in §9.5, local only.
-- The simulations of §7 used 540 kB tracks and should be re-run at 42 kB.
+- The simulations of §7 used 540 kB tracks: re-run at 42 kB in §9 and §36.
 
 ## 9. After the codec change: ensembles, mixed traffic and four faults
 
@@ -4140,3 +4142,224 @@ hundred kilobytes a node and the frames above. PROTOCOL.md §9 question 14 alrea
 heads (channel, seq, card) for what exists, kept apart from roots, which carry what to fetch; a
 head heard from far away would tell a guide of a channel without starting anyone's asks for its
 bulletins. That, and whether news ahead of the goods is what broke the band L strip, are open.
+
+## 36. Phase 0 again, at the codec's size
+
+§7 answered ROADMAP.md's Phase 0 definitions of done with tracks of 540 kB (three minutes of Opus)
+and the protocol as it stood then; §8 later chose SNAC, which makes a track 42 kB. This section
+runs the same commands again at 42 kB and, to compare with §7, at 540 kB, with the protocol as it
+now is: §35's, with the three repair rules of 36.4. Single runs use seed 1; ensembles eight seeds
+(four at 1000 nodes), given as the mean over the seeds unless the worst world is named.
+
+### 36.1 Two nodes
+
+`meshcast-sim two-nodes --distance-m D --tracks 3 --bulk B --track-kb S --hours 12`; minutes until
+each of the three tracks is complete at the follower.
+
+| Carrier | Distance | 42 kB | 540 kB | §7.2, 540 kB |
+|---|---|---|---|---|
+| GFSK band O, 500 mW, 10 % | 1 km and 2 km | 5 / 6 / 7 | 14 / 25 / 35 | 15 / 25 / 36 |
+| GFSK band O | 5 km | never (out of range) | never | never |
+| LoRa SF7 as bulk | 5 km | 20 / 34 / 48 | 541 / 272 / 489 (36.4) | 180 / 354 / 528 |
+| GFSK band L, 25 mW, polite | 800 m | 8 / 8 / 10 | 20 / 22 / 25 | 16 / 21 / 27 |
+| ESP-NOW LR | 300 m | 5 / 5 / 5 | 6 / 7 / 8 | 6 / 7 / 8 |
+
+### 36.2 One cell, by density
+
+`meshcast-sim cell --nodes N --area-km2 1 --stations 1 --sources 1 --tracks 3 --track-kb S
+--hours 8 --seeds 8` (`--seeds 4` at 1000 nodes), on the default bulk carrier, GFSK band O at
+500 mW and 10 %; the volume delivered from the same command with seed 1.
+
+| Nodes per km² | 10 | 100 | 1000 |
+|---|---|---|---|
+| 42 kB: the median follower has all three tracks, minutes | 5.7 | 5.7 | 6.1 |
+| ... delivered to followers, MB per hour per announcer (seed 1) | 0.15 | 1.6 | 16.1 |
+| ... receptions lost to collisions (worst world) | 0 | 0 | 1.1 % (2.2 %) |
+| ... the busiest 10 s on the bulk carrier at the typical node (at the busiest, worst world) | 33 % (38 %) | 34 % (38 %) | 40 % (59 %) |
+| 540 kB: the median follower has all three tracks, minutes | 34.1 | 34.1 | 36.0 |
+| ... delivered, MB per hour per announcer (seed 1) | 1.9 | 20.5 | 207 |
+| ... receptions lost to collisions (worst world) | 0 | 0.001 % (0.008 %) | 1.0 % (2.2 %) |
+| ... the busiest 10 s on the bulk carrier at the typical node (at the busiest, worst world) | 36 % (37 %) | 36 % (37 %) | 47 % (66 %) |
+
+Receivers still cost little. The median follower of a thousand has everything a few per cent
+later than one of ten, and the volume delivered grows a hundredfold. The announcer sent the same
+at ten and a hundred nodes in seven worlds of eight; in the eighth at a hundred, and in two of
+four at a thousand, it passed one track more, which followers had asked for by WANT (seed 1 at a
+thousand: 651 bulk frames against 435 at 42 kB, 8,340 against 5,533 at 540 kB). The slowest
+followers take longer: in seed 1 at 540 kB the last follower had the three
+tracks after 44, 55 and 65 minutes, against 14, 24 and 34 at ten nodes, the tail §7.3 reported
+as well (25 / 46 / 76 minutes). §7.3 counted collisions at every density (18, 1,141 and
+147,431); now none collide at ten nodes and next to none at a hundred. At a thousand about one
+reception in a hundred is lost, nearly all of them the followers' own small frames: in seed 1 at
+540 kB, 653 of the 999 followers sent 11,260 NACKs between them, and 87 % of the receptions lost
+were NACKs, 12 % gossip and 0.2 % bulk.
+
+The occupancy is the busiest 10 s each node heard on the bulk carrier, measured at every frame it
+heard. §7 read occupancy from samples every ten minutes, which miss a transfer that ends within
+ten minutes: at 42 kB they read 0 %. Measured so, a lone cell is busy a third of the time in its
+busiest 10 s at ten and a hundred nodes, and up to two thirds at a thousand. That is above the
+30 % that ETHERFATSOEN.md §4 sets against foreign energy; occupancy as a whole is held to 50 %
+there, and at a thousand nodes the busiest 10 s passed that in the worst worlds (one of four at
+42 kB, two of four at 540 kB). Delivery time did not double at any density: from ten nodes to a
+thousand it grew 6 % (42 kB) while the busiest 10 s at the typical node went from 33 % to 40 %.
+
+### 36.3 A town, with and without internet at the stations
+
+`meshcast-sim cell --nodes 200 --area-km2 30 --stations 3 --sources 5 --tracks 10 --hours 24
+--bulk B --track-kb S --seeds 8`. "With internet" gives every station what every source
+publishes as it is published, as if it had fetched it over IP (sim/README.md,
+`MESHCAST_IP_STATIONS`); the radio does the rest. Every node follows every channel but its own,
+the stations too, so each track has 199 followers, and with internet three of them hold
+everything from the start. A source's ten tracks are an album; the album columns give when half
+and when 90 % of the follower-album pairs held all ten.
+
+| Bulk carrier | Track | Delivered (worst world) | Median minutes per track | Album at half / 90 %, hours | Slowest track at 90 %, minutes | With internet: median minutes | ... album, hours | ... slowest track, minutes |
+|---|---|---|---|---|---|---|---|---|
+| GFSK band O | 42 kB | 100 % (100) | 27 | 0.9 / 1.2 | 74 | 28 | 0.9 / 1.2 | 75 |
+| GFSK band L | 42 kB | 100 % (100) | 37 | 0.9 / 1.1 | 63 | 33 | 0.8 / 1.0 | 60 |
+| ESP-NOW LR | 42 kB | 99.2 % (98) | 50 | 1.1 / 1.6 | 101 | 30 | 0.7 / 1.2 | 74 |
+| GFSK band O | 540 kB | 100 % (100) | 468 | 12.6 / 15.5 | 957 | 420 | 11.7 / 13.3 | 822 |
+| GFSK band L | 540 kB | 100 % (100) | 350 | 10.1 / 12.1 | 712 | 310 | 9.2 / 11.6 | 657 |
+
+Delivery with internet is the same, to the precision shown. At the codec's size the median
+follower in the town holds a source's ten tracks after about an hour on every carrier, and nine
+in ten after 1.1 to 1.6 hours (1.0 to 1.2 with internet at the stations). At 540 kB §7.5 first
+had band O at 100 % with a mean per-track median of 7.3 hours and band L at 66 % and 14.4 hours,
+and §7.7's measurement pass then left band O at 9.9 hours and band L at 91.9 %. Band O now takes
+a median of 7.8 hours a track, and band L delivers everything, with a median of 5.8 hours a
+track. Internet at the stations takes a tenth to two fifths off the median track, and less off
+the album, wherever the radio is slower (ESP-NOW, band L, and 540 kB tracks), and nothing
+measurable in band O at 42 kB: three stations hold everything, and the other nodes still get it
+over the radio.
+
+ESP-NOW was "not connected at this density" in §7.5: the 24-hour run did not finish, and §7.5.1
+reasoned from a node hearing about four others that the town falls apart into islands. In the
+simulator's radio model a node hears 5.5 to 6.4 others both ways, the carrier joins the
+town into one to four parts, and 98.0 to 100 % of the follower-track pairs lie in the part of
+their source (`cell` reports it now). ESP-NOW delivered exactly that share in seven worlds
+of eight and 0.1 points less in the eighth: within the model what the radio joins, the protocol
+delivers. Whether 2.4 GHz links in a real town join as well is Phase 1's to measure. ESP-NOW at
+540 kB ran only with the protocol before 36.4, for more than eight hours without finishing, and was
+stopped.
+
+The town is busier than one cell. In the busiest 10 s the typical node heard the bulk carrier
+busy 98 % of the time in band O, 41 % in band L and 97 % over ESP-NOW, and of all receptions,
+wanted or not, collisions took 31 % in band O (47 % at 540 kB), 8 % in band L and 14 % over
+ESP-NOW (the mean over the worlds). In band O, with six announcers on its one channel, 84 % of
+what was lost in seed 1 were carousel and upload frames, half of them an announcer's lost to
+another announcer's at a node that heard both; in band L and over ESP-NOW four in five were
+beacons and announcements. Delivery did not suffer for it: bands O and L delivered everything,
+ESP-NOW what its parts allowed. How much of the loss falls on frames a node wanted, and so what
+it costs, the simulator does not yet count.
+
+### 36.4 A track that never arrived
+
+Over LoRa as bulk at 5 km, the first 540 kB track never reached the follower, in 12 hours or in
+24, where §7.2 had it in three. A track of 540 kB is three blocks. The follower held the first
+block whole and part of the second, then received the first block again and again: a pass or an
+upload asked for again starts at the first block, a whole block took a little over an hour (about
+65 minutes, a symbol every 3.8 s at 10 % duty cycle), and from the eighth hour the two nodes passed
+the announcer's role back and forth every 24 to 57 minutes (28 role events in 12 hours, 82 in
+24), each change starting the pass or the upload again. The follower asked by NACK only for what
+is nearly complete (80 %), and this was not.
+
+Now a node that holds an object's first blocks whole and lacks a later one NACKs the first block
+with gaps (PROTOCOL.md §3.5), after `T_want_min` without progress. All three tracks arrived (541,
+272 and 489 minutes), with 10 role events in the 12 hours instead of 28 (smoke test
+`a_track_of_several_blocks_crosses_a_slow_carrier`, which also checks that without the rule this
+world still loses a track). The first form waited only `T_nack_stall` (60 s), and on fast
+carriers its NACKs came while a pass would have brought the block anyway.
+
+Two more repair rules came from reading the code for what this one needs. A NACK names the first
+block its sender has gaps in, so it also says that every block before it is held: a holder whose
+full pass to the asker is still on an earlier block now moves it on to the named block, where
+before it let the pass run and ignored the NACK. And an announcer's NACK reserves a phase of its
+listening time for the answer; it now shares the phase of what the named holder already brings,
+as grants do (PROTOCOL.md §4), and a NACK with no phase left gives way to the next object's
+instead of holding up every NACK behind it. In the towns at 540 kB a full pass moved on 33 times
+a world in band L and 37 in band O (16 to 54 over the sixteen worlds), and a repair shared its
+holder's phase 83 and 146 times (61 to 251). Paired with no block NACK:
+
+| | First form (after 60 s) | Now (after `T_want_min`, with both rules) |
+|---|---|---|
+| Size sweep (§13.1), 423 and 846 kB, one clock: playback start | up to 2.3 minutes later | −0.1 to +0.4 minutes |
+| ... bulk frames | −1.1 to +7.7 % | −1.6 to +2.2 % |
+| Town, band L, 540 kB: median minutes per track; album at half, hours | 365 → 376; 10.3 → 10.7 | 365 → 350; 10.3 → 10.1 |
+| Town, band O, 540 kB: the same | 471 → 468; 12.9 → 12.9 | 471 → 468; 12.9 → 12.6 |
+| Towns at 42 kB: median minutes per track, band O / band L / ESP-NOW | the same frame for frame | 27.7 → 27.4 / 36.9 → 36.8 / 50.5 → 50.2 |
+
+The block NACK touches nothing of one block, which at the codec's size is every track and
+bulletin; the shared phases do, as the 42 kB towns show. In §30.1's world without quiet
+channels (sixteen worlds a band), the two rules left band L delivering 0.02 ± 0.01 points more
+and band O the same; frames changed by 0.0 ± 0.1 % and −0.7 ± 0.6 %.
+
+### 36.5 Failover
+
+`meshcast-sim failover --nodes N --kill-at-h 2 --revive-at-h 6 --hours 10 --seed S`, sixteen
+seeds: one cell of 1 km² with one station and one source of ten 540 kB tracks, the command's
+defaults. The station, the announcer, is switched off at 2 h and on again at 6 h. The report now
+also gives the longest stretch with more than one announcer after the loss, counted from the
+loss itself. Its count of announcers at once had dropped the revived station whenever anyone
+else's role changed, so it counted too few.
+
+| Nodes | 2 | 20 | 200 |
+|---|---|---|---|
+| A new announcer runs after, median (range) | 202 s (197–205) | 195 s (193–198) | 191 s (56–198) |
+| Worlds with more than one announcer for longer than a beacon interval | 0 of 16 | 2 of 16 | 8 of 16 |
+| ... of them with two or three already before the station was switched off | | 1 | 3 |
+
+The medians are over the worlds in which the station was the only announcer before the loss (16,
+15 and 12). §7.4 had 260 s at 20 nodes; §12.2 halved the step-up span on carriers that do not hop,
+which brought a band O failover to 199 s. Where a world kept more than one announcer it did so for
+about four hours in nine of the ten, until the station came back, and eight of those nine ended
+with one announcer. In seed 16 at 200 nodes a battery node had announced beside the station from
+the first minutes, and still did at the end. In seed 5 a battery node that had stepped up beside
+the station before the loss announced alone while it was off; once the station was back it
+followed it for two or three minutes every hour and stepped up again, an hour of two announcers
+at a time.
+
+In one world at 200 nodes (seed 1) two followers stepped up 3 ms apart with the same score, 331.
+Each reached the other at −97 dBm: the 31 beacons each sent in the first quarter hour all arrived
+above sensitivity, on the same channel, while the other listened. Between equal scores the higher
+id yields only to an announcer it judges to be in its own cell, heard at least as well as the
+median of its neighbours, so that two cells that overlap keep their followers (PROTOCOL.md §5.2).
+In a square kilometre of 200 nodes the higher id heard the other below that median, judged it to
+be in another cell, and kept announcing for four hours. Phase 0's fourth definition of done asks
+that two announcers never persist in one connected cell for more than a few beacon intervals.
+That is not met, and it is the next thing to fix: the rule protects followers a yielding
+announcer would orphan, and in a cell that hears itself whole there are none.
+
+### 36.6 Where the definitions of done stand
+
+ROADMAP.md lists six. With the protocol as it now is, for one bulk carrier per node:
+
+1. **Delivered volume by density**: answered for band O (36.2). Band L and ESP-NOW LR ran two
+   nodes (36.1) and a town (36.3), LoRa as bulk only two nodes; none of them the sweep over
+   density.
+2. **A track and an album to 90 % of followers across a town, with and without internet**:
+   answered (36.3). At 42 kB the album reached 90 % of its followers in 1.1 to 1.6 hours and the
+   slowest track in 63 to 101 minutes without internet, 1.0 to 1.2 hours and 60 to 75 minutes
+   with it at the stations.
+3. **Loss and occupancy against density**: in part. Collisions took none of the receptions in a
+   cell of ten nodes and next to none at a hundred, about 1 % at a thousand and 8 to 47 % in a
+   town (36.2, 36.3); hidden-node losses are not counted apart, nor losses of frames nobody
+   wanted. Delivery time did not double at any density measured, so where it would is not known.
+   The 30 % target does not hold as a ceiling on any 10 s, in a lone cell or a town; the gate acts
+   on the smoothed occupancy, which the simulator gives only as each node's value at the end of a
+   run.
+4. **Failover**: in part. A new announcer runs after 191 to 202 s (median), but two announcers
+   persisted for hours in one connected cell in 2 of 16 worlds at 20 nodes and 8 of 16 at 200
+   (36.5). Partition and merge have not been simulated as such.
+5. **The national scenario**: not yet extrapolated from per-cell results; §5 argues the scaling
+   before any simulation. What an extrapolation would rest on: what a cell sends grows far more
+   slowly than its listeners (36.2); §30 and §31 measured networks of 24 followed channels with
+   up to 1,000 more that nobody follows and that publish once a week (band L then delivered
+   97.8 %, against 99.9 % without them, §31.5), and of up to 96 channels that are all followed
+   (§30.5); and along a 500 m strip in band L a bulletin's holders spanned 3.7 km after an hour
+   and 18 km after 23 hours, while one stopped at 14.8 km (§32.2).
+6. **Parameters written back**: in part. ETHERFATSOEN.md §4 now lists the values the simulator
+   runs with, those that hold occupancy as a whole included. PROTOCOL.md §8 carries the values as
+   tuned through this section, which changed none, but its rows have not all been checked against
+   the code: one, `near_rssi`, gave a level the code never had, and now gives the rule it uses.
+
+Next: the announcer that does not yield (36.5), then what the town's collisions cost (36.3).

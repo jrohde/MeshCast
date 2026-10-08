@@ -5,9 +5,13 @@ feeling. Phases may overlap; the order of the definitions of done may not.
 
 ## Phase 0: simulator and calculation model
 
-**Status: running.** `core` v0 and `sim` exist and answer definitions of done 1–4 for a single
-bulk carrier per node; results in [FEASIBILITY.md](FEASIBILITY.md) §7, which also lists the five
-protocol defects the simulator found and the fixes now in PROTOCOL.md.
+**Status: running.** `core` and `sim` answered the definitions of done for a single bulk carrier
+per node first in [FEASIBILITY.md](FEASIBILITY.md) §7 (540 kB tracks, the protocol then; it also
+lists the five protocol defects the simulator found first) and again in §36, at the codec's 42 kB
+with the protocol as it now is. §36.6 says where each stands: 2 is answered; 1 for band O only;
+3 in part, without the occupancy at which delivery time doubles; 4 in part, since two announcers
+can persist in one connected cell; 5 is not yet extrapolated; 6 in part. Questions the simulator
+answers best go on alongside Phase 1.
 
 **Goal:** prove or disprove the design on a laptop before touching hardware, and produce the
 starting parameters for EtherFatsoen and the election.
