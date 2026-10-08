@@ -4363,3 +4363,131 @@ ROADMAP.md lists six. With the protocol as it now is, for one bulk carrier per n
    the code: one, `near_rssi`, gave a level the code never had, and now gives the rule it uses.
 
 Next: the announcer that does not yield (36.5), then what the town's collisions cost (36.3).
+
+## 37. One announcer where all hear it
+
+§36.5 found two announcers that persisted for hours in one cell of a square kilometre after the
+station was switched off. This section sorts the pairs of announcers by what they hear, finds
+that only one kind breaks the rule of one announcer per cell, and changes the order in which
+candidates step up and the tie-break between two that stepped up together (PROTOCOL.md §5.2).
+
+### 37.1 Which pairs persist
+
+`MESHCAST_TRACE_PAIRS=1` lists, every ten minutes, every pair of announcers on the bulk carrier:
+whether they hear each other, how each hears the other against its median neighbour (the
+same-cell judgement of the tie-break), whether one shuns the other, and the share of each one's
+followers that hear the other. Pair-hours by kind on main: sixteen failover worlds over the whole
+ten hours, eight worlds of the towns of §36.3 at 42 kB, and eight of §30.1's network without
+quiet channels:
+
+| | Hear each other, followers shared | Hear each other, followers apart | One shuns the other | Hidden from each other, followers shared | Hidden, apart |
+|---|---|---|---|---|---|
+| Failover, 200 nodes, 540 kB | 8.0 | 0 | 10.2 | 26.8 | 0 |
+| Failover, 200 nodes, 42 kB | 0 | 0 | 0 | 29.8 | 0 |
+| Failover, 20 nodes, 540 kB | 0 | 0 | 1.3 | 8.0 | 0 |
+| Town, band O | 0 | 378 | 8.2 | 1,134 | 1,805 |
+| Town, band L | 0 | 138 | 6.3 | 4,472 | 46,049 |
+| §30.1 without quiet channels, band O | 0 | 47 | 1.8 | 2,134 | 552 |
+| §30.1 without quiet channels, band L | 0 | 333 | 6.0 | 4,203 | 25,197 |
+
+"Shared" means at least nine in ten of each one's followers hear the other, for pairs that hear
+each other, and at least half of one's, for hidden pairs; an announcer without followers shares
+nothing. On main, pairs that hear each other and whose followers would nearly all hear the other
+appear only after a failover, never in a town or a living network. There the pairs that hear each
+other serve cells that overlap in part, which the same-cell rule exists for: in the band O town
+about half of each one's followers hear the other. In seed 1 at 200 nodes and 540 kB the two
+stepped up 3 ms apart with the same score (and in seed 15 likewise); at 42 kB two far apart
+stepped up out of each other's hearing. Shunning pairs come with the station on, before the loss
+or after it came back: a battery node had left the station and shunned it, as a follower does
+when its announcer does not serve what it waits for (§24, §25), and then ignored the station's
+beacons and announced beside it.
+
+### 37.2 What a node knows in a quiet cell
+
+At the failover, at 2 h, in seed 1 at 42 kB every follower had heard one neighbour, the station:
+followers are silent once they hold everything. At 540 kB the last follower had finished twelve
+minutes before, and its asks of the past hour were still in the neighbour table, so every
+follower had heard 196 to 199. A battery node's score counts at most 64 neighbours, so in neither
+case could the score tell a node in the middle from one at the edge (the two in seed 1 both
+scored 331), and among equal scores the order was the step-up jitter alone. The one thing every
+follower knows about where it stands is how loud it heard the announcer it lost.
+
+### 37.3 Two rules
+
+- **Who heard the lost announcer best steps up first.** Over the last third of its capability
+  band a candidate that lost its announcer waits less the louder it heard it, on average:
+  linearly from no wait at −20 dBm to seven eighths of that third at −140 dBm, with chance over
+  the last eighth. One that lost none, at a cold start or in a challenge, waits by chance as
+  before. The node nearest to where the old announcer stood is heard by most of its followers,
+  and those stand down for it.
+- **Two announcers that stepped up in the same election settle a near-tie by id, near or far.**
+  A beacon carries a flag while its sender has been announcer for less than `N_miss` beacon
+  intervals; between two equal, similar-scored announcers that both carry it, the higher id
+  yields whatever the same-cell judgement says. Their followers chose between them moments ago and
+  mostly hear both. A follower orphaned by the yield waits out `N_miss` beacons before it is a
+  candidate, by which time the other is no longer fresh, so there is no cascade.
+
+Sixteen failover worlds each: worlds where more than one announcer lasted longer than a beacon
+interval; pair-hours while the station was off (2 to 6 h) of pairs that hear each other / of
+hidden pairs that share followers; the median time to a new announcer over the worlds that
+recorded one (sixteen, fifteen at 200 nodes and 540 kB):
+
+| | Neither | First rule | Second rule | Both |
+|---|---|---|---|---|
+| 200 nodes, 540 kB | 8 of 16; 8.0 / 20.0; 192 s | 5; 0 / 14.8; 193 s | 7; 0 / 24.0; 192 s | 5; 0 / 14.8; 193 s |
+| 200 nodes, 42 kB | 6; 0 / 24.0; 197 s | 3; 0 / 8.0; 198 s | 6; 0 / 24.0; 197 s | 2; 0 / 8.0; 198 s |
+| 20 nodes, 540 kB | 2; 0 / 8.0; 196 s | 1; 0 / 4.0; 198 s | 2; 0 / 8.0; 196 s | 1; 0 / 4.0; 198 s |
+| 20 nodes, 42 kB | 0; 0 / 0; 197 s | 1; 4.0 / 0; 200 s | 0; 0 / 0; 197 s | 0; 0 / 0; 200 s |
+
+With both, no pair that hears each other without one shunning the other was seen at any
+ten-minute sample after a failover in the 64 worlds. Where more than one announcer lasted longer
+than a beacon interval, they were hidden from each other or one shunned the other; the shun, in
+one world at 200 nodes and 540 kB, was of the station after it came back. The first rule cuts the
+hidden pairs of the outage by a quarter to two thirds, though not in every world (in seed 13 at
+200 nodes and 540 kB it made a hidden pair main did not have). The second ends the step-up
+collisions the first leaves: in one world at 20 nodes two candidates stepped up 2 ms apart. What
+remains is two kinds the tie-break cannot reach: hidden announcers, which cannot hear each other
+and by PROTOCOL.md §3's definition are two cells that overlap, and the shun. The smoke test
+`a_failover_leaves_one_announcer_where_all_hear_it` runs seed 1 at 200 nodes and 42 kB with and
+without the rules.
+
+### 37.4 What else it changes
+
+Both rules against main, world for world (frames as the mean of the per-world changes):
+
+| | Main | Both rules |
+|---|---|---|
+| Matrix (§9), nine scenarios, eight worlds | | delivery the same, frames within 2 %; band O town 32.2 → 31.4 min for everything, −2.0 % frames (se 3.4), +40 role events of 628 (se 18) |
+| Churn (§13), 50 nodes, 32 worlds, band O / band L: role changes after the first hour | 227 / 210 | +7.7 (se 12.8) / +7.2 (se 5.5); delivery the same |
+| Living network, with an attacker or a spoofer | | identical |
+| ... with a lure, band L | | role changes after the first hour −5.6 per world (−42 to +4), uploads +2.0, delivery −0.2 to 0 points |
+| One or five lures (§12) | 99.7 % / 98.6 % | 99.8 % / 98.5 %, −1.6 % (se 1.0) / −1.4 % (se 1.1) frames |
+| Five lures that claim the highest score, sixteen worlds | 98.0 % | 98.2 %, +5.1 % frames (se 3.0); the first rule alone +1.8 % (se 1.4) |
+| Size sweep (§13.1) | | the same in the neighbourhoods; in the 15 km² worlds −4.8 to +4.4 % frames and start within 3 minutes either way |
+| §30.1 without quiet channels, sixteen worlds, band L / band O: delivered | 99.9 % / 99.7 % | −0.01 (se 0.03) / −0.01 (se 0.01) points; band L +20 (se 11) role changes after the first hour |
+| Valley strip (§32), 24 worlds, band L / band O | 81.7 % / 99.0 % | +0.5 (se 1.0) / −0.1 (se 0.2) points, worlds from −10.4 to +14.6 / one fell 3.7 points to 93.5 %; role changes after the first hour −112 (se 49) / +95 (se 50) |
+| 400 quiet channels (§30.1), band L, 24 worlds | 99.0 % | +0.2 (se 0.2) points, worst world 95.1 → 96.9 % |
+
+Mean delivery moved nowhere beyond its spread. Role changes moved by about two standard errors in
+four places, both ways: +20 after the first hour in §30.1's band L, −112 and +95 in the valley's
+band L and band O, +40 over the band O town's day; and under five lures that claim the highest
+score the frames rose 5.1 %, 1.7 standard errors, with delivery a little higher.
+
+### 37.5 Open
+
+- **Hidden announcers that share followers.** With both rules, after a failover at 200 nodes, two
+  worlds of sixteen at 42 kB and four at 540 kB still kept two announcers that cannot hear each
+  other, while nearly all their followers hear both. In one of them (seed 16) the station itself
+  had announced beside a battery node it could not hear since the first minutes, and did again
+  after it came back: standing where the station stood is no guarantee of reaching every node.
+  An announcer yields only to a beacon it hears itself (PROTOCOL.md §5.2, ABUSE.md), so the
+  followers in between are the only ones who know; they colour the two apart.
+- **Shunning an announcer one hears.** After a failover it happened only at 540 kB, but the
+  towns at 42 kB have it too (8.2 and 6.3 pair-hours a day on main, 7.7 and 5.2 with the rules).
+  A node that left its announcer for what it did not serve ignores its beacons for `want_ttl`,
+  and as an announcer does not yield to it, even to a station.
+- **Pairs that hear each other with most followers shared.** In the towns some pairs that hear
+  each other share three quarters of their followers and persist all day: 23.5 pair-hours in band
+  L on main, 24.7 in band O with the rules, a different world each time. The same-cell rule's
+  median judges them apart; whether a yield would orphan followers is what an announcer cannot
+  know.
