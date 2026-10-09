@@ -5055,16 +5055,17 @@ publishes.
 By radio alone a publication spread about a kilometre an hour along a band L strip (§32.2): its
 holders spanned 3.7 km after an hour and 18 km after 23 hours, 0.8 km an hour. Assuming that pace
 holds over ten times the distance measured, the length of the country takes twelve to seventeen
-days. It was measured in band L only, with 22 kB bulletins, and content stops where no node
-between two cells hears both announcers, to relay, upload or visit (§32.2); band O, with nearly
-three times the reach (§3), was not measured this way. In the simulator a station with internet
-has what every source publishes as it is published (§36.3, `MESHCAST_IP_STATIONS`), which assumes
-every source reaches the internet; the radio then carries it only the last cells: in the town with
-internet at its three stations, nine in ten follower-album pairs were complete after 1.0 to 1.2
-hours on every carrier. Across a country, content from a source with internet goes as fast as
-internet reaches stations near its listeners; content from one without first goes by radio, at
-about a kilometre an hour, to a station that has it. That is delay-tolerant delivery, as designed;
-it is not national radio.
+days. It was measured in band L, with 22 kB bulletins, and content stops where no node between
+two cells hears both announcers, to relay, upload or visit (§32.2). In band O the front of a
+bulletin moved about 25 km an hour (§43): the length of the country in about half a day, if that
+pace holds and the country joins. In the simulator a station with internet has what every source
+publishes as it is published (§36.3, `MESHCAST_IP_STATIONS`), which assumes every source reaches
+the internet; the radio then carries it only the last cells: in the town with internet at its
+three stations, nine in ten follower-album pairs were complete after 1.0 to 1.2 hours on every
+carrier. Across a country, content from a source with internet goes as fast as internet reaches
+stations near its listeners; content from one without first goes by radio, at about 25 km an hour
+in band O and a kilometre in band L (§43), to a station that has it. That is delay-tolerant
+delivery, as designed; it is not national radio.
 
 ### 42.4 The menu
 
@@ -5072,11 +5073,10 @@ Every node keeps the menu that comes by: the roots and collection manifests of c
 not follow, collected without asking and within its carry budget, the first thing to give way when
 the budget is full (§27, PROTOCOL.md §2 and §4). That does not bring every root to every node: in a
 band O strip of 30 km by 500 m, with 100 channels nobody followed besides the 24 that were, nodes
-held the newest root of 62 % of all channels (§35). The largest network measured
-had 24 followed channels and up to 1,000 more that nobody followed, publishing weekly: band L
-delivered 97.8 % of the bulletins in their period, against 99.9 % without them (§31.5). Five
-thousand channels were not measured; how a menu of that size stays small is PROTOCOL.md §9,
-question 14, still open.
+held the newest root of 62 % of all channels (§35). The largest network measured had 24 followed
+channels and up to 1,000 more that nobody followed, publishing weekly: band L delivered 97.8 % of
+the bulletins in their period, against 99.9 % without them (§31.5). Five thousand channels were
+not measured; how a menu of that size stays small is PROTOCOL.md §9, question 14, still open.
 
 ### 42.5 Where the fifth definition of done stands
 
@@ -5084,6 +5084,40 @@ Extrapolated, not simulated. Receivers cost little at any density measured. A ce
 its listeners follow, a band O cell some fifty hours of music a day; one batch above that took
 longer in proportion to its size, and a lasting load above it was not simulated. Across the
 country content travels as fast as internet reaches stations near its listeners, and by radio
-alone, as measured in band L, about a kilometre an hour. What would change the picture most, and
-was not measured: how listeners' interests overlap within a cell, how fast band O carries content
-from cell to cell, and a menu of 5,000 channels.
+alone about 25 km an hour in band O and a kilometre in band L (§43). What would change the picture
+most, and was not measured: how listeners' interests overlap within a cell, whether band O's pace
+holds over a whole country, and a menu of 5,000 channels.
+
+## 43. How fast content crosses cells
+
+§42.3 took the speed at which content crosses cells by radio alone from band L (§32.2), and named
+band O's as not measured. Both were traced on the strip of §32, 500 m wide, at the town's density:
+`MESHCAST_TRACE_SPREAD=1 meshcast-sim dynamics --nodes N --area-km2 A --strip-m 500 --stations K
+--channels 24 --follows 2 --publish-h 24 --churn-h 6 --hours 48 --bulletin-kb 22 --bulk B`, with
+100 nodes on 15 km² and two stations (a strip of 30 km, as in §32) and with 333 nodes on 50 km²
+and seven stations (100 km), eight worlds each. For each bulletin, every hour, the front is the
+distance from its source to the farthest node that holds it.
+
+| Front of a bulletin, median over the bulletins | 1 h | 2 h | 3 h | 4 h | 23 h |
+|---|---|---|---|---|---|
+| Band O, 30 km strip | 15.5 km | 19.5 | 19.9 | 20.0 | (the strip's end) |
+| Band O, 100 km strip | 25.6 km | 50.9 | 64.5 | 68.5 | (the strip's end) |
+| Band L, 30 km strip | 1.5 km | 3.3 | 5.1 | 7.2 | (12.0 at 7 h) |
+| Band L, 100 km strip | 0.9 km | 2.3 | 3.4 | 4.0 | 11.5 |
+
+| Delivered to followers within their period | 30 km strip | 100 km strip |
+|---|---|---|
+| Band O | 98.0 to 99.7 %; the carrier joined every world whole | 95.3 to 99.8 %; joined every world whole |
+| Band L | 45.1 to 95.9 %, mean 80.5 %; one to three parts | 12.2 to 25.7 %, mean 19.7 %; two to six parts, 20 to 80 % of follower-bulletin pairs in their source's part |
+
+In band O a bulletin's front moved about 25 km in each of the first two hours, until it met the
+end of the strip; the longer strip delivered nearly as much within the period as the shorter
+one. Band O's cells reach nearly three times as far (§3), and its control carrier pushes a new
+root about ten kilometres (§35); which of the two carries the front this section does not
+separate. In band L the front moved half a kilometre to under two kilometres an hour, and the
+longer strip delivered a fifth: its carrier left it in pieces, and within its pieces delivered a
+quarter to two thirds of what they joined, about half on average over the worlds.
+
+So the speed §42.3 took for "radio alone" is band L's. In band O, assuming its pace holds over
+three times the distance measured and the country joins as the strip did, content crosses the
+length of the country (280 to 320 km, §42) in about half a day.
