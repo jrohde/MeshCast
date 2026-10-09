@@ -4912,6 +4912,9 @@ impl Node {
                     }
                     self.stats.relay_wants += 1;
                     self.add_want(w);
+                    if self.cfg.params.relay_ask_soon {
+                        self.ask_rest();
+                    }
                 }
                 // A set we cannot read names a collection manifest: we fetch that first, from our
                 // own announcer, which knows it if it is real (§2), and relay its pieces once we
