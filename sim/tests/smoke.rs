@@ -1584,3 +1584,25 @@ fn a_failover_leaves_one_announcer_where_all_hear_it() {
     assert!(longest(true, true) < 120_000, "two announcers should settle within two beacon intervals");
     assert!(longest(false, false) > 3_600_000, "without the two rules this world should keep two announcers for hours, or the test no longer tests them");
 }
+
+#[test]
+fn hidden_announcers_take_turns_under_a_duty_cycle() {
+    // Two stations 5 km apart in band O, out of each other's hearing, each with a source beside
+    // it, and followers between them that hear both. Without turns, under band O's duty cycle,
+    // the two carousels met at the followers; with turns, as everywhere else, they meet no more,
+    // and no follower loses a symbol it wants from its announcer (FEASIBILITY.md §38).
+    let run = |slots_under_cap: bool| {
+        let positions = vec![(0.0, 0.0), (100.0, 0.0), (5000.0, 0.0), (4900.0, 0.0), (2500.0, 0.0), (2450.0, 80.0), (2550.0, -80.0), (2500.0, 150.0)];
+        let mut s = spec(BulkPreset::GfskO, positions, vec![1, 3], vec![0, 2], 3.0);
+        s.tracks = 4;
+        s.track_kb = 42;
+        let mut b = build(&s, Params { slots_under_cap, ..Params::default() });
+        b.engine.run(3 * 3_600_000, 600_000);
+        let m = &b.engine.metrics;
+        (m.bulk_collision_kinds[1][1], m.wanted_bulk[1][1])
+    };
+    let (with, without) = (run(true), run(false));
+    assert!(without.0 > 0, "without turns the hidden carousels should meet at the followers, or the test no longer tests them");
+    assert_eq!(with.0, 0, "with turns one announcer's frames should never meet the other's");
+    assert_eq!(with.1, 0, "with turns no follower should lose a symbol it wants from its announcer");
+}

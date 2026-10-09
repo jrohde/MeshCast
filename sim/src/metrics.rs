@@ -53,6 +53,17 @@ pub struct Metrics {
     pub bulk_sent: u64,
     pub bulk_delivered: u64,
     pub occupancy_samples: Vec<(Millis, usize, usize, u16)>,
+    /// Bulk receptions of a symbol the receiver lacks, of an object it wants, by sender (0 another
+    /// node, 1 the receiver's own announcer) and outcome (delivered, collided, half-duplex, not
+    /// listening, retuned): the losses that cost something.
+    pub wanted_bulk: [[u64; 5]; 2],
+    /// What broke the wanted symbols from a receiver's own announcer: [another announcer the sender
+    /// could not hear, one it could, a node that is not announcing the sender could not hear, one
+    /// it could]; "hear" is above the clear-channel threshold.
+    pub wanted_own_broken_by: [u64; 4],
+    /// Of those broken by another announcer: how many by one of the same colour (time slot or
+    /// channel offset) as the sender.
+    pub wanted_own_same_colour: u64,
     /// Per receiver: bulk frames delivered and lost to collisions.
     pub per_node_bulk: Vec<(u64, u64)>,
     /// Collisions during meeting dwells versus outside them, by frame type index.

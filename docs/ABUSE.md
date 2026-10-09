@@ -38,7 +38,7 @@ of yours can spend. Anything above one is a lever.
 | **Grant hijack** | An offer, then silence | The announcer waits `T_grant` (10 min) before reassigning, once per object | Stalls delivery |
 | **Election capture** | Beacons claiming mains power and an uplink, or the maximum score, and a HAVE listing everything | Every announcer that hears you yields and its followers follow you; you serve nothing | Each follower is held until it has asked you for one symbol of what it waits for and got none for `T_want_min`, about 20 minutes after it began to wait (FEASIBILITY.md §24), or for 90 minutes; then it ignores you for an hour, and may follow another false announcer next. Asking for what you lack and never naming an uploader holds them no longer (PROTOCOL.md §5.2, FEASIBILITY.md §25). Listing what you lack, you are waited for as long as ever; listing nothing, you hold a follower longer only for what its earlier announcers could not get either, since it waits twice as long for that under each next one (PROTOCOL.md §5.2, FEASIBILITY.md §31) |
 | **Excursion lure** | In the rendezvous, a beacon and a HAVE listing objects you do not have | Followers whose own cell cannot get those objects visit you for `T_excursion` and get nothing | Delay of what was missing anyway, once per follower and hour |
-| **Conflict poisoning** | A report naming announcers with a high colour count | Everyone's slot cycle grows to that count and each announcer idles all but one slot of it | Was measured at 8/9 idle by accident alone |
+| **Conflict poisoning** | A report naming announcers with a high colour count | Everyone's slot cycle grows to that count and each announcer's carousel idles all but one slot of it; under a regulator's cap the cycle is held to the cap's share (ten slots under a 10 % duty cycle), so no announcer drops below its legal airtime | On a carrier without a cap all but one slot; was measured at 8/9 idle by accident alone (FEASIBILITY.md §7.7) |
 | **Store exhaustion** | A huge catalogue on a channel someone follows | Followers fetch and keep it | Bounded by what they follow |
 | **Changed collections** | A root of your own channel that flags every collection manifest as changed (PROTOCOL.md §2) | Every holder of the root lists them with it and uploads them after it, up to a HAVE frame of them per root | Bounded by your own channel: the channel flood |
 | **Relay ask** | As an announcer, asks marked as for listeners (PROTOCOL.md §3.3), for every piece of every channel, repeated for `T_relay_wait` | Every follower that hears you and can name the pieces, or fetch the collection manifest a set of them names from its own announcer, fetches what you asked for in its own cell, and keeps it while you ask and `want_ttl` longer | Bounded by each node's carry budget, once per object and node: a full budget takes on no more relays (PROTOCOL.md §4). Without a budget, by every channel a follower's announcer holds. A made-up piece is not relayed; a made-up collection manifest in a set costs a table entry, at most `max_relay_asks` of them, and an ask to the follower's own announcer, which does not know it and does not record it |
@@ -63,10 +63,12 @@ notices the limit exists.
 
 ## What is fixed
 
-- **Time slots only where the regulator does not already cap everyone.** On a duty-cycled or
-  polite band the cap is the bound, so a poisoned colour count cannot idle the band. This also
-  removed the accidental version of that attack, which was costing a town eight ninths of its
-  airtime.
+- **Under a regulator's cap a slot cycle is never longer than the cap's share.** Carousels take
+  turns on every carrier (FEASIBILITY.md §38), but on a duty-cycled or polite band a cycle has at
+  most as many slots as one announcer's share of the airtime goes into the whole (ten under a 10 %
+  duty cycle), so a poisoned colour count cannot hold an announcer below its legal airtime, and
+  uploads wait for no slot at all. Until §38 turns were left out under a cap altogether, which
+  also removed the accidental version of that attack: a town idling eight ninths of its airtime.
 - **Only an announcer's NACK is answered by arbitrary holders.** A follower's repair comes from
   its own announcer's carousel, which removes the easiest amplification path and, incidentally,
   960 000 repair answers from a 200-node town. A follower names one holder only when its own
@@ -272,10 +274,10 @@ object; whether an encrypted channel's objects need names only its listeners can
    passes of objects nobody else wants, for attackers that keep one name.
 2. **Evidence before belief, the rest.** Neighbour counts, reports and an announcer's HAVE now
    need evidence (above). Still open: a colour count is accepted only up to the number of
-   distinct announcers the node has heard itself; and capability and score in a beacon are still
-   believed until the announcer is caught serving nothing, so a false announcer captures each
-   follower for 50 to 90 minutes before it is ignored, and makes every announcer that hears it
-   yield.
+   distinct announcers the node has heard itself, where no regulator's cap bounds the cycle; and
+   capability and score in a beacon are still believed until the announcer is caught serving
+   nothing, so a false announcer captures each follower for 50 to 90 minutes before it is ignored,
+   and makes every announcer that hears it yield.
    An announcer that claims mains power should have to show it, for example by staying on the air
    through the hours a battery node could not.
 3. **Renditions at the speed of listening.** A device cannot play faster than real time, so a

@@ -111,7 +111,7 @@ Parameters, all but the CCA sample rate as the simulator runs them (`core/src/pa
 | `OCC_CONTENT_OWN` | 0.45 | repeated content only below this occupancy as a whole |
 | `RATE_MIN_OWN` | 0.25 | the rate floor when the whole, not the foreign part, is too high |
 | `MAX_OWN_SHARE` | 0.50 | own share of airtime on a carrier without a regulatory duty cycle |
-| `BURST` | 2 s, or one cycle while taking turns | token-bucket burst, in airtime: raised to one cycle of upload phases or of slots while the node uploads in phases or announces in a slot, so that what it saved while waiting can be spent in its turn |
+| `BURST` | 2 s, or one cycle while taking turns | token-bucket burst, in airtime: raised to one cycle of upload phases or of slots while the node uploads in phases or sends in a turn (PROTOCOL.md §5.3), so that what it saved while waiting can be spent in its turn |
 
 **Two ceilings, the lower wins.** A node paces its content to the smaller of (a) the regulatory
 budget of the band minus a reserve for control frames, and (b) a fair share of the channel's
@@ -180,9 +180,10 @@ minutes instead of 6.0 (FEASIBILITY.md §9.6).
 ### 8. Colour, do not contend
 
 Announcers whose carousels overlap at some follower are told so by that follower, and colour
-themselves so that they never share a channel, or, when channels run out, share it in turns.
-See PROTOCOL.md §5.3. Contention (mechanism 1) is the fallback for what colouring did not
-foresee; colouring is the plan.
+themselves so that they never share a channel, or, when channels run out, share it in turns, under
+a duty cycle as well: a cap bounds what each sends, not where two that cannot hear each other meet
+(FEASIBILITY.md §38). See PROTOCOL.md §5.3. Contention (mechanism 1) is the fallback for what
+colouring did not foresee; colouring is the plan.
 
 ### 9. Rarest-first
 
