@@ -4491,3 +4491,162 @@ score the frames rose 5.1 %, 1.7 standard errors, with delivery a little higher.
   L on main, 24.7 in band O with the rules, a different world each time. The same-cell rule's
   median judges them apart; whether a yield would orphan followers is what an announcer cannot
   know.
+
+## 38. What the town's collisions cost
+
+§36.3 counted collisions over all receptions, wanted or not: 31 % of them in the band O town. A
+frame a node did not want costs it nothing when it is lost. The simulator now counts the bulk
+receptions of a symbol the receiver lacks, of an object it wants (`cell` reports them as "wanted
+bulk"), by sender, its own announcer or another node, and for those from its own announcer, what
+broke them: another announcer or a node that is not announcing, heard by the sender (above the
+clear-channel threshold) or not.
+
+### 38.1 One symbol in six
+
+The towns of §36.3, `meshcast-sim cell --nodes 200 --area-km2 30 --stations 3 --sources 5
+--tracks 10 --hours 24 --bulk B --track-kb 42 --seeds 8`, with the protocol after §37; the losses
+over the eight worlds, and what broke them in seed 1:
+
+| | Band O | Band L | ESP-NOW |
+|---|---|---|---|
+| Wanted symbols from a node's own announcer lost to collisions | 17.3 % | 1.8 % | 3.5 % |
+| ... from other nodes (uploads, other cells' carousels) | 38.9 % | 5.3 % | 5.8 % |
+| Seed 1: own announcer's lost, broken by another announcer (of the sender's colour) | 30,949 (46) | 12,864 (12,864) | 9,226 (9,062) |
+| ... broken by a node not announcing | 18,102 | 14,083 | 32,003 |
+
+In band O one wanted symbol in six from a follower's own announcer was lost, every one of them to
+a transmitter that announcer could not hear: carrier sensing cannot help there. In seed 1 nearly
+two thirds were another announcer's carousel. In band L and over ESP-NOW the other announcers that
+broke them shared the sender's colour: conflicts colouring had not yet reached. In band O almost
+none did (46 of 30,949). Band O has one channel, so a colour there is a time slot, and since §7.7
+announcers took no turns where a regulator caps them. So in band O conflicting announcers coloured
+themselves and then transmitted anyway, over each other at the followers between them.
+
+### 38.2 Turns again
+
+Turns were tried again in the band O town, with the edges of §38.3: for all content, carousels and
+uploads to an announcer alike in its slot, and for the carousel alone, uploads keeping to their
+phases of the announcer's listening time (§4). "No turns" is the same build with the switches of
+sim/README.md, which behaves as the protocol after §37:
+
+| Band O town | Median minutes per track | Album at half / 90 %, hours | Playback start, median / 90 %, minutes | Frames | Wanted lost: own announcer / others |
+|---|---|---|---|---|---|
+| No turns | 28.3 | 0.91 / 1.19 | 32.6 / 51.5 | 323,190 | 17.3 / 38.9 % |
+| Turns for all content, `T_slot` 10 s | 33.6 | 0.97 / 1.32 | 31.5 / 52.4 | 167,995 | 3.0 / 5.5 % |
+| ... 5 s | 32.3 | 0.94 / 1.25 | 30.3 / 49.7 | 168,661 | 3.3 / 5.7 % |
+| ... 2 s | 40.0 | 1.16 / 1.50 | 43.8 / 64.1 | 173,194 | 2.7 / 5.2 % |
+| Turns for the carousel only, 10 s | 25.6 | 0.79 / 1.02 | 24.0 / 46.0 | 264,301 | 6.8 / 29.5 % |
+| ... 5 s | 25.1 | 0.79 / 1.08 | 25.0 / 46.7 | 274,098 | 7.5 / 30.3 % |
+
+And in the band O town of the matrix (§9), with eight tracks of 42 kB music and 22 kB speech:
+
+| Matrix, band O town | Median minutes per piece | Playback start, median / 90 % | Everything, median / 90 % | Frames | Wanted lost: own / others |
+|---|---|---|---|---|---|
+| No turns | 17.1 | 15.6 / 31.2 | 31.4 / 45.0 | 184,670 | 16.2 / 35.9 % |
+| Turns for all content, 10 s | 21.8 | 16.9 / 26.1 | 35.8 / 43.3 | 105,938 | 2.0 / 4.4 % |
+| ... 5 s | 22.9 | 19.0 / 29.2 | 37.8 / 45.7 | 111,246 | 2.8 / 6.2 % |
+| Turns for the carousel only, 10 s | 15.4 | 13.0 / 25.4 | 27.3 / 37.8 | 154,865 | 5.9 / 26.5 % |
+| ... 5 s | 15.0 | 12.8 / 25.9 | 26.8 / 38.7 | 154,853 | 6.5 / 27.0 % |
+
+Turns for all content lose the fewest wanted symbols, a fifth to an eighth of what is lost
+without turns, on half to three fifths of the frames, but deliver later: a track a seventh to two fifths later in the
+town, a piece a quarter to a third later in the matrix. An upload then waits for its announcer's
+slot as well as for its phase, so a cell takes in new content in one slot of k on top of the
+duty cycle. Turns for the carousel alone leave uploads to their phases and are faster than no
+turns on every measure in both: followers lose one symbol in fifteen of their announcer's
+carousel instead of one in six, a pass brings more, and fewer are needed (24,695 repeated passes
+a world before, 11,087 after). World for world the town gets a track 2.7 minutes sooner (se 0.8),
+half its albums 7.6 sooner (se 1.6) and nine in ten 10.2 sooner (se 2.2), on 18 % fewer frames.
+With §26's real clocks the gain holds: a track 2.1 minutes sooner (se 0.6), the albums 6.5 and
+7.5 sooner (se 1.5 and 2.2), on 12 % fewer frames, and followers lose 9.7 % of their announcer's
+symbols instead of 19.5 %. That is the rule under a cap now (PROTOCOL.md §5.3). `T_slot` stays
+10 s; 5 s is no better.
+
+Where nothing caps, uploads already waited for their announcer's slot. Turns for the carousel
+alone there are no gain:
+
+| ESP-NOW town | Median minutes per track | Album at half / 90 %, hours | Playback start, median / 90 %, minutes | Frames | Wanted lost: own / others |
+|---|---|---|---|---|---|
+| Turns for all content, before §38 | 49.8 | 1.05 / 1.58 | 52.2 / 85.2 | 1,938,447 | 3.5 / 5.8 % |
+| Turns for the carousel only | 50.4 | 1.04 / 1.63 | 54.3 / 91.0 | 1,981,033 | 3.6 / 9.0 % |
+| Turns for all content, with §38.3's edges | 49.4 | 1.04 / 1.61 | 51.2 / 87.0 | 1,945,621 | 3.8 / 5.5 % |
+
+With the carousel alone in turns, what nodes wanted from others, uploads among it, was lost half
+as often again (9.0 % against 5.8), and the start at 90 % came 5.9 minutes later (se 2.4). So
+where nothing caps an upload still takes its announcer's turn; with the edges of §38.3 the
+ESP-NOW town is as before, within the spread on every measure.
+
+The smoke test `hidden_announcers_take_turns_under_a_duty_cycle` puts two stations 5 km apart in
+band O, out of each other's hearing, with four followers between them that hear both. Without
+turns four of the stations' frames were broken by the other station's at all four followers,
+none of them a symbol a follower still lacked, and the followers lost 202 symbols they wanted
+from their announcer, all to nodes not announcing that it could not hear, 188 of them uploads to
+the other station. With turns no station's frame was broken by the other's, and the followers
+lost none.
+
+### 38.3 The edges of a turn
+
+Three rules came with the turns.
+
+- **Only what takes a turn spends a cycle's budget in it** (ETHERFATSOEN.md, `BURST`). An upload
+  under a cap takes no turn and keeps the ordinary burst; before §38 its burst was raised to a
+  slot cycle all the same, as if it waited for one. Against the first trial of the turns, which
+  kept that, this and the bound below together made a track 1.2 minutes later (se 0.7) and nine
+  in ten albums 2.5 minutes sooner (se 1.2), in the eight worlds of the band O town.
+- **A turn takes only a frame that fits in it, `T_guard` clear of its edges**, as a frame keeps
+  inside a hop dwell (PROTOCOL.md §6): the announcer whose turn comes next cannot hear it. A frame
+  too long for even an empty turn may start anywhere in it, `T_guard` from its edges, rather than
+  never. The guard changed no delivery time or wanted-symbol loss beyond the spread. Over 24
+  worlds of the band O town a track came 0.1 minutes later with it (se 0.2) and followers lost
+  0.25 points fewer of their announcer's symbols (se 0.4); with §26's real clocks, up to an hour
+  apart and ±20 ppm, over eight worlds, 0.0 minutes (se 0.5) and 0.6 points more (se 0.8). It
+  stays so that every edge in time is kept the same way: a dwell's, the control window's and a
+  turn's.
+- **Under a cap a cycle has at most as many slots as one announcer's share of the airtime goes
+  into the whole**: ten under band O's 10 % duty cycle. Announcers agree on the largest colour
+  count they hear reported (§7.7), so turns under a cap brought back ABUSE.md's conflict
+  poisoning, which leaving them out had removed: one false report of a high count would hold
+  every announcer to one slot in that many, below the airtime the regulator allows it. With the
+  bound no count can. At the end of seed 1's day in the band O town seven announcers, each in
+  conflict with the six others, kept seven slots, within it.
+
+### 38.4 Everything else
+
+Against the protocol after §37, world for world:
+
+| | Before | Turns for the carousel under a cap |
+|---|---|---|
+| Town, band O, 42 kB | 28.3 min; 0.91 / 1.19 h; 323,190 frames | 25.6 min; 0.79 / 1.02 h; −18 % frames |
+| Town, band O, 540 kB | 467 min; 12.9 / 15.5 h; start 471 / 691 min; own announcer's wanted symbols lost 35.5 % | 442 min; 12.6 / 14.5 h; start 477 / 636 min; 22.0 %; −16 % frames |
+| Town, band L | | identical |
+| Town, ESP-NOW | 49.8 min; 1.05 / 1.58 h | 49.4 min; 1.04 / 1.61 h; +0.4 % frames |
+| Matrix (§9), nine scenarios | | band O town as in §38.2; midO start at 90 % 10.9 → 9.1 min, everything 14.2 → 14.5, −8 % bulk frames; ESP-NOW everything 11.4 → 11.0; the other six identical |
+| Size sweep (§13.1), midO, 7 to 846 kB | | 9 to 23 % fewer bulk frames; start at 90 % sooner at every size but 423 kB, by up to 19 minutes (1.9 later at 423 kB); everything 1 to 5 minutes later from 42 to 211 kB, 1 to 6 sooner at 7, 14 and 423 kB; band L the same within 0.2 minutes |
+| §30.1 without quiet channels, 16 worlds | 99.7 % in band O | band O the same, −6.2 % frames (se 0.6); band L the same within 0.01 points |
+| Valley strip (§32), 24 worlds | 98.9 % in band O | band O −0.12 points (se 0.13); band L identical |
+| 400 quiet channels (§30.1), band L, 24 worlds | | +0.07 points (se 0.07) |
+| Churn (§13) and the living network, with an attacker, a lure or a spoofer, bands O and L | | every reported measure the same, but newcomers in band O caught up in 8.2 minutes instead of 8.6; with a lure in band O four worlds of eight differ slightly (−0.3 % frames) |
+| One or five lures (§12) | | identical |
+| Failover (§37), 16 worlds at 20 and 200 nodes, 42 kB | 0 and 2 of 16 kept more than one announcer past a beacon interval | identical |
+
+In the busiest 10 s the band O town is as busy as before (the typical node heard the carrier busy
+96 % of the time before, 99 % after); what changed is that more of what is sent arrives. Of all
+receptions, wanted or not, collisions took 17.9 % instead of 31.9 % (the mean over the worlds),
+and 38.4 % instead of 47.1 % at 540 kB.
+
+### 38.5 Open
+
+- **What uploads still break.** What a follower loses of its own announcer's carousel in band O is
+  now mostly uploads to another announcer that its own cannot hear (9,859 of 11,170 symbols in
+  seed 1), and what nodes want from others, uploads among it, is still lost at 29.5 % against 5.5
+  with turns for all content. Uploads keep out of the phases other announcers granted (§4), but
+  not out of other announcers' turns; held to their own announcer's turn under a cap, they slow
+  the town more than they save. An upload that kept out of the turns of the other announcers its
+  sender hears was tried and not merged: in the band O town a track came 2.1 minutes later (se
+  0.5) and followers lost 0.4 points more of their announcer's symbols (se 0.5), on 12 % fewer
+  frames; in the matrix's band O town 1.9 minutes later (se 0.4). In the simulator a link is as
+  loud both ways and every node sends at its carrier's power, so an uploader its announcer
+  cannot hear cannot hear that announcer either, nor know its turn: only the followers between
+  them hear both.
+- **Midsize content in midO.** In the size sweep's band O neighbourhood everything arrived 1 to 5
+  minutes later from 42 to 211 kB, though the start at 90 % came sooner.
