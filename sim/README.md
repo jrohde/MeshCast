@@ -31,13 +31,22 @@ or `0`: no internet.
 of by how loud they heard the announcer they lost, and `MESHCAST_FRESH_TIE=0` keeps two announcers
 that stepped up together from settling a near-tie by id when they judge each other far, as before
 `docs/FEASIBILITY.md` §37.
+`MESHCAST_SLOTS_UNDER_CAP=0` keeps announcers in conflict from taking turns under a duty cycle or
+polite access; `MESHCAST_UPLOAD_SLOTS=1` makes uploads there wait for their announcer's slot as
+well and spend a slot cycle's budget at once, and with the first switch only the latter;
+`MESHCAST_TURN_GUARD=0` lets a turn take any frame that starts in it. The three together behave
+as before `docs/FEASIBILITY.md` §38. `MESHCAST_T_SLOT_MS` sets `T_slot`.
 
 A `cell` report also gives the busiest 10 s of the bulk carrier at each node, measured at every
 frame a node hears (the occupancy line above it samples every ten minutes); how many parts the
 bulk carrier joins the nodes into, and how many others each node hears both ways; and the
 repairs: NACKs sent, full passes a NACK moved on, repair phases shared with a holder's, and
 checks that found a NACK due but no phase left. `failover` also gives the longest stretch with
-more than one announcer after the loss.
+more than one announcer after the loss. A `cell` report also counts the bulk receptions of a
+symbol the receiver lacks, of an object it wants ("wanted bulk"), by sender (its own announcer or
+another node) and outcome, and for those from its own announcer what broke them: another
+announcer or a node that is not announcing, heard by the sender or not (`docs/FEASIBILITY.md`
+§38).
 
 `MESHCAST_CARDS=small` gives every channel's root a card (`docs/PROTOCOL.md` §2) of 10 bytes: a
 medium, one genre and one language; `MESHCAST_CARDS=full` one of three genres, three languages, an

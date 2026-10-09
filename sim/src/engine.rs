@@ -968,6 +968,13 @@ impl Engine {
                     continue;
                 }
             }
+            // A symbol this receiver lacks, of an object it wants, and whether its own announcer sent it.
+            let wanted = match &decoded {
+                Some(Frame::Bulk(b)) if self.nodes[j].node.wants_object(&b.object) && self.nodes[j].node.lacks_symbol(&b.object, b.block, b.esi) => {
+                    Some((self.nodes[j].node.announcer_of(tx.carrier) == self.nodes[tx.from].node.id()) as usize)
+                }
+                _ => None,
+            };
             // The symbol trace says what became of each frame that reached the node.
             let rx_trace = match (&decoded, self.trace_rx == Some(j)) {
                 (Some(Frame::Bulk(b)), true) => Some(format!("RX {} {} from {} {:?} block={} esi={} before={:?}", now, j, tx.from, b.object, b.block, b.esi, self.nodes[j].node.object_progress(&b.object))),
@@ -976,6 +983,9 @@ impl Engine {
             // One radio: a receiver hears a carrier only while it listens there, the whole frame.
             if !self.nodes[j].node.listening(tx.carrier, self.nodes[j].clock.local(tx.start)) || !self.nodes[j].node.listening(tx.carrier, self.nodes[j].clock.local(tx.end.saturating_sub(1))) {
                 self.metrics.frames_not_listening += 1;
+                if let Some(w) = wanted {
+                    self.metrics.wanted_bulk[w][3] += 1;
+                }
                 if let Some(t) = &rx_trace {
                     eprintln!("{} lost=not-listening", t);
                 }
@@ -984,6 +994,9 @@ impl Engine {
             // A receiver on a hopping carrier retunes at the end of its dwell, frame or no frame.
             if self.nodes[j].node.channel(tx.carrier, self.nodes[j].clock.local(tx.end.saturating_sub(1))) != tx.channel {
                 self.metrics.frames_retuned += 1;
+                if let Some(w) = wanted {
+                    self.metrics.wanted_bulk[w][4] += 1;
+                }
                 if let Some(t) = &rx_trace {
                     eprintln!("{} lost=retuned", t);
                 }
@@ -993,6 +1006,9 @@ impl Engine {
             let hd = self.nodes[j].own_tx[tx.carrier].iter().any(|&(s, e)| s < tx.end && e > tx.start);
             if hd {
                 self.metrics.frames_half_duplex += 1;
+                if let Some(w) = wanted {
+                    self.metrics.wanted_bulk[w][2] += 1;
+                }
                 if tx.upload_to == Some(j) {
                     self.metrics.upload_outcome[2] += 1;
                     if self.trace_grants {
@@ -1023,6 +1039,17 @@ impl Engine {
             }
             if worst > f64::NEG_INFINITY && rx - worst < phy_capture {
                 self.metrics.frames_collided += 1;
+                if let Some(w) = wanted {
+                    self.metrics.wanted_bulk[w][1] += 1;
+                    if w == 1 {
+                        let ann = self.nodes[worst_from].node.role(tx.carrier) == meshcast_core::node::Role::Announcer;
+                        let heard = self.rx_dbm(worst_from, tx.from, tx.carrier) >= self.phys[tx.carrier].cca_threshold_dbm;
+                        self.metrics.wanted_own_broken_by[(!ann as usize) * 2 + heard as usize] += 1;
+                        if ann && !heard && self.nodes[worst_from].node.colouring().0 == self.nodes[tx.from].node.colouring().0 {
+                            self.metrics.wanted_own_same_colour += 1;
+                        }
+                    }
+                }
                 if tx.upload_to == Some(j) {
                     self.metrics.upload_outcome[1] += 1;
                     let other = self.txs.get(&worst_id);
@@ -1085,6 +1112,9 @@ impl Engine {
             }
             delivered += 1;
             self.trace_offer(&tx, &offered, j, "ok", usize::MAX);
+            if let Some(w) = wanted {
+                self.metrics.wanted_bulk[w][0] += 1;
+            }
             if let Some(t) = &rx_trace {
                 eprintln!("{}", t);
             }

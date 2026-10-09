@@ -270,6 +270,10 @@ struct Report {
     delivered_bytes_per_hour_per_announcer: f64,
     /// NACKs sent, full passes moved on, repair phases shared, checks that found no phase left.
     repairs: [u64; 4],
+    /// Bulk receptions the receiver wanted, by sender (other, own announcer) and outcome.
+    wanted_bulk: [[u64; 5]; 2],
+    wanted_own_broken_by: [u64; 4],
+    wanted_own_same_colour: u64,
     failover: Option<FailoverReport>,
     core_stats: Vec<(usize, String)>,
     /// Mean bytes a follower holds complete at the end, in kB.
@@ -976,6 +980,9 @@ fn simulate(spec: ScenarioSpec, verbose: bool, failover: Option<(f64, f64)>) -> 
         connectivity,
         delivered_bytes_per_hour_per_announcer: dbph,
         repairs: [sum_stats(&eng, |s| s.nacks_sent), sum_stats(&eng, |s| s.passes_skipped), sum_stats(&eng, |s| s.repair_phases_shared), sum_stats(&eng, |s| s.nacks_without_phase)],
+        wanted_bulk: m.wanted_bulk,
+        wanted_own_broken_by: m.wanted_own_broken_by,
+        wanted_own_same_colour: m.wanted_own_same_colour,
         failover: fo,
         core_stats,
         held_kb_per_follower,
@@ -1026,6 +1033,8 @@ struct SeedLine {
     connectivity: Connectivity,
     #[serde(default)]
     repairs: [u64; 4],
+    #[serde(default)]
+    wanted_bulk: [[u64; 5]; 2],
 }
 
 /// Several seeds of one scenario: the spread is the result, not any single run.
@@ -1076,6 +1085,18 @@ fn params() -> Params {
     if let Ok(v) = std::env::var("MESHCAST_BLOCK_NACK") {
         p.block_nack = v != "0";
     }
+    if let Some(v) = std::env::var("MESHCAST_T_SLOT_MS").ok().and_then(|v| v.parse().ok()) {
+        p.t_slot_ms = v;
+    }
+    if let Ok(v) = std::env::var("MESHCAST_TURN_GUARD") {
+        p.turn_guard = v != "0";
+    }
+    if let Ok(v) = std::env::var("MESHCAST_UPLOAD_SLOTS") {
+        p.upload_slots = v != "0";
+    }
+    if let Ok(v) = std::env::var("MESHCAST_SLOTS_UNDER_CAP") {
+        p.slots_under_cap = v != "0";
+    }
     if let Ok(v) = std::env::var("MESHCAST_ORDER_BY_LOST") {
         p.election.order_by_lost = v != "0";
     }
@@ -1122,7 +1143,7 @@ impl Ensemble {
             spec: reports[0].spec.clone(),
             seeds: reports
                 .iter()
-                .map(|r| SeedLine { seed: r.spec.seed, delivered: delivered(r), bulk_sent: r.bulk_sent, by_kind: by_kind(&r.objects), renditions: r.renditions.clone(), attack_frames: r.attack_frames, carousel_first: r.carousel_first, carousel_repeat: r.carousel_repeat, role_events: r.role_events, challenges: r.challenges, excursions: r.excursions, frames_sent: r.frames_sent, whole: r.whole.clone(), held_kb_per_follower: r.held_kb_per_follower, table_peaks: r.table_peaks.clone(), frames_delivered: r.frames_delivered, frames_collided: r.frames_collided, occupancy_peak_p50_bulk: r.occupancy_peak_p50_bulk, occupancy_peak_max_bulk: r.occupancy_peak_max_bulk, connectivity: r.connectivity.clone(), repairs: r.repairs })
+                .map(|r| SeedLine { seed: r.spec.seed, delivered: delivered(r), bulk_sent: r.bulk_sent, by_kind: by_kind(&r.objects), renditions: r.renditions.clone(), attack_frames: r.attack_frames, carousel_first: r.carousel_first, carousel_repeat: r.carousel_repeat, role_events: r.role_events, challenges: r.challenges, excursions: r.excursions, frames_sent: r.frames_sent, whole: r.whole.clone(), held_kb_per_follower: r.held_kb_per_follower, table_peaks: r.table_peaks.clone(), frames_delivered: r.frames_delivered, frames_collided: r.frames_collided, occupancy_peak_p50_bulk: r.occupancy_peak_p50_bulk, occupancy_peak_max_bulk: r.occupancy_peak_max_bulk, connectivity: r.connectivity.clone(), repairs: r.repairs, wanted_bulk: r.wanted_bulk })
                 .collect(),
         }
     }
@@ -1208,6 +1229,13 @@ fn print_report(r: &Report, wall: std::time::Duration) {
     println!("bulk carrier: {} parts, {:.1} nodes heard each way per node; followers in the same part as the source: {:.1} % of follower-track pairs", r.connectivity.parts, r.connectivity.neighbours_mean, 100.0 * r.connectivity.followers_with_source);
     println!("delivered to followers: {:.2} MB per hour per announcer", r.delivered_bytes_per_hour_per_announcer / 1e6);
     println!("repairs: NACKs sent {}, full passes moved on {}, repair phases shared with a holder's {}, checks that found no phase left {}", r.repairs[0], r.repairs[1], r.repairs[2], r.repairs[3]);
+    for (w, who) in [(1, "its announcer"), (0, "others")] {
+        let o = r.wanted_bulk[w];
+        let all: u64 = o.iter().sum();
+        println!("wanted bulk from {}: {} receptions; delivered {}, lost to collision {} ({:.1} %), half-duplex {}, not listening {}, retuned {}", who, all, o[0], o[1], 100.0 * o[1] as f64 / all.max(1) as f64, o[2], o[3], o[4]);
+    }
+    let b = r.wanted_own_broken_by;
+    println!("  what broke those from its announcer: another announcer its sender could not hear {} (of the same colour {}), one it could {}, a node not announcing it could not hear {}, one it could {}", b[0], r.wanted_own_same_colour, b[1], b[2], b[3]);
     println!("\nairtime share per transmitting node, busiest first (control, bulk):");
     for (i, s) in r.airtime_share.iter().take(12) {
         println!("  node {:>4}: {}", i, s.iter().map(|x| format!("{:.2} %", x * 100.0)).collect::<Vec<_>>().join(", "));

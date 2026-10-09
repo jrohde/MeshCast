@@ -186,6 +186,19 @@ pub struct Params {
     /// `T_want_min` without progress (PROTOCOL.md §3.5). Off: only nearly complete objects are
     /// repaired by NACK; kept to measure against.
     pub block_nack: bool,
+    /// Announcers in conflict take turns with their carousels also where a regulator caps every
+    /// transmitter (a duty cycle or polite access), as everywhere else (PROTOCOL.md §5.3). Off:
+    /// not there, as from FEASIBILITY.md §7.7 to §38 (exactly so with `upload_slots` on and
+    /// `turn_guard` off); kept to measure against.
+    pub slots_under_cap: bool,
+    /// Under a regulator's cap too, an upload waits for its announcer's time slot as well as for
+    /// its phase, and spends a slot cycle's budget at once, as it does where nothing caps; with
+    /// `slots_under_cap` off, it waits for no slot but keeps that burst. Off: under a cap it keeps
+    /// to its phase only, with the ordinary burst (FEASIBILITY.md §38); kept to measure against.
+    pub upload_slots: bool,
+    /// A turn takes only a frame that fits in it, `T_guard` clear of its edges. Off: any frame
+    /// that starts in it, as before FEASIBILITY.md §38; kept to measure against.
+    pub turn_guard: bool,
     /// An announcer marks what it relays as asked for listeners (PROTOCOL.md §4). Off: only what it
     /// or its followers listen to; kept to measure against.
     pub mark_relayed: bool,
@@ -264,6 +277,9 @@ impl Default for Params {
             leave_lacking: true,
             leave_backoff: true,
             block_nack: true,
+            slots_under_cap: true,
+            upload_slots: false,
+            turn_guard: true,
             mark_relayed: true,
             proactive: false,
             relay_unfollowed: true,

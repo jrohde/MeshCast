@@ -327,6 +327,11 @@ impl MemStore {
     }
 
     /// Copy symbol `esi` of `block` into `buf` (must be `SYMBOL_SIZE`). Returns false if absent.
+    /// Whether symbol `esi` of `block` is held.
+    pub fn has_symbol(&self, short: &ShortId, block: u16, esi: u16) -> bool {
+        self.entries.get(short).and_then(|e| e.blocks.get(block as usize)).and_then(|b| b.as_ref()).map_or(false, |b| b.has(esi))
+    }
+
     pub fn get_symbol(&self, short: &ShortId, block: u16, esi: u16, buf: &mut [u8]) -> bool {
         let Some(e) = self.entries.get(short) else { return false };
         let Some(Some(b)) = e.blocks.get(block as usize) else { return false };

@@ -820,10 +820,21 @@ impl Node {
     /// A colour maps to a channel (`colour mod n`) and, when there are more colours than
     /// channels, to a time slot on that channel (`colour div n`). Single-channel carriers are
     /// simply `n = 1`: every colour is a slot.
+    ///
+    /// Under a regulator's cap the cycle has at most as many slots as one announcer's share of the
+    /// airtime goes into the whole (ten under a 10 % duty cycle): a turn then never holds an
+    /// announcer below the airtime the cap allows it, however large a colour count is reported
+    /// (ABUSE.md, conflict poisoning). Colours beyond fold onto the slots.
     fn slot_of(&self, carrier: usize, colour: u8, colours: u8) -> (u64, u64) {
         let n = self.carriers[carrier].p.channels.len().max(1) as u64;
-        let slots = (colours.max(1) as u64).div_ceil(n).max(1);
-        (colour as u64 / n, slots)
+        let mut slots = (colours.max(1) as u64).div_ceil(n).max(1);
+        if let Some(b) = self.carriers[carrier].p.band {
+            if matches!(self.discipline.rule(b), Access::DutyCycle { .. } | Access::Polite { .. }) {
+                let share = self.discipline.budget_permille(b, n as u16).max(1) as u64;
+                slots = slots.min((1000 / share).max(1));
+            }
+        }
+        ((colour as u64 / n) % slots, slots)
     }
 
     /// Our colour: greedy distributed colouring. Lower ids keep their colour; we take the
@@ -863,41 +874,49 @@ impl Node {
         self.conflicts.retain(|_, (t, _, _)| *t >= from);
     }
 
-    /// Announcers that share a channel take turns: our carousel runs only in our slot.
-    /// Returns when the next slot of ours starts, or None if it is ours now.
+    /// Announcers that share a channel take turns: our carousel runs only in our slot, and so
+    /// does an upload to an announcer where nothing caps (or with `upload_slots`). Returns when a
+    /// frame of `air` may go in the next slot of ours (`T_guard` into it), or None if it may go now.
     ///
-    /// Taking turns is for carriers where nothing else bounds what everyone adds up to. Where
-    /// the regulator already caps every transmitter (a duty cycle, or polite access with its
-    /// cumulative limit), that cap is the bound, and adding turns on top only buys idle time:
-    /// in a town on one 250 kHz channel it cost five announcers eight ninths of their airtime.
-    fn slot_wait(&self, carrier: usize, colour: u8, colours: u8, now: Millis) -> Option<Millis> {
+    /// Under a regulator's cap too. A cap bounds what each transmitter sends, not where two that
+    /// cannot hear each other meet: in a band O town most of what followers lost of their own
+    /// announcer's carousel was another announcer's carousel they also heard, and with turns the
+    /// town got everything sooner on fewer frames (FEASIBILITY.md §38). Turns were left out under
+    /// a cap from §7.7, where five announcers idled eight ninths of their airtime and uploads
+    /// waited for the slot too; under a cap an upload now keeps to its phase only (`try_tx`).
+    fn slot_wait(&self, carrier: usize, colour: u8, colours: u8, now: Millis, air: Millis) -> Option<Millis> {
         if let Some(b) = self.carriers[carrier].p.band {
-            if matches!(self.discipline.rule(b), Access::DutyCycle { .. } | Access::Polite { .. }) {
+            if !self.cfg.params.slots_under_cap && matches!(self.discipline.rule(b), Access::DutyCycle { .. } | Access::Polite { .. }) {
                 return None;
             }
         }
         let (mine, k) = self.slot_of(carrier, colour, colours);
-        self.turn_wait(mine, k, now)
+        self.turn_wait(mine, k, now, air)
     }
 
-    /// Wait for turn `mine` of `k` in a cycle of `k × T_slot`; None if it is our turn now.
-    fn turn_wait(&self, mine: u64, k: u64, now: Millis) -> Option<Millis> {
+    /// Wait for turn `mine` of `k` in a cycle of `k × T_slot`; None if a frame of `air` fits in
+    /// our turn now, `T_guard` clear of its edges, as a frame keeps inside a dwell (§6): the
+    /// neighbour whose turn comes next cannot hear us, and starts on time. A frame too long for
+    /// even an empty turn may start anywhere in it, `T_guard` from its edges, rather than never.
+    fn turn_wait(&self, mine: u64, k: u64, now: Millis, air: Millis) -> Option<Millis> {
         if k <= 1 {
             return None;
         }
         let slot = self.cfg.params.t_slot_ms.max(1);
+        let (g, air) = if self.cfg.params.turn_guard { (self.cfg.params.t_guard_ms, air) } else { (0, 0) };
+        let air = if air + 2 * g > slot { 0 } else { air };
         let m = self.mesh(now);
         let cur = (m / slot) % k;
-        if cur == mine {
-            None
-        } else {
-            let cycle_start = (m / (slot * k)) * slot * k;
-            let mut t = cycle_start + mine * slot;
-            if t <= m {
-                t += slot * k;
-            }
-            Some(self.local_at(t))
+        let start = (m / slot) * slot;
+        if cur == mine && m >= start + g && m + air + g <= start + slot {
+            return None;
         }
+        let cycle_start = (m / (slot * k)) * slot * k;
+        let mut t = cycle_start + mine * slot + g;
+        if t <= m {
+            t += slot * k;
+        }
+        Some(self.local_at(t))
     }
 
     /// Whether this carrier hops: more than one channel means announcers can be separated in
@@ -1057,6 +1076,11 @@ impl Node {
     /// Diagnostic: whether we hold `id` complete.
     pub fn holds(&self, id: &ShortId) -> bool {
         self.store.has_complete(id)
+    }
+
+    /// Diagnostic: whether we lack symbol `esi` of `block` of `id`.
+    pub fn lacks_symbol(&self, id: &ShortId, block: u16, esi: u16) -> bool {
+        !self.store.has_complete(id) && !self.store.has_symbol(id, block, esi)
     }
 
     /// Diagnostic: the uploads we are running or have lined up on `carrier`, as (object, to).
@@ -3608,8 +3632,8 @@ impl Node {
                 return;
             }
         }
-        // Content travels in its announcer's slot: our own colouring for the carousel, the
-        // target announcer's (from its beacons) for an upload.
+        // Content keeps to its announcer's colouring: our own for the carousel, the target
+        // announcer's (from its beacons) for an upload.
         let content_colour = match (&cand, self.carriers[i].upload.as_ref()) {
             (Cand::Carousel(Item::Symbol { .. }), _) => Some((self.my_colour(), self.colours())),
             (Cand::Upload(..), Some(u)) => Some(self.carriers[i].election.as_ref().and_then(|e| e.colouring_of(u.to)).unwrap_or((0, 1))),
@@ -3619,14 +3643,21 @@ impl Node {
         let mut phase_end: Option<Millis> = None;
         if let Some((colour, colours)) = content_colour {
             // The meeting dwell is control plane only, and announcers that share a channel take
-            // turns: content (carousel or upload) runs only in its announcer's slot.
+            // turns with their carousels.
             if self.in_rendezvous(i, now) {
                 let t = self.next_dwell_start(now);
                 self.stats.defer_ms[0] += t - now;
                 self.carriers[i].content_until = t;
                 return;
             }
-            if let Some(t) = self.slot_wait(i, colour, colours, now) {
+            // Under a regulator's cap an upload keeps to its phase of the announcer's listening time
+            // only: held to the announcer's slot as well, the uploads into a cell had one slot in k
+            // on top of the cap, and a band O town took a seventh to two fifths longer. Where
+            // nothing caps, an upload is a short burst that fits in the slot, and sent outside it,
+            // more of what uploaders sent was lost (FEASIBILITY.md §38).
+            let capped = self.carriers[i].p.band.map_or(false, |b| matches!(self.discipline.rule(b), Access::DutyCycle { .. } | Access::Polite { .. }));
+            let turns = matches!(cand, Cand::Carousel(..)) || !capped || self.cfg.params.upload_slots;
+            if let Some(t) = if turns { self.slot_wait(i, colour, colours, now, air) } else { None } {
                 self.stats.defer_ms[1] += t.saturating_sub(now);
                 self.carriers[i].content_until = t;
                 return;
@@ -3680,9 +3711,10 @@ impl Node {
                     return;
                 }
             }
-            // Taking turns means spending a cycle's worth of budget inside one slot.
+            // Taking turns means spending a cycle's worth of budget inside one slot; what takes no
+            // turns keeps the ordinary burst.
             let (_, slots) = self.slot_of(i, colour, colours);
-            if slots > 1 {
+            if turns && slots > 1 {
                 let cycle = slots * self.cfg.params.t_slot_ms.max(1);
                 self.carriers[i].fatsoen.set_burst_at_least(cycle as u32);
             }
