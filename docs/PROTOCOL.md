@@ -1226,6 +1226,17 @@ tie-break, below). Otherwise both persist and EtherFatsoen shares the channel be
   5.8 minutes later. The matrix, the living networks and the networks under attack did not
   change. And an announcer can no longer keep its followers by asking forever for what it never
   gets (ABUSE.md, "election capture").
+  **Busy is not lacking.** An announcer that has named an uploader within `T_excursion` for
+  anything its follower wants is getting what the follower wants, if not yet this: the follower
+  waits for the rest under it, and leaves it only for what it lists and does not send. Under load
+  a cell's queue is longer than `T_excursion`, and objects that would have come in their turn made
+  followers leave announcers that were busy getting the rest of what they wanted: in a band O
+  town of 200 nodes where each node follows two of twenty channels, half the albums were complete
+  after 196 minutes, and with this rule after 158 (FEASIBILITY.md §39.4). Excursions still fetch
+  what the announcer has named no uploader for: held back as well, the town gained half as much.
+  With the rule an announcer that names an uploader for one thing a follower wants every
+  `T_excursion` keeps it, for what it does not list, as long as it does so, where before it had
+  to for each object (ABUSE.md, "election capture").
   **Out of reach is not withheld.** A follower that left an announcer for an object that
   announcer did not list, and finds that the next one cannot get it either, has learned something
   of the object, not of the announcers: each announcer it left for that object doubles how long it
@@ -1468,7 +1479,7 @@ simulator has no node with one.
 | `H` | 10 % of `score_max` | yield hysteresis between announcers of equal capability |
 | `challenge_beacons` | 3 | beacons from a less capable announcer before a follower challenges it |
 | step-up order | span in 4 capability bands; in a band, 2/3 by score + 1/3 by how loud the lost announcer was heard (7/8) and chance (1/8), or by chance alone at a cold start | span `T_base + T_jitter` from the candidacy, or 7/10 of the meeting dwell after its first fifth on a hopping carrier |
-| `T_excursion` | 40 min | a want without a symbol, and without a grant by our announcer, this long sends a follower to another announcer that has it; a visit without a symbol this long ends, and one that brought none is not repeated for `want_ttl`; with nobody to visit, and one `T_want_min` more, it makes the follower leave its announcer, twice as long for each announcer it already left for that object that did not list it (§5.2); and what was asked for and neither granted nor arriving this long is stuck, and asked for last (§4) |
+| `T_excursion` | 40 min | a want without a symbol, and without a grant by our announcer, this long sends a follower to another announcer that has it; a visit without a symbol this long ends, and one that brought none is not repeated for `want_ttl`; with nobody to visit, and one `T_want_min` more, it makes the follower leave its announcer, unless that announcer has named an uploader this long for anything else the follower wants (busy is not lacking), twice as long for each announcer it already left for that object that did not list it (§5.2); and what was asked for and neither granted nor arriving this long is stuck, and asked for last (§4) |
 | `rssi_hysteresis` | 6 dB | a follower switches announcer only for a clearly stronger one |
 | "same cell" | heard at least as well as the median neighbour | one of the two conditions on which an equal announcer yields on the tie-break (§5.2), the other that both are fresh; relative, not a configured level: it holds on every carrier. In a dense cell it judged two announcers that stepped up together to be in two cells (FEASIBILITY.md §36.5, §37) |
 | `max_passes` | 1 | carousel passes per object unless re-wanted |
