@@ -24,11 +24,11 @@ Before every frame, on every carrier, the node samples RSSI for at least the CCA
 1 ms, well above the 160 µs legal minimum) and transmits only if the channel is below the CCA
 threshold. On a busy channel it waits `rand(0, B × 2^attempt)` with `B` draft 50 ms, capped at
 attempt 8 (12.8 s), then listens again. There is no maximum number of attempts: a MeshCast frame can
-wait forever. Control and metadata frames additionally wait a random 0–500 ms even on a clear
-channel: CCA cannot see a transmitter at the edge of range, and timers aligned to the same
-boundaries (dwell starts, 10-minute WANT intervals) would otherwise collide every time. Content
-frames, paced at the rate of mechanism 4, wait a random part of each wait for budget again, up
-to half of it: the budget accrues meanwhile, so the rate stays and only the instant
+wait forever. Control and metadata frames, beacons excepted, additionally wait a random 0–500 ms
+even on a clear channel: CCA cannot see a transmitter at the edge of range, and timers aligned to
+the same boundaries (dwell starts, 10-minute WANT intervals) would otherwise collide every time.
+Content frames, paced at the rate of mechanism 4, wait a random part of each wait for budget
+again, up to half of it: the budget accrues meanwhile, so the rate stays and only the instant
 wanders. Paced exactly, two announcers that cannot hear each other, once in step, stayed in step
 frame for frame at the followers between them (PROTOCOL.md §5.4).
 
@@ -107,6 +107,7 @@ Parameters, all but the CCA sample rate as the simulator runs them (`core/src/pa
 | `RATE_MIN`, `RATE_MAX` | 0.05, 1.0 | bounds on the budget fraction |
 | `RATE_STEP` | 0.05 | additive increase per window |
 | CCA sample rate | 1 kHz | RSSI samples per second while idle |
+| `B`, `BACKOFF_MAX_ATTEMPT` | 50 ms, 8 | on a busy channel wait `rand(0, B × 2^attempt)`; the span stops doubling at attempt 8 (12.8 s), attempts are unlimited, and a clear channel resets the count (mechanism 1) |
 | `OCC_HIGH_OWN`, `OCC_LOW_OWN` | 0.50, 0.35 | the same for all occupancy, MeshCast frames and foreign energy together; the thresholds above then hold for the foreign part alone ("Polite to strangers", above) |
 | `OCC_CONTENT_OWN` | 0.45 | repeated content only below this occupancy as a whole |
 | `RATE_MIN_OWN` | 0.25 | the rate floor when the whole, not the foreign part, is too high |

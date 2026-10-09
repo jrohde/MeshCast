@@ -1322,7 +1322,7 @@ made nodes unable to find each other; the simulator caught this.)
 
 ### 5.4 Timing jitter
 
-Every control or metadata frame on a bulk carrier waits a random `0..T_jitter` (draft 500 ms)
+Every control or metadata frame, on every carrier, waits a random `0..T_jitter` (draft 500 ms)
 before transmission, beacons excepted. CCA cannot see a transmitter at the edge of range (a few
 dB above sensitivity), and without jitter two nodes whose timers are both aligned to dwell
 boundaries collide every single time.
@@ -1478,36 +1478,39 @@ simulator has no node with one.
 | `T_base`, election jitter | 60 s, 10 s | together the span of a candidate's wait on a carrier that does not hop |
 | `H` | 10 % of `score_max` | yield hysteresis between announcers of equal capability |
 | `challenge_beacons` | 3 | beacons from a less capable announcer before a follower challenges it |
-| step-up order | span in 4 capability bands; in a band, 2/3 by score + 1/3 by how loud the lost announcer was heard (7/8) and chance (1/8), or by chance alone at a cold start | span `T_base + T_jitter` from the candidacy, or 7/10 of the meeting dwell after its first fifth on a hopping carrier |
-| `T_excursion` | 40 min | a want without a symbol, and without a grant by our announcer, this long sends a follower to another announcer that has it; a visit without a symbol this long ends, and one that brought none is not repeated for `want_ttl`; with nobody to visit, and one `T_want_min` more, it makes the follower leave its announcer, unless that announcer has named an uploader this long for anything else the follower wants (busy is not lacking), twice as long for each announcer it already left for that object that did not list it (§5.2); and what was asked for and neither granted nor arriving this long is stuck, and asked for last (§4) |
+| step-up order | span in 4 capability bands; in a band, 2/3 by score + 1/3 by how loud the lost announcer was heard (7/8) and chance (1/8), or by chance alone at a cold start or in a challenge | span `T_base + T_jitter` from the candidacy, or 7/10 of the meeting dwell after its first fifth on a hopping carrier |
+| `T_excursion` | 40 min | a want without a symbol, not listed by our announcer and without a grant by it, this long sends a follower to another announcer that has it; a visit without a symbol this long ends, and one that brought none is not repeated for `want_ttl`; with nobody to visit, and one `T_want_min` more, it makes the follower leave its announcer, unless that announcer has named an uploader this long for anything else the follower wants (busy is not lacking), twice as long for each announcer it already left for that object that did not list it (§5.2); what was asked for and neither granted nor arriving this long is stuck, and asked for last, and what has not completed this long after the follower last asked for it is asked for again, whatever arrived (§4); and an announcer that answered a proof `NACK` is asked again only this long after its answer (§5.2) |
 | `rssi_hysteresis` | 6 dB | a follower switches announcer only for a clearly stronger one |
 | "same cell" | heard at least as well as the median neighbour | one of the two conditions on which an equal announcer yields on the tie-break (§5.2), the other that both are fresh; relative, not a configured level: it holds on every carrier. In a dense cell it judged two announcers that stepped up together to be in two cells (FEASIBILITY.md §36.5, §37) |
 | `max_passes` | 1 | carousel passes per object unless re-wanted |
 | repetition spacing | 0, then `T_want_min` × 1, 2, 4, 8 | wait before an object is passed again; the level climbs with each repetition and resets after a rest of twice the wait |
-| `T_nack_stall` | 60 s | no progress on a nearly complete object (≥ 80 %, or all but one symbol) before a NACK |
+| `T_nack_stall` | 60 s | no progress on a nearly complete object (≥ 80 %, or all but one symbol) before a NACK; also how long a want must bring no symbol before it goes in the next ask (§4), and the interval between proof `NACK`s to an announcer that lists a want and does not send it (§5.2) |
 | `T_want_min` | 10 min | minimum interval between a follower's WANT frames, except an ask for what a new manifest names (§4); also how long a want its announcer lists may bring nothing before the follower asks it for proof (§5.2); and how long an object whose first blocks a node holds, and that is not nearly complete, may bring nothing before it NACKs a later block (§3.5) |
 | `T_relay_wait` | 10 min | what a node expects of other cells' asks before it has heard any: met half the time within it, never after (§4) |
-| `relay_risk` | 5 % | a node relays another cell's ask once fewer than this share of the asks of its age were met by others before twice that age, as it learned from the asks it heard (§4) |
-| `carry_budget` | per device | bytes a node keeps for others, beyond what it listens to; what has not been of use for `want_ttl` gives way, the menu first, then relays another cell's announcer lists, then the least recently used, and a full budget takes on no more relays (§4). The simulator's default is no limit |
-| `cell_keep` | 24 h | an announcer serves a channel this long after a follower of its cell last asked for anything of it (§2) |
-| `T_gossip`, `T_gossip_min` | 5 min, 30 s | announcer/source gossip cadence and its floor |
+| `relay_risk` | 5 % | a node relays another cell's ask once fewer than this share of the asks of its age were met by others before twice that age, as it learned from the asks it heard, and at the latest after `want_ttl` (§4) |
+| `want_ttl` | 1 h | how long a WANT stays valid at the announcer; also how long what a node relays or keeps for others stays of use after it was last asked for or used, the latest a node waits before relaying another cell's ask, and how long a follower ignores an announcer it left, or visited in vain, for what it did not serve (§4, §5.2) |
+| `carry_budget` | per device | bytes a node keeps for others, beyond what it listens to; what has not been of use for `want_ttl` gives way, and so does a relay another cell's announcer lists as held: the menu first, then those relays, then the least recently used; a full budget takes on no more relays (§4). The simulator's default is no limit |
+| `cell_keep` | 24 h | an announcer serves a channel this long after a follower of its cell last asked for anything of it or announced it (§2) |
+| `T_gossip`, `T_gossip_min` | 5 min, 30 s | announcer/source gossip cadence and its floor; also how long a follower that adopted a manifest waits for its announcer's next `GOSSIP` before asking for what it names, and the least interval between such asks (§4) |
 | `control_reserve` | 10 % | share of the band budget kept free for control frames |
-| own share | `min(regulatory, occ_high_own / (announcers heard + 1))` | content pacing ceiling; derived, not configured |
+| own share | `min(regulatory × (1 − control_reserve), occ_high_own / (announcers in conflict of our colour + 1))` | content pacing ceiling; derived, not configured: only announcers colouring could not separate from us share it (ETHERFATSOEN.md §4) |
 | `T_dwell` | 20 s | hop dwell on frequency-agile carriers |
 | `meet_every` | 5 | every fifth dwell is on the common control-plane sequence |
-| `T_ctrl_period`, `T_ctrl_window` | 60 s, 4 s | the control window: control-carrier frames go only in it, and a radio shared with a sub-GHz bulk carrier listens on the control carrier only then; where it falls in each period follows from the period's number (§3) |
+| `T_ctrl_period`, `T_ctrl_window` | 60 s, 4 s | the control window: control-carrier frames go only in it, but a new time source's first time beacon (§6); every node with a separate control carrier listens there only then, as a radio shared with a sub-GHz bulk carrier must, but a node that knows no shared time where the cell's carrier hops, which listens there all the time (§6); where it falls in each period follows from the period's number (§3) |
 | `T_acquire` | 124 s | where the cell's carrier hops: how long a node that knows no shared time listens on the control carrier before it may step up by its own clock, two control periods and a window, the longest it can wait for a whole window (§3, §6) |
-| `T_guard` | 50 ms | how far a frame keeps from the edges of a hop dwell and of the control window, for clocks a few milliseconds apart (§6) |
+| `T_guard` | 50 ms | how far a frame keeps from the edges of a hop dwell, of the control window and of a turn, for clocks a few milliseconds apart (§5.3, §6) |
 | `T_offer` | 0–3 s | random delay before a holder offers on an open ask |
-| repair wait | `T_suppress × (neighbours heard better than the asker) / (all neighbours)` + jitter | ungranted NACK answer |
+| repair wait | `T_suppress × (neighbours heard better than the asker) / (all neighbours)` + up to `T_suppress / 10` | ungranted NACK answer; `T_suppress` is 20 s |
 | `T_upload_phase` | 1 s | one upload phase: uploaders to one announcer take turns this long each |
 | `T_render_ahead` | 30 min | a device that cannot decode asks for a rendition this long before its slot |
 | `T_grant` | 10 min | a grant lapses this long after its last symbol (or after the grant, if none came) |
 | `T_slot` | 10 s | time slot when announcers in conflict share a channel, for their carousels, and for uploads where no regulator caps the carrier (FEASIBILITY.md §38) |
 | `conflict_ttl`, `T_report_min` | 30 min, 60 s | conflict report lifetime and follower report rate limit |
-| `T_jitter` (tx) | 0–500 ms | random delay before control/metadata frames |
-| repair overhead (v1) | 10 % | RaptorQ repair symbols per block |
-| gossip cap | 12 have + 12 want | per frame |
+| `T_jitter` (tx) | 0–500 ms | random delay before control/metadata frames, beacons excepted |
+| repair overhead (v1) | 10 % | RaptorQ repair symbols per block; v1, not in the code (FEASIBILITY.md §7.7.1) |
+| gossip cap | 12 `HAVE` ids and 8 `WANT` entries, or their bytes in sets (96 and 104 B) | per frame (§3.3) |
+| `T_score` | 60 s | how often a node recomputes its election score (§5.1); also its housekeeping tick, at which it forgets what has outlived its lifetime, keeps its carry budget and checks its excursions, so those rules act at most this late |
+| `neighbor_ttl` | 1 h | a neighbour not heard this long is forgotten, which makes the hour of the score's neighbour count (§5.1); and how long a holder keeps answering the `NACK`s of an announcer that granted it the object, counted from that announcer's last `NACK` (§3.5) |
 | `max_neighbours` | 256 | neighbours a node keeps; a name heard once gives way first, then the one heard longest ago (§7) |
 | `max_offered_ids` | 8192 | ids offered by all neighbours together; what the neighbour heard longest ago offered goes first |
 | `max_conflicts` | 64 | announcers reported in conflict; the report heard longest ago goes first |
