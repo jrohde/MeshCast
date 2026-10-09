@@ -1606,3 +1606,55 @@ fn hidden_announcers_take_turns_under_a_duty_cycle() {
     assert_eq!(with.0, 0, "with turns one announcer's frames should never meet the other's");
     assert_eq!(with.1, 0, "with turns no follower should lose a symbol it wants from its announcer");
 }
+
+#[test]
+fn a_cell_split_by_a_wall_heals_when_it_comes_down() {
+    // A square kilometre of 20 nodes in band O, cut in two halves from 2 h to 4 h, seed 1. While
+    // the wall stands each half has an announcer of its own, the half that lost the station's
+    // within a failover; when it comes down, of two announcers that hear each other one yields
+    // within a beacon interval (FEASIBILITY.md §41).
+    let s = ScenarioSpec {
+        nodes: 20,
+        area_km2: 1.0,
+        stations: 1,
+        sources: 1,
+        tracks: 3,
+        track_kb: 42,
+        mix: Vec::new(),
+        hours: 6.0,
+        seed: 1,
+        bulk: BulkPreset::GfskO,
+        control_sf: 7,
+        exponent: 3.0,
+        shadow_db: 6.0,
+        follow_fraction: 1.0,
+        positions: None,
+        stations_at: None,
+        sources_at: None,
+        renditions: None,
+        attack: None,
+        clocks: Default::default(),
+        collections: Default::default(),
+    };
+    let mut b = build(&s, Params::default());
+    let sides: Vec<bool> = b.positions.iter().map(|p| p.0 >= 500.0).collect();
+    let (up, down) = (2 * 3_600_000, 4 * 3_600_000);
+    b.engine.schedule_wall(sides.clone(), 100.0, up, down);
+    b.engine.run(6 * 3_600_000, 600_000);
+    let bulk = b.engine.phys.iter().position(|p| p.kind != meshcast_core::frame::CarrierKind::LoraControl).unwrap();
+    let ids: Vec<u32> = b.engine.nodes.iter().map(|n| n.node.id().0).collect();
+    let side_of = ids.iter().zip(&sides).map(|(id, s)| (*id, *s as usize)).collect();
+    let pairs = (0..ids.len()).flat_map(|i| (i + 1..ids.len()).map(move |j| (i, j))).filter(|&(i, j)| b.engine.hears(i, j, bulk) && b.engine.hears(j, i, bulk)).map(|(i, j)| (ids[i].min(ids[j]), ids[i].max(ids[j]))).collect();
+    let mut w = meshcast_sim::metrics::WallTally::new(side_of, pairs, up, down);
+    let mut announcing = std::collections::BTreeMap::new();
+    for e in b.engine.metrics.role_events.iter().filter(|e| e.carrier == bulk) {
+        w.until(&announcing, e.t_ms);
+        announcing.insert(e.node, e.role == "Announcer");
+        w.step(&announcing, e.t_ms);
+    }
+    w.until(&announcing, 6 * 3_600_000);
+    assert!(w.announcer_after.iter().all(|t| t.map_or(false, |t| t < 300_000)), "each half should have an announcer within a failover: {:?}", w.announcer_after);
+    assert_eq!(w.longest_during, [0, 0], "no half should keep two announcers that hear each other");
+    let (pair_at_end, longest_after, _) = w.after(6 * 3_600_000);
+    assert!(!pair_at_end && longest_after < 60_000, "after the wall two announcers that hear each other should settle within a beacon interval, took {longest_after} ms");
+}

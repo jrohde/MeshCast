@@ -39,6 +39,12 @@ as before `docs/FEASIBILITY.md` §38. `MESHCAST_T_SLOT_MS` sets `T_slot`.
 `MESHCAST_BUSY_FOR_US=0` makes a follower leave an announcer that has named no uploader in
 `T_excursion` for an object it wants, however busy it is getting the rest, as before
 `docs/FEASIBILITY.md` §39.
+`meshcast-sim partition` is `failover` with a wall instead of a switched-off station: from
+`--wall-at-h` to `--merge-at-h` every link between the west and the east half of the area loses
+`--wall-db` (100) more; its report says how soon each half had an announcer, whether two that hear
+each other announced on one side (from ten minutes after the wall went up) or after the wall came
+down, and when the followers in the half without the source held everything
+(`docs/FEASIBILITY.md` §41).
 `MESHCAST_BURST_PER_TURN=0` keeps a token-bucket burst raised for a turn or an upload phase
 for good, and `MESHCAST_CHALLENGE_IN_ORDER=0` lets a challenger on a carrier that does not hop
 step up within the election jitter by chance, both as before `docs/FEASIBILITY.md` §40.
