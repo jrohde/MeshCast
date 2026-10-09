@@ -36,6 +36,9 @@ polite access; `MESHCAST_UPLOAD_SLOTS=1` makes uploads there wait for their anno
 well and spend a slot cycle's budget at once, and with the first switch only the latter;
 `MESHCAST_TURN_GUARD=0` lets a turn take any frame that starts in it. The three together behave
 as before `docs/FEASIBILITY.md` §38. `MESHCAST_T_SLOT_MS` sets `T_slot`.
+`MESHCAST_BUSY_FOR_US=0` makes a follower leave an announcer that has named no uploader in
+`T_excursion` for an object it wants, however busy it is getting the rest, as before
+`docs/FEASIBILITY.md` §39.
 
 A `cell` report also gives the busiest 10 s of the bulk carrier at each node, measured at every
 frame a node hears (the occupancy line above it samples every ten minutes); how many parts the
@@ -46,7 +49,10 @@ more than one announcer after the loss. A `cell` report also counts the bulk rec
 symbol the receiver lacks, of an object it wants ("wanted bulk"), by sender (its own announcer or
 another node) and outcome, and for those from its own announcer what broke them: another
 announcer or a node that is not announcing, heard by the sender or not (`docs/FEASIBILITY.md`
-§38).
+§38), and for those from others whether what broke them was heard by their sender. It counts
+the windows in which each node's EtherFatsoen gate closed with its smoothed occupancy above
+30 % or 50 % of all energy or above 30 % foreign, and the highest it reached, and reports them
+for the typical and the worst node (`docs/FEASIBILITY.md` §39).
 
 `MESHCAST_CARDS=small` gives every channel's root a card (`docs/PROTOCOL.md` §2) of 10 bytes: a
 medium, one genre and one language; `MESHCAST_CARDS=full` one of three genres, three languages, an

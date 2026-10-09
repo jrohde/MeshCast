@@ -274,6 +274,12 @@ struct Report {
     wanted_bulk: [[u64; 5]; 2],
     wanted_own_broken_by: [u64; 4],
     wanted_own_same_colour: u64,
+    wanted_other_heard: [u64; 2],
+    /// The gate's smoothed occupancy on the bulk carrier: share of windows above 30 % and 50 % of
+    /// all energy and above 30 % foreign, at the typical and the worst node, in per cent.
+    gate_over: [[f64; 2]; 3],
+    /// The highest smoothed occupancy, at the typical and the worst node, in per cent.
+    gate_occ_max: [f64; 2],
     failover: Option<FailoverReport>,
     core_stats: Vec<(usize, String)>,
     /// Mean bytes a follower holds complete at the end, in kB.
@@ -854,6 +860,23 @@ fn simulate(spec: ScenarioSpec, verbose: bool, failover: Option<(f64, f64)>) -> 
     peaks.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let peak_p50 = percentile(&peaks, 0.5).unwrap_or(0.0);
     let peak_max = peaks.last().copied().unwrap_or(0.0);
+    // The gate's smoothed occupancy (ETHERFATSOEN.md §4), at every window it closed: per node, the
+    // share of windows above 30 % and above 50 % of all energy and above 30 % of foreign energy,
+    // and the highest smoothed occupancy it reached; over nodes, the typical and the worst.
+    let gates: Vec<&meshcast_core::fatsoen::Fatsoen> = eng
+        .nodes
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !eng.attackers.iter().any(|a| a.node == *i))
+        .map(|(_, n)| n.node.fatsoen(bulk_c))
+        .filter(|f| f.windows > 0)
+        .collect();
+    let spread = |mut v: Vec<f64>| {
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        [percentile(&v, 0.5).unwrap_or(0.0), v.last().copied().unwrap_or(0.0)]
+    };
+    let gate_over: [[f64; 2]; 3] = core::array::from_fn(|k| spread(gates.iter().map(|f| 100.0 * f.windows_over[k] as f64 / f.windows as f64).collect()));
+    let gate_occ_max = spread(gates.iter().map(|f| f.occ_max[0] as f64 / 10.0).collect());
     // What the bulk carrier allows at all: who hears whom, and whether a follower is in the same
     // part of the network as the source of what it follows.
     let parts = eng.components(bulk_c);
@@ -983,6 +1006,9 @@ fn simulate(spec: ScenarioSpec, verbose: bool, failover: Option<(f64, f64)>) -> 
         wanted_bulk: m.wanted_bulk,
         wanted_own_broken_by: m.wanted_own_broken_by,
         wanted_own_same_colour: m.wanted_own_same_colour,
+        wanted_other_heard: m.wanted_other_heard,
+        gate_over,
+        gate_occ_max,
         failover: fo,
         core_stats,
         held_kb_per_follower,
@@ -1035,6 +1061,14 @@ struct SeedLine {
     repairs: [u64; 4],
     #[serde(default)]
     wanted_bulk: [[u64; 5]; 2],
+    #[serde(default)]
+    wanted_own_broken_by: [u64; 4],
+    #[serde(default)]
+    wanted_other_heard: [u64; 2],
+    #[serde(default)]
+    gate_over: [[f64; 2]; 3],
+    #[serde(default)]
+    gate_occ_max: [f64; 2],
 }
 
 /// Several seeds of one scenario: the spread is the result, not any single run.
@@ -1081,6 +1115,9 @@ fn params() -> Params {
     }
     if let Ok(v) = std::env::var("MESHCAST_LEAVE_BACKOFF") {
         p.leave_backoff = v != "0";
+    }
+    if let Ok(v) = std::env::var("MESHCAST_BUSY_FOR_US") {
+        p.busy_for_us = v != "0";
     }
     if let Ok(v) = std::env::var("MESHCAST_BLOCK_NACK") {
         p.block_nack = v != "0";
@@ -1143,7 +1180,7 @@ impl Ensemble {
             spec: reports[0].spec.clone(),
             seeds: reports
                 .iter()
-                .map(|r| SeedLine { seed: r.spec.seed, delivered: delivered(r), bulk_sent: r.bulk_sent, by_kind: by_kind(&r.objects), renditions: r.renditions.clone(), attack_frames: r.attack_frames, carousel_first: r.carousel_first, carousel_repeat: r.carousel_repeat, role_events: r.role_events, challenges: r.challenges, excursions: r.excursions, frames_sent: r.frames_sent, whole: r.whole.clone(), held_kb_per_follower: r.held_kb_per_follower, table_peaks: r.table_peaks.clone(), frames_delivered: r.frames_delivered, frames_collided: r.frames_collided, occupancy_peak_p50_bulk: r.occupancy_peak_p50_bulk, occupancy_peak_max_bulk: r.occupancy_peak_max_bulk, connectivity: r.connectivity.clone(), repairs: r.repairs, wanted_bulk: r.wanted_bulk })
+                .map(|r| SeedLine { seed: r.spec.seed, delivered: delivered(r), bulk_sent: r.bulk_sent, by_kind: by_kind(&r.objects), renditions: r.renditions.clone(), attack_frames: r.attack_frames, carousel_first: r.carousel_first, carousel_repeat: r.carousel_repeat, role_events: r.role_events, challenges: r.challenges, excursions: r.excursions, frames_sent: r.frames_sent, whole: r.whole.clone(), held_kb_per_follower: r.held_kb_per_follower, table_peaks: r.table_peaks.clone(), frames_delivered: r.frames_delivered, frames_collided: r.frames_collided, occupancy_peak_p50_bulk: r.occupancy_peak_p50_bulk, occupancy_peak_max_bulk: r.occupancy_peak_max_bulk, connectivity: r.connectivity.clone(), repairs: r.repairs, wanted_bulk: r.wanted_bulk, wanted_own_broken_by: r.wanted_own_broken_by, wanted_other_heard: r.wanted_other_heard, gate_over: r.gate_over, gate_occ_max: r.gate_occ_max })
                 .collect(),
         }
     }
@@ -1236,6 +1273,9 @@ fn print_report(r: &Report, wall: std::time::Duration) {
     }
     let b = r.wanted_own_broken_by;
     println!("  what broke those from its announcer: another announcer its sender could not hear {} (of the same colour {}), one it could {}, a node not announcing it could not hear {}, one it could {}", b[0], r.wanted_own_same_colour, b[1], b[2], b[3]);
+    println!("  what broke those from others: a transmitter their sender could not hear {}, one it could {}", r.wanted_other_heard[0], r.wanted_other_heard[1]);
+    let g = r.gate_over;
+    println!("gate's smoothed occupancy, share of windows above 30 % / 50 % of all energy / 30 % foreign: typical node {:.1} / {:.1} / {:.1} %, worst node {:.1} / {:.1} / {:.1} %; highest smoothed occupancy: typical node {:.1} %, worst {:.1} %", g[0][0], g[1][0], g[2][0], g[0][1], g[1][1], g[2][1], r.gate_occ_max[0], r.gate_occ_max[1]);
     println!("\nairtime share per transmitting node, busiest first (control, bulk):");
     for (i, s) in r.airtime_share.iter().take(12) {
         println!("  node {:>4}: {}", i, s.iter().map(|x| format!("{:.2} %", x * 100.0)).collect::<Vec<_>>().join(", "));

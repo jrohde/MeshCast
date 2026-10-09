@@ -18,11 +18,16 @@ pub struct Fatsoen {
     last_refill: Millis,
     last_window: Millis,
     pub windows: u64,
+    /// Diagnostic: windows that closed with the smoothed occupancy above `occ_high` (all energy),
+    /// above `occ_high_own` (all energy), and with the smoothed foreign occupancy above `occ_high`.
+    pub windows_over: [u64; 3],
+    /// Diagnostic: the highest smoothed occupancy and foreign occupancy any window closed with.
+    pub occ_max: [u16; 2],
 }
 
 impl Fatsoen {
     pub fn new(p: FatsoenParams, now: Millis) -> Self {
-        Fatsoen { p, occ_ewma: 0, foreign_ewma: 0, rate: p.rate_max / 2, attempt: 0, backoff_until: 0, tokens_us: p.burst_ms as i64 * 1000, last_refill: now, last_window: now, windows: 0 }
+        Fatsoen { p, occ_ewma: 0, foreign_ewma: 0, rate: p.rate_max / 2, attempt: 0, backoff_until: 0, tokens_us: p.burst_ms as i64 * 1000, last_refill: now, last_window: now, windows: 0, windows_over: [0; 3], occ_max: [0; 2] }
     }
 
     /// Feed the measured occupancy: `occ_total` is the fraction (permille) of the last window
@@ -40,6 +45,10 @@ impl Fatsoen {
         let foreign = total - own;
         self.occ_ewma = ((a * total as u32 + (256 - a) * self.occ_ewma as u32) / 256) as u16;
         self.foreign_ewma = ((a * foreign as u32 + (256 - a) * self.foreign_ewma as u32) / 256) as u16;
+        self.windows_over[0] += (self.occ_ewma > self.p.occ_high) as u64;
+        self.windows_over[1] += (self.occ_ewma > self.p.occ_high_own) as u64;
+        self.windows_over[2] += (self.foreign_ewma > self.p.occ_high) as u64;
+        self.occ_max = [self.occ_max[0].max(self.occ_ewma), self.occ_max[1].max(self.foreign_ewma)];
         if self.foreign_ewma > self.p.occ_high {
             self.rate = (self.rate / 2).max(self.p.rate_min);
         } else if self.occ_ewma > self.p.occ_high_own {

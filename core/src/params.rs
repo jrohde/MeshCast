@@ -182,6 +182,11 @@ pub struct Params {
     /// announcer it left for it that did not list it (PROTOCOL.md §5.2). Off: as long each time;
     /// kept to measure against.
     pub leave_backoff: bool,
+    /// An announcer that has named an uploader within `T_excursion` for anything we want is busy,
+    /// not lacking: we leave it only for what it lists and does not send (PROTOCOL.md §5.2). Off:
+    /// for each object it has named no uploader for, as before FEASIBILITY.md §39; kept to measure
+    /// against.
+    pub busy_for_us: bool,
     /// A node that holds an object's first blocks whole and lacks a later one NACKs it after
     /// `T_want_min` without progress (PROTOCOL.md §3.5). Off: only nearly complete objects are
     /// repaired by NACK; kept to measure against.
@@ -276,6 +281,7 @@ impl Default for Params {
             announce_recent: true,
             leave_lacking: true,
             leave_backoff: true,
+            busy_for_us: true,
             block_nack: true,
             slots_under_cap: true,
             upload_slots: false,
