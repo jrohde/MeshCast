@@ -1119,6 +1119,11 @@ impl Node {
         self.carriers[carrier].fatsoen.occupancy()
     }
 
+    /// Diagnostic: the EtherFatsoen gate of `carrier`, with its window counters.
+    pub fn fatsoen(&self, carrier: usize) -> &Fatsoen {
+        &self.carriers[carrier].fatsoen
+    }
+
     pub fn rate(&self, carrier: usize) -> u16 {
         self.carriers[carrier].fatsoen.rate()
     }
@@ -2234,7 +2239,11 @@ impl Node {
         let from = self.following_since;
         let own_haves = self.neighbors.get(&own).map(|n| n.haves.clone()).unwrap_or_default();
         let lacking = self.cfg.params.leave_lacking;
-        let claims_or_lacks = |x: &ShortId| own_haves.contains_key(x) || (lacking && !self.ann_granted_within(x, t));
+        // Busy is not lacking: one that has named an uploader in that time for anything we want is
+        // getting what we want, if not yet this; under load a cell's queue is longer than
+        // `T_excursion` (FEASIBILITY.md §39.4). Only what it lists and does not send counts then.
+        let busy = self.cfg.params.busy_for_us && self.ann_busy_for_us(t);
+        let claims_or_lacks = |x: &ShortId| own_haves.contains_key(x) || (lacking && !busy && !self.ann_granted_within(x, t));
         // What the next announcer cannot get either is out of reach, not withheld: each announcer
         // we left for it that did not list it doubles how long we wait for it under the next
         // (FEASIBILITY.md §31). One that lists it and does not send it is waited for as long as
@@ -2389,6 +2398,11 @@ impl Node {
     /// lapses after as long without a symbol), an excursion, which costs more, `T_excursion`.
     fn ann_granted_within(&self, id: &ShortId, window: Millis) -> bool {
         self.ann_grants.get(id).map(|t| self.now < *t + window).unwrap_or(false)
+    }
+
+    /// Whether our announcer has named an uploader within the last `window` for anything we want.
+    fn ann_busy_for_us(&self, window: Millis) -> bool {
+        self.wants.iter().any(|w| self.ann_granted_within(w, window))
     }
 
     /// What this node is: the part of the score that does not depend on its role.

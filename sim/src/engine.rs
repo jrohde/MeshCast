@@ -1041,9 +1041,11 @@ impl Engine {
                 self.metrics.frames_collided += 1;
                 if let Some(w) = wanted {
                     self.metrics.wanted_bulk[w][1] += 1;
-                    if w == 1 {
+                    let heard = self.rx_dbm(worst_from, tx.from, tx.carrier) >= self.phys[tx.carrier].cca_threshold_dbm;
+                    if w == 0 {
+                        self.metrics.wanted_other_heard[heard as usize] += 1;
+                    } else {
                         let ann = self.nodes[worst_from].node.role(tx.carrier) == meshcast_core::node::Role::Announcer;
-                        let heard = self.rx_dbm(worst_from, tx.from, tx.carrier) >= self.phys[tx.carrier].cca_threshold_dbm;
                         self.metrics.wanted_own_broken_by[(!ann as usize) * 2 + heard as usize] += 1;
                         if ann && !heard && self.nodes[worst_from].node.colouring().0 == self.nodes[tx.from].node.colouring().0 {
                             self.metrics.wanted_own_same_colour += 1;

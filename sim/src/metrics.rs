@@ -64,6 +64,9 @@ pub struct Metrics {
     /// Of those broken by another announcer: how many by one of the same colour (time slot or
     /// channel offset) as the sender.
     pub wanted_own_same_colour: u64,
+    /// What broke the wanted symbols from others: [a transmitter their sender could not hear,
+    /// one it could]; "hear" as above.
+    pub wanted_other_heard: [u64; 2],
     /// Per receiver: bulk frames delivered and lost to collisions.
     pub per_node_bulk: Vec<(u64, u64)>,
     /// Collisions during meeting dwells versus outside them, by frame type index.
