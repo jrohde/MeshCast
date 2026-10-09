@@ -4592,7 +4592,8 @@ Three rules came with the turns.
   under a cap takes no turn and keeps the ordinary burst; before §38 its burst was raised to a
   slot cycle all the same, as if it waited for one. Against the first trial of the turns, which
   kept that, this and the bound below together made a track 1.2 minutes later (se 0.7) and nine
-  in ten albums 2.5 minutes sooner (se 1.2), in the eight worlds of the band O town.
+  in ten albums 2.5 minutes sooner (se 1.2), in the eight worlds of the band O town. (So far
+  only for a node that had never taken a turn or a phase: a raised burst stayed raised, §40.2.)
 - **A turn takes only a frame that fits in it, `T_guard` clear of its edges**, as a frame keeps
   inside a hop dwell (PROTOCOL.md §6): the announcer whose turn comes next cannot hear it. A frame
   too long for even an empty turn may start anywhere in it, `T_guard` from its edges, rather than
@@ -4848,3 +4849,91 @@ band L and ESP-NOW, with the worst node of a world above it now and then; in ban
 load, and not at every node.
 
 The others stand as §36.6 left them, 4 with §37.
+
+## 40. The parameters, against the code
+
+The sixth definition of done asks for the tuned parameters written back into PROTOCOL.md §8 and
+ETHERFATSOEN.md §4. §36.6 found one row that gave a level the code never had. Every row of both
+tables was checked against the code: the default, the unit, and what the code does with it. Then
+every tunable field of the code was looked for in the tables.
+
+### 40.1 What was found
+
+The tables had 55 rows, 42 in PROTOCOL.md §8 and 13 in ETHERFATSOEN.md §4. Of them, 14 disagreed
+with the code: 12 said less or other than it does, and in 2 the code was changed instead. And 6
+tunable values had no row.
+
+- **Rows that said too little.** `T_excursion`, `T_nack_stall`, `T_gossip`, `relay_risk`,
+  `carry_budget`, `cell_keep`, the control window and `T_guard` each have a role in the code that
+  the row left out: `T_excursion` also times the trickle re-ask and the next proof `NACK` to an
+  announcer that answered one, `T_guard` also keeps a frame inside a turn (§38.3), `cell_keep`
+  counts from an announcement as well as from an ask. The rows now say all of it.
+- **Rows that said other than the code.** `T_jitter` delays control and metadata frames on every
+  carrier and beacons on none, where §5.4 said bulk carriers; the repair wait has a jitter of up
+  to `T_suppress / 10`; the own share is divided only among the announcers in conflict of one's
+  own colour, after the control reserve, not among all heard (as ETHERFATSOEN.md §4 says); and a
+  `GOSSIP` frame carries 8 `WANT` entries, not 12, or their bytes in sets.
+- **Values without a row.** `want_ttl` (1 h), `T_score` (60 s, also the housekeeping tick),
+  `neighbor_ttl` (1 h) and the backoff base and ceiling (50 ms, attempt 8) now have rows, and
+  `T_suppress` (20 s) is given in the repair wait's. One field, `nack_rounds`, was never read,
+  and is gone.
+- **Two where the code did not do what the spec said**, the burst and a challenger's step-up
+  order. These changed behaviour and were measured.
+
+### 40.2 The burst, for the turn at hand
+
+ETHERFATSOEN.md (`BURST`) raises a node's token-bucket burst to a cycle of upload phases or of
+turns while it uploads in phases or sends in a turn, so that what it saved while waiting is spent
+in its turn. The code raised it and never lowered it: a node that had once uploaded in phases or
+announced in turns kept a burst of up to a whole cycle, about 70 s of airtime in the band O town,
+for every later transmission. So §38.3's rule, that an upload under a cap that takes no turn keeps
+the ordinary burst, held only for nodes that had never taken a turn or a phase. The burst is now
+the transmission's: a cycle of the turns or phases it waited for, or the ordinary 2 s.
+
+Against the burst raised for good, world for world:
+
+| | For the transmission at hand |
+|---|---|
+| Town (§36.3), band O, 42 kB, eight worlds | a track 0.3 minutes sooner (se 0.4), nine in ten albums 2.8 later (se 1.6), +1.1 % frames |
+| ... band L | identical |
+| ... ESP-NOW | half the albums 0.9 minutes later (se 0.6), nine in ten 3.2 sooner (se 3.2), −0.8 % frames |
+| Matrix (§9) | midO everything 14.5 → 14.0 minutes, −4.2 % bulk frames; band O town 27.3 → 27.5, +1.0 % frames; the other seven identical |
+| Size sweep (§13.1), midO | −4.3 to +0.7 % frames; start at 90 % from 3.2 minutes later (7 kB) to 1.1 sooner (141 kB); everything from 2.1 sooner to 2.1 later; midL the same |
+| §30.1 without quiet channels, 16 worlds | delivered the same in band L and band O; band O −0.5 % frames (se 0.15), fewer in 13 worlds of 16 |
+| Valley strip (§32), 24 worlds | +0.11 points (se 0.13) in band L, +0.15 (se 0.18) in band O |
+| 400 quiet channels (§30.1), band L, 24 worlds | −0.14 points (se 0.06) |
+| One or five lures (§12) | identical |
+| Churn and the living network | newcomers caught up in 9.3 minutes in band O instead of 8.2, 8.8 in band L instead of 8.6; the worst 90th-percentile bulletin in band O 3.0 minutes instead of 6.0 under an attacker, 4.2 instead of 2.4 under a spoofer; role changes after the first hour in band O 283 a world instead of 276; the rest the same |
+
+Beyond its spread moved what midO sends, 4.2 % fewer bulk frames (4.7 standard errors), and what
+§30.1's band O networks send, 0.5 % fewer frames (3.7), with delivery unchanged in both; and the
+400 quiet channels, a seventh of a point less delivered at 2.3 standard errors, one of about
+twenty comparisons. The burst is the transmission's now, as the
+spec says; what a node did before no longer decides how much it may send at once.
+
+
+### 40.3 A challenger, in order
+
+PROTOCOL.md §5.2 orders every candidate by capability band, then score, then how loud it heard the
+announcer it lost, or chance where there is none, "at a cold start or in a challenge". On a
+carrier that hops the code did so. On one that does not, a follower that challenged a less capable
+announcer stepped up after a random wait within the election jitter (0 to 10 s), outside the bands.
+Now it takes the order like any candidate.
+
+Against the challenger by chance, world for world: the matrix's band O town started playback at
+the 90th percentile in 25.5 minutes instead of 25.8 with 0.1 % fewer frames, the other eight
+scenarios were identical, and so were §30.1's networks, the valley, the 400 quiet channels and
+the lures; the size sweep was too, but for its one challenge, in one world of midO at 141 kB
+(+0.04 % bulk frames over the eight worlds). In the living network newcomers in band O caught up
+in 9.4 minutes instead of 9.3, role changes after the first hour there were 296 a world instead
+of 283, and under a lure the worst 90th-percentile bulletin in band O took 4.8 minutes instead of
+3.0. Challenges are rare: six in the nine scenarios' eight worlds, five of them in
+band L, which hops and already took the order.
+
+
+### 40.4 Where the sixth definition of done stands
+
+Every row of PROTOCOL.md §8 and ETHERFATSOEN.md §4 now says what the code does, at the value the
+simulator runs with, but the repair overhead, which is v1's, and every tunable value of the code
+has a row. What the simulator tuned in
+§7 to §40 is in them. Whether those values are right for real radios is Phase 1's to measure.
