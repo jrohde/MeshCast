@@ -5179,3 +5179,23 @@ It is taken (PROTOCOL.md §4). Band L still crosses cells at about a kilometre a
 the 100 km strip delivers about half of what its carrier joins: the hop itself, a relay in one
 cell that hears the next cell's ask, fetches the object, and offers it in the rendezvous, remains
 the slow part, and is open.
+
+### 44.3 Where the hops stall
+
+The same world (seed 2, the 30 km strip in band L), traced again with relays that ask soon. Over
+every bulletin, a hop itself is quick: from when a holder had a bulletin to when the announcer it
+uploaded to had it took 4.7 minutes at the median (7.6 at the third quartile), and a relay whose
+own announcer already held what it took on held it 1.4 minutes later. But of 6,560 relays taken
+on, 4,754 waited for their own announcer to get the object first, 163 minutes at the median; then
+they had it at once.
+
+Followed along the strip, one bulletin reached five cells in the 20 minutes after it left its
+source's cell, and then stopped twice, for 45 to 95 minutes. At 64 minutes after publication the
+announcer at 13.4 km held it, and the followers of its cell that could carry it on took on no relay
+for 95 minutes: the announcers to the west asked for it only from 112 minutes on, at 10.4 and
+11.9 km, beyond band L's reach of those followers (§3), and nobody in between heard both. When a
+node at 13.1 km became an announcer, at 158 minutes, its first ask was heard, taken on and met
+within two minutes, and the bulletin moved on. That is §32.2's gap, and it closes only as the
+cells form again, a relay leaving to lead a cell of its own (§32.3), at the pace of leaving
+(PROTOCOL.md §5.2). The hops are not slow; band L is slow where its cells do not reach each other,
+presumably on the 100 km strip too, which was not traced. How a gap can be bridged sooner is open.
