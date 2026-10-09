@@ -305,7 +305,8 @@ impl Election {
                     self.low_count = 0;
                     self.challenges += 1;
                     self.lost_rssi = None;
-                    let until = now + rng.below(self.p.t_jitter_ms.max(1));
+                    let wait = if self.p.challenge_in_order { self.wait_for(my_score, my_caps, rng) } else { rng.below(self.p.t_jitter_ms.max(1)) };
+                    let until = now + wait;
                     self.state = State::Candidate { until };
                     return Some(Transition::BecameCandidate);
                 }
@@ -474,10 +475,11 @@ mod tests {
             assert_eq!(e.tick(2000 + i, 100, 0, &mut rng), None);
             e.on_beacon(3000 + i, &beacon(NodeId(7), 100, 0), -80, false, NodeId(5), 100, CAP_MAINS);
         }
-        assert_eq!(e.tick(4000, 100, 0, &mut rng), Some(Transition::BecameCandidate));
-        // The incumbent keeps beaconing; the challenger stays a candidate and steps up.
+        assert_eq!(e.tick(4000, 100, CAP_MAINS, &mut rng), Some(Transition::BecameCandidate));
+        // The incumbent keeps beaconing; the challenger stays a candidate and steps up, in the
+        // order of every candidate: within the span of its capability band.
         assert_eq!(e.on_beacon(5000, &beacon(NodeId(7), 100, 0), -80, false, NodeId(5), 100, CAP_MAINS), None);
-        assert_eq!(e.tick(4000 + p.t_jitter_ms, 100, 0, &mut rng), Some(Transition::BecameAnnouncer));
+        assert_eq!(e.tick(4000 + p.t_base_ms + p.t_jitter_ms, 100, CAP_MAINS, &mut rng), Some(Transition::BecameAnnouncer));
     }
 
     #[test]

@@ -3655,6 +3655,8 @@ impl Node {
         };
         // End of our upload phase, if we transmit in one: the phase is our turn to speak.
         let mut phase_end: Option<Millis> = None;
+        // The burst of this transmission: a cycle of the turns or phases it waited for, if any.
+        let mut cycle_burst: u32 = 0;
         if let Some((colour, colours)) = content_colour {
             // The meeting dwell is control plane only, and announcers that share a channel take
             // turns with their carousels.
@@ -3696,7 +3698,11 @@ impl Node {
                         return;
                     }
                     // A cycle's budget is spent inside the phase.
-                    self.carriers[i].fatsoen.set_burst_at_least(cycle as u32);
+                    if self.cfg.params.burst_per_turn {
+                        cycle_burst = cycle_burst.max(cycle as u32);
+                    } else {
+                        self.carriers[i].fatsoen.set_burst_at_least(cycle as u32);
+                    }
                     phase_end = Some(self.local_at(from + width));
                 }
             }
@@ -3730,7 +3736,11 @@ impl Node {
             let (_, slots) = self.slot_of(i, colour, colours);
             if turns && slots > 1 {
                 let cycle = slots * self.cfg.params.t_slot_ms.max(1);
-                self.carriers[i].fatsoen.set_burst_at_least(cycle as u32);
+                if self.cfg.params.burst_per_turn {
+                    cycle_burst = cycle_burst.max(cycle as u32);
+                } else {
+                    self.carriers[i].fatsoen.set_burst_at_least(cycle as u32);
+                }
             }
         }
         // Fresh content (first copy into the cell) has right of way over repetition.
@@ -3809,6 +3819,9 @@ impl Node {
                         return;
                     }
                 }
+            }
+            if self.cfg.params.burst_per_turn {
+                self.carriers[i].fatsoen.burst_for(cycle_burst);
             }
             if let Err(w) = self.carriers[i].fatsoen.take_airtime(now, airtime, budget, fresh) {
                 // Plus a random part of it (§5.4): the budget keeps accruing meanwhile, so the rate

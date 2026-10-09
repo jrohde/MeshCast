@@ -20,11 +20,15 @@ pub struct ElectionParams {
     /// Two announcers that stepped up in the same election settle a near-tie by id, near or far
     /// (PROTOCOL.md §5.2). Off: only one in its own cell yields; kept to measure against.
     pub fresh_tie: bool,
+    /// A challenger steps up in the order of every candidate, by capability and score, with chance
+    /// for the rest (PROTOCOL.md §5.2). Off: within the election jitter by chance alone on a carrier
+    /// that does not hop, as before FEASIBILITY.md §40; kept to measure against.
+    pub challenge_in_order: bool,
 }
 
 impl Default for ElectionParams {
     fn default() -> Self {
-        ElectionParams { t_beacon_ms: 60_000, n_miss: 3, t_base_ms: 60_000, t_jitter_ms: 10_000, hysteresis: SCORE_MAX / 10, rssi_hysteresis_db: 6, challenge_beacons: 3, order_by_lost: true, fresh_tie: true }
+        ElectionParams { t_beacon_ms: 60_000, n_miss: 3, t_base_ms: 60_000, t_jitter_ms: 10_000, hysteresis: SCORE_MAX / 10, rssi_hysteresis_db: 6, challenge_beacons: 3, order_by_lost: true, fresh_tie: true, challenge_in_order: true }
     }
 }
 
@@ -89,10 +93,9 @@ pub struct Params {
     pub t_want_min_ms: Millis,
     /// How long a WANT stays valid at the announcer.
     pub want_ttl_ms: Millis,
-    /// Follower may NACK when at least this fraction (permille) of an object is present ...
+    /// A node, follower or announcer, may NACK an object once at least this fraction (permille) of
+    /// it is present, or all of it but one symbol, and it has seen no progress for `t_nack_stall_ms`.
     pub nack_threshold_permille: u16,
-    /// ... and no progress for this many carousel rounds.
-    pub nack_rounds: u16,
     /// Dwell time per channel on frequency-agile carriers.
     pub dwell_ms: Millis,
     /// Score recomputation interval.
@@ -117,14 +120,16 @@ pub struct Params {
     pub t_nack_stall_ms: Millis,
     /// Minimum interval between two gossip rounds of the same node.
     pub t_gossip_min_ms: Millis,
-    /// Random delay before any control/metadata frame on a bulk carrier, so that nodes whose
-    /// CCA cannot see each other (edge of range) do not transmit in lock-step.
+    /// Random delay before any control/metadata frame but a beacon, on every carrier, so that nodes
+    /// whose CCA cannot see each other (edge of range) do not transmit in lock-step.
     pub tx_jitter_ms: Millis,
     /// On frequency-agile carriers, every `meet_every`-th dwell is a meeting dwell on a common
     /// channel where all announcers and holders can hear each other.
     pub meet_every: u64,
-    /// Holders wait a random time up to this before uploading to an announcer that asked, and
-    /// give up if they hear someone else uploading the same object meanwhile.
+    /// `T_suppress`: a holder answering a NACK that names no answerer, and that was not granted the
+    /// object, waits this times the share of its neighbours it hears better than the asker, plus up
+    /// to a tenth of this at random, and drops the answer if it hears the object sent meanwhile.
+    /// Granted uploads start at once (PROTOCOL.md §8, repair wait).
     pub upload_suppress_ms: Millis,
     /// Time slot on single-channel carriers when announcers in conflict take turns.
     pub t_slot_ms: Millis,
@@ -157,8 +162,8 @@ pub struct Params {
     /// An announcer tells its time on the control carrier in every window, wherever nodes listen there
     /// only in the window (PROTOCOL.md §6). Off: never; kept to measure against.
     pub tells_time: bool,
-    /// How far a frame keeps from the edges of a hop dwell and of the control window: room for
-    /// clocks a little apart (PROTOCOL.md §6).
+    /// How far a frame keeps from the edges of a hop dwell, of the control window and of a turn:
+    /// room for clocks a little apart (PROTOCOL.md §5.3, §6).
     pub t_guard_ms: Millis,
     /// Each control period's window sits where the period's number puts it, so that groups whose
     /// shared times differ meet in a window now and then (PROTOCOL.md §3, §6). Off: in the middle of
@@ -168,7 +173,7 @@ pub struct Params {
     /// asked for within `cell_keep_ms` or announced, and those it follows (PROTOCOL.md §2). Off: every
     /// channel it hears of, as before; kept to measure against.
     pub cell_menu: bool,
-    /// How long a follower's ask keeps a channel served (PROTOCOL.md §2, §8).
+    /// How long a follower's ask or announcement keeps a channel served (PROTOCOL.md §2, §8).
     pub cell_keep_ms: Millis,
     /// An announcer whose list does not fit one frame announces, in the round after it adopted a
     /// root and never two rounds running, the roots it adopted last instead of the next stretch in
@@ -204,6 +209,10 @@ pub struct Params {
     /// A turn takes only a frame that fits in it, `T_guard` clear of its edges. Off: any frame
     /// that starts in it, as before FEASIBILITY.md §38; kept to measure against.
     pub turn_guard: bool,
+    /// The token-bucket burst is raised to a cycle of turns or upload phases only for a transmission
+    /// in one, as ETHERFATSOEN.md (`BURST`) says. Off: raised for good once a node took a turn or a
+    /// phase, as before FEASIBILITY.md §40; kept to measure against.
+    pub burst_per_turn: bool,
     /// An announcer marks what it relays as asked for listeners (PROTOCOL.md §4). Off: only what it
     /// or its followers listen to; kept to measure against.
     pub mark_relayed: bool,
@@ -229,11 +238,12 @@ pub struct Params {
     /// follow nor serve is of use once it names another cell's ask, not when it arrives, and gives
     /// way first; then relays another cell's announcer lists as held; then the least recently used
     /// (PROTOCOL.md §4).
-    /// Off: arriving is use and the least recently used goes first, as before.
+    /// Off: arriving is use and the least recently used goes first, as before; kept to measure
+    /// against.
     pub evict_by_evidence: bool,
     /// Bytes a node keeps of what it does not listen to, for others (PROTOCOL.md §4, `carry_budget`):
-    /// what has not been of use for `want_ttl` gives way, least recently used first, and a full
-    /// budget takes on no more relays. `u64::MAX`: no limit; 0: no relays.
+    /// what has not been of use for `want_ttl` gives way, in the order of `evict_by_evidence`, and a
+    /// full budget takes on no more relays. `u64::MAX`: no limit; 0: no relays.
     pub carry_budget_bytes: u64,
 }
 
@@ -246,7 +256,6 @@ impl Default for Params {
             t_want_min_ms: 600_000,
             want_ttl_ms: 3_600_000,
             nack_threshold_permille: 800,
-            nack_rounds: 2,
             dwell_ms: 20_000,
             t_score_ms: 60_000,
             neighbor_ttl_ms: 3_600_000,
@@ -286,6 +295,7 @@ impl Default for Params {
             slots_under_cap: true,
             upload_slots: false,
             turn_guard: true,
+            burst_per_turn: true,
             mark_relayed: true,
             proactive: false,
             relay_unfollowed: true,

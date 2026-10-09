@@ -1128,6 +1128,9 @@ fn params() -> Params {
     if let Ok(v) = std::env::var("MESHCAST_TURN_GUARD") {
         p.turn_guard = v != "0";
     }
+    if let Ok(v) = std::env::var("MESHCAST_BURST_PER_TURN") {
+        p.burst_per_turn = v != "0";
+    }
     if let Ok(v) = std::env::var("MESHCAST_UPLOAD_SLOTS") {
         p.upload_slots = v != "0";
     }
@@ -1139,6 +1142,9 @@ fn params() -> Params {
     }
     if let Ok(v) = std::env::var("MESHCAST_FRESH_TIE") {
         p.election.fresh_tie = v != "0";
+    }
+    if let Ok(v) = std::env::var("MESHCAST_CHALLENGE_IN_ORDER") {
+        p.election.challenge_in_order = v != "0";
     }
     if let Ok(v) = std::env::var("MESHCAST_MARK_RELAYED") {
         p.mark_relayed = v != "0";
