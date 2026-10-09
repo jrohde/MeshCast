@@ -4993,3 +4993,97 @@ without the wall (`--wall-db 0`) end with such a pair in one world (seed 14); wi
 (seeds 4, 5 and 14). The third, and the pairs of 85 s, 100 s and 65 minutes, were not traced.
 
 The smoke test `a_cell_split_by_a_wall_heals_when_it_comes_down` runs case (a) at 20 nodes.
+
+## 42. The national scenario, extrapolated
+
+The fifth definition of done asks for 5,000 sources and 100,000 receivers across a country, at
+least as an extrapolation from per-cell results. Nothing here was simulated at that scale. What
+follows puts together measurements made earlier in this document, each cited where it is used;
+every step that is an assumption or an inference says so. The country is the Netherlands: 33,481
+km² of land, and its national grid spans 280 km west to east and 320 km south to north
+(https://en.wikipedia.org/wiki/Geography_of_the_Netherlands, Statistics and the RD coordinate
+system).
+
+### 42.1 Density and cells
+
+Spread evenly over the land, 105,000 nodes are 3.1 per km²; within the rough ranges of §3 a node
+then has about 72 others in reach in band O (2.7 km), 10 in band L (1 km) and 5 over ESP-NOW
+(0.7 km). Real listeners crowd into towns, which makes them denser where most of them are: the
+town of §36.3 is 6.7 nodes per km². That a carrier joins the town does not show that it joins an
+even spread at 3.1 per km², which was not simulated: ESP-NOW left the town in one to four parts
+(§36.3) and one world of eight at ten nodes per km² in two (§39.1), and band L split a 500 m strip
+at the town's density (§32.1).
+
+Receivers themselves cost little: from ten nodes per km² to a thousand, band O, band L and
+ESP-NOW each delivered all that was asked, but for that one ESP-NOW world, and the median follower
+had everything 6 to 7 % later in band O, 14 to 52 % later in band L and up to 10 % later over
+ESP-NOW (§36.2, §39.1).
+
+At the end of seed 1's day in §38's band O town there were seven announcers (§38.3): on 30 km², a
+cell of about 4 km² and 29 nodes. The country then has thousands of cells; how many depends on
+where the listeners are, which this section does not model.
+
+### 42.2 What a cell can carry, and what it must
+
+A cell carries the union of what its listeners follow, whoever and however many they are
+(§39.2). In band O its announcer has 9 kbit/s of content after the duty cycle and the control
+reserve (§39.3), 97 MB a day; the floor for a load is the time it takes to pass that union once
+at that rate. In the band O town of §39.2, nine in ten follower-album pairs were complete after
+1.6 to 2.5 times the floor, from two sources to forty. For more than two sources a cell's union
+is an estimate, assuming cells of 29 nodes at every load (the seven cells of §38.3's day, which
+§39.2 did not record at each load) and the channels at least one of them follows when each
+follows a channel with probability 2/S. On that reading a band O cell delivers 39 to 59 MB a day:
+46 to 71 hours of SNAC music, or 88 to 135 of speech (§8: 0.84 and 0.44 MB an hour).
+
+What it must carry depends on what its listeners follow, which no measurement here gives. As an
+assumption only: if each of the 5,000 sources published an hour of music a day, the country would
+publish 5,000 hours a day, and one band O cell could carry about 1 % of it. A cell of 29
+listeners who follow three channels each carries up to 87 hours a day, more than it can unless
+they share interests; at ten channels each, up to 290 hours, four to six times what it can carry.
+§39 measured one batch published at once, up to about 13 MB a cell, cleared within the day:
+delivery time grew with the union, and somewhat faster than it at forty sources. A lasting load
+above what a cell carries in a day was not simulated; by inference its backlog then grows every
+day, unless what it carries leaves its providers' windows (a series lists only its window,
+PROTOCOL.md §2).
+Content that many follow is carried once per cell for all of them; content that few follow costs
+a cell as much, for fewer listeners. That is the limit §5 foresaw, as a number: a band O cell
+carries some fifty hours of music a day of what its listeners follow, whatever the country
+publishes.
+
+### 42.3 How far, and how fast
+
+By radio alone a publication spread about a kilometre an hour along a band L strip (§32.2): its
+holders spanned 3.7 km after an hour and 18 km after 23 hours, 0.8 km an hour. Assuming that pace
+holds over ten times the distance measured, the length of the country takes twelve to seventeen
+days. It was measured in band L only, with 22 kB bulletins, and content stops where no node
+between two cells hears both announcers, to relay, upload or visit (§32.2); band O, with nearly
+three times the reach (§3), was not measured this way. In the simulator a station with internet
+has what every source publishes as it is published (§36.3, `MESHCAST_IP_STATIONS`), which assumes
+every source reaches the internet; the radio then carries it only the last cells: in the town with
+internet at its three stations, nine in ten follower-album pairs were complete after 1.0 to 1.2
+hours on every carrier. Across a country, content from a source with internet goes as fast as
+internet reaches stations near its listeners; content from one without first goes by radio, at
+about a kilometre an hour, to a station that has it. That is delay-tolerant delivery, as designed;
+it is not national radio.
+
+### 42.4 The menu
+
+Every node keeps the menu that comes by: the roots and collection manifests of channels it does
+not follow, collected without asking and within its carry budget, the first thing to give way when
+the budget is full (§27, PROTOCOL.md §2 and §4). That does not bring every root to every node: in a
+band O strip of 30 km by 500 m, with 100 channels nobody followed besides the 24 that were, nodes
+held the newest root of 62 % of all channels (§35). The largest network measured
+had 24 followed channels and up to 1,000 more that nobody followed, publishing weekly: band L
+delivered 97.8 % of the bulletins in their period, against 99.9 % without them (§31.5). Five
+thousand channels were not measured; how a menu of that size stays small is PROTOCOL.md §9,
+question 14, still open.
+
+### 42.5 Where the fifth definition of done stands
+
+Extrapolated, not simulated. Receivers cost little at any density measured. A cell carries what
+its listeners follow, a band O cell some fifty hours of music a day; one batch above that took
+longer in proportion to its size, and a lasting load above it was not simulated. Across the
+country content travels as fast as internet reaches stations near its listeners, and by radio
+alone, as measured in band L, about a kilometre an hour. What would change the picture most, and
+was not measured: how listeners' interests overlap within a cell, how fast band O carries content
+from cell to cell, and a menu of 5,000 channels.
