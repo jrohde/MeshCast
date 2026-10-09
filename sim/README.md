@@ -39,6 +39,9 @@ as before `docs/FEASIBILITY.md` §38. `MESHCAST_T_SLOT_MS` sets `T_slot`.
 `MESHCAST_BUSY_FOR_US=0` makes a follower leave an announcer that has named no uploader in
 `T_excursion` for an object it wants, however busy it is getting the rest, as before
 `docs/FEASIBILITY.md` §39.
+`MESHCAST_BURST_PER_TURN=0` keeps a token-bucket burst raised for a turn or an upload phase
+for good, and `MESHCAST_CHALLENGE_IN_ORDER=0` lets a challenger on a carrier that does not hop
+step up within the election jitter by chance, both as before `docs/FEASIBILITY.md` §40.
 
 A `cell` report also gives the busiest 10 s of the bulk carrier at each node, measured at every
 frame a node hears (the occupancy line above it samples every ten minutes); how many parts the

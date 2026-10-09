@@ -23,11 +23,14 @@ pub struct Fatsoen {
     pub windows_over: [u64; 3],
     /// Diagnostic: the highest smoothed occupancy and foreign occupancy any window closed with.
     pub occ_max: [u16; 2],
+    /// The burst of the transmission at hand, when it is raised for a turn or a phase (see
+    /// `burst_for`); 0 when it is not.
+    burst_now_ms: u32,
 }
 
 impl Fatsoen {
     pub fn new(p: FatsoenParams, now: Millis) -> Self {
-        Fatsoen { p, occ_ewma: 0, foreign_ewma: 0, rate: p.rate_max / 2, attempt: 0, backoff_until: 0, tokens_us: p.burst_ms as i64 * 1000, last_refill: now, last_window: now, windows: 0, windows_over: [0; 3], occ_max: [0; 2] }
+        Fatsoen { p, occ_ewma: 0, foreign_ewma: 0, rate: p.rate_max / 2, attempt: 0, backoff_until: 0, tokens_us: p.burst_ms as i64 * 1000, last_refill: now, last_window: now, windows: 0, windows_over: [0; 3], occ_max: [0; 2], burst_now_ms: 0 }
     }
 
     /// Feed the measured occupancy: `occ_total` is the fraction (permille) of the last window
@@ -94,7 +97,7 @@ impl Fatsoen {
         self.last_refill = now;
         // refill in µs: elapsed_ms × 1000 × per_mille2 / 1e6
         self.tokens_us += elapsed * per_mille2 / 1000;
-        let cap = self.p.burst_ms as i64 * 1000;
+        let cap = self.p.burst_ms.max(self.burst_now_ms) as i64 * 1000;
         if self.tokens_us > cap {
             self.tokens_us = cap;
         }
@@ -126,8 +129,15 @@ impl Fatsoen {
         self.attempt = 0;
     }
 
-    /// Raise the token-bucket burst (in milliseconds of airtime) so that budget accrued while
-    /// waiting for our turn can be spent in our slot. Never lowers it.
+    /// The burst for the transmission at hand: one cycle of the turns or phases it waited for, so
+    /// that what it saved while waiting can be spent in its turn, or the configured burst (0)
+    /// outside one (ETHERFATSOEN.md, `BURST`). Accrued tokens beyond it are dropped.
+    pub fn burst_for(&mut self, cycle_ms: u32) {
+        self.burst_now_ms = cycle_ms;
+    }
+
+    /// Raise the configured token-bucket burst for good, as before `burst_for` (kept to measure
+    /// against, `Params::burst_per_turn` off). Never lowers it.
     pub fn set_burst_at_least(&mut self, ms: u32) {
         if ms > self.p.burst_ms {
             self.p.burst_ms = ms;
