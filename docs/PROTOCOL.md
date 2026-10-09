@@ -904,7 +904,10 @@ that hear each other. Each kind of pair has its own way across:
   enough (below), a follower that hears it and can name the object, because a
   collection manifest or root it holds names it (its own, or the menu it keeps, §2), wants the
   piece or cover itself, fetches it in its own cell like anything it wants, keeps it, and answers
-  the next ask with an offer. A set it cannot read names a collection manifest of a channel it
+  the next ask with an offer. It asks its own announcer for it soon, as for what a new manifest
+  names (above): a relay has never asked for it, and asked on its cadence of `T_want_min` every
+  hop of the chain waited for it; along a band L strip 100 km long a fifth more of the
+  bulletins arrived in their period, 23.6 % against 19.7 % (FEASIBILITY.md §44). A set it cannot read names a collection manifest of a channel it
   does not follow: it fetches that manifest first, from its own announcer, which holds the
   manifests of every channel it hears of (§2) and answers only for names it knows, and relays
   the pieces once it can name them; they have waited as long as the asks for the manifest. It
