@@ -5121,3 +5121,61 @@ quarter to two thirds of what they joined, about half on average over the worlds
 So the speed §42.3 took for "radio alone" is band L's. In band O, assuming its pace holds over
 three times the distance measured and the country joins as the strip did, content crosses the
 length of the country (280 to 320 km, §42) in about half a day.
+
+## 44. Where band L loses its time between cells
+
+§43 found band L's front moving half a kilometre to under two an hour, against band O's 25. One
+world of the 30 km strip (seed 2), joined whole by its carrier, was traced publication by
+publication (`MESHCAST_TRACE_SPREAD=1 MESHCAST_TRACE_GRANTS=1`): when each node that ever
+announced held each bulletin, by its distance from the source.
+
+| Minutes until a node that announced held a bulletin, median (quartiles) | 0 to 2 km | 2 to 5 | 5 to 10 | 10 to 15 | 15 km and more |
+|---|---|---|---|---|---|
+| Band O | 1.6 (1.6 to 13.6) | 18.5 | 26.3 | 31.3 | 39.7 |
+| Band L | 38.8 (15.4 to 78.7) | 58.8 | 125.5 | 197.2 | 277.1 |
+
+Band L lost time at the source and at every hop. One bulletin, published at 2 h by a source that
+announced, with three followers: from ten minutes on, announcers all along the strip asked for it,
+followers in their cells took on relaying it, and for more than two and a half hours nobody but
+its source held it. An announcer serves its followers' asks, and other announcers' asks it does
+not answer (PROTOCOL.md §4); none of its own followers asked for it.
+
+### 44.1 Tried: a source that announces passes what it publishes
+
+A following source uploads what it publishes to its announcer, and the whole cell hears it. So an
+announcing source passed its new publication once, unasked, as if it had asked for it itself. It
+did so within a minute instead of two and a half hours, and it was still the only holder five
+hours later: nobody keeps a pass it did not ask for (§17), and the relays took the ask on only
+later. The 30 km strip delivered 80.1 % of the bulletins in their period in band L,
+against 80.5 %, and band O 98.9 % against 99.1 %. Not taken.
+
+### 44.2 A relay asks soon
+
+A follower that takes on relaying an object asks its own announcer for it on its usual cadence,
+`T_want_min`: up to ten minutes at every hop of the chain. What a manifest a follower just adopted
+names it asks for soon, at most every `T_gossip_min`, because it has never asked for it
+(PROTOCOL.md §4); a relay has never asked for what it took on either. Asked soon, after a random
+wait of up to `T_offer`, on the strips of §43, eight worlds each:
+
+| | Before | A relay asks soon |
+|---|---|---|
+| Band L, 30 km strip: delivered in the period | 80.5 % | 81.3 % |
+| ... front of a bulletin after 1 / 4 h, median | 1.5 / 7.2 km | 2.1 / 9.0 km |
+| Band L, 100 km strip: delivered in the period | 19.7 % | 23.6 %, +3.9 points (se 0.9), more in every world |
+| ... front after 23 h, median | 11.5 km | 13.9 km |
+| Band O, 30 km / 100 km strip: delivered | 99.1 % / 97.6 % | 99.1 % / 97.5 %, 0.0 points (se 0.6) on the longer |
+
+And against the whole of the validation, world for world:
+
+| | Before | A relay asks soon |
+|---|---|---|
+| Matrix (§9), size sweep (§13.1), one or five lures (§12) | | identical |
+| §30.1 without quiet channels, 16 worlds | 99.9 % band L, 99.7 % band O | −0.03 points (se 0.02) in band L, the same in band O; +0.8 and +1.4 % frames |
+| Valley strip (§32), 24 worlds | 82.8 % band L, 98.9 % band O | +0.52 points (se 0.44), the asks met sooner (median 123 → 103 minutes, 90th percentile 521 → 442), +2.7 % frames (se 0.5); −0.27 points (se 0.20) in band O, +1.2 % frames |
+| 400 quiet channels (§30.1), band L, 24 worlds | 99.3 % | −0.13 points (se 0.14) |
+| Churn and the living network, with an attacker, a lure or a spoofer | | the same in band O; in band L's churn fewer role changes (at most 259 in a world instead of 321) and the slowest newcomer caught up in 17 minutes instead of 26; the worst 90th-percentile bulletin of the living network 12.0 minutes instead of 10.8, with a spoofer 13.8 instead of 10.8; a few uploads more or fewer |
+
+It is taken (PROTOCOL.md §4). Band L still crosses cells at about a kilometre an hour, and on
+the 100 km strip delivers about half of what its carrier joins: the hop itself, a relay in one
+cell that hears the next cell's ask, fetches the object, and offers it in the rendezvous, remains
+the slow part, and is open.
