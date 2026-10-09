@@ -8,12 +8,13 @@ feeling. Phases may overlap; the order of the definitions of done may not.
 **Status: running.** `core` and `sim` answered the definitions of done for a single bulk carrier
 per node first in [FEASIBILITY.md](FEASIBILITY.md) §7 (540 kB tracks, the protocol then; it also
 lists the five protocol defects the simulator found first) and again in §36, at the codec's 42 kB
-with the protocol as it now is. §36.6 says where each stands: 2 is answered; 1 for band O only;
-3 in part: what collisions cost in wanted symbols, and what broke them, is measured (§38), the
-occupancy at which delivery time doubles is not; 4 in part: since §37 two announcers that hear
-each other no longer persist after a failover unless one shuns the other, but two hidden from
-each other whose followers hear both still can, and partition and merge are not simulated; 5 is
-not yet extrapolated; 6 in part. Questions the simulator answers best go on alongside Phase 1.
+with the protocol as it now is. §36.6 says where each stands, and §39.5 for 1 and 3: 1, 2 and 3
+are answered (1 for every bulk carrier but LoRa; 3 with no occupancy at which delivery time
+doubles: it grows with what each cell carries once its airtime is full, §39); 4 in part: since
+§37 two announcers that hear each other no longer persist after a failover unless one shuns the
+other, but two hidden from each other whose followers hear both still can, and partition and
+merge are not simulated; 5 is not yet extrapolated; 6 in part. Questions the simulator answers
+best go on alongside Phase 1.
 
 **Goal:** prove or disprove the design on a laptop before touching hardware, and produce the
 starting parameters for EtherFatsoen and the election.

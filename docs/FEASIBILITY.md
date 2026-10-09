@@ -4650,3 +4650,201 @@ and 38.4 % instead of 47.1 % at 540 kB.
   them hear both.
 - **Midsize content in midO.** In the size sweep's band O neighbourhood everything arrived 1 to 5
   minutes later from 42 to 211 kB, though the start at 90 % came sooner.
+
+## 39. Load and density
+
+§36.6 left two definitions of done open in part. The sweep over density (1) ran in band O only.
+How loss and delivery time grow with load (3) was not measured, nor was the smoothed occupancy
+the gate acts on: only the busiest 10 s were. The simulator now counts every window a node's gate
+closes on the bulk carrier: whether its smoothed occupancy was above 30 % or 50 % of all energy,
+or above 30 % foreign, and the highest it reached (`cell` reports the gate's smoothed occupancy).
+For the wanted symbols nodes lose from others, it also counts whether what broke them was a
+transmitter their sender could hear.
+
+### 39.1 One cell, by density, on band L and ESP-NOW
+
+`meshcast-sim cell --nodes N --area-km2 1 --stations 1 --sources 1 --tracks 3 --track-kb S
+--hours 8 --bulk B --seeds 8` (`--seeds 4` at 1000 nodes), as in §36.2; announcers at the end
+from the same command with seed 1:
+
+| | Band L, 10 per km² | 100 | 1000 | ESP-NOW, 10 per km² | 100 | 1000 |
+|---|---|---|---|---|---|---|
+| 42 kB: the median follower has all three tracks, minutes | 8.7 | 8.2 | 9.9 | 7 (59 in one world) | 8.5 | 7.7 |
+| ... receptions lost to collisions (worst world) | 0.1 % (0.2) | 3.0 % (5.3) | 24.4 % (31.0) | 0.2 % (0.9) | 1.1 % (1.8) | 14.0 % (16.9) |
+| ... the busiest 10 s at the typical node (at the busiest, worst world) | 30 % (64) | 29 % (76) | 39 % (58) | 46 % (70) | 48 % (95) | 62 % (85) |
+| 540 kB: all three tracks, minutes | 24.8 | 29.9 | 37.7 | 14 to 20 (67 in one world) | 23.6 | 26.0 |
+| ... receptions lost to collisions (worst world) | 1.2 % (8.8) | 2.4 % (5.0) | 18.9 % (22.2) | 1.1 % (5.6) | 1.6 % (2.9) | 10.7 % (13.1) |
+| ... the busiest 10 s | 30 % (77) | 33 % (76) | 56 % (78) | 64 % (100) | 99 % (99) | 99 % (100) |
+| Announcers at the end, seed 1 | 2 | 3 | 5 | 3 | 5 | 9 (8 at 540 kB) |
+
+At ten nodes per square kilometre ESP-NOW's source was cut off from every follower in one world
+of eight: the carrier joined that world into two parts, and none of them delivered anything. The
+other seven are in the table. Everything else was delivered at every density, so the volume
+delivered is the demand. It is the same as band O's in §36.2: 16 MB an hour at a thousand nodes
+at 42 kB, and 207 MB at 540 kB. But band L carries it with five announcers in the square
+kilometre and ESP-NOW with eight or nine where band O needs one. At 25 mW and at 2.4 GHz a cell
+reaches less far.
+
+Receivers cost little here too, if more than in band O, where a thousand nodes had everything 6
+to 7 % later than ten. From ten nodes to a thousand the median follower had everything 14 %
+later in band L at 42 kB and 52 % later at 540 kB. Over ESP-NOW it was no later at 42 kB and 10 %
+later at 540 kB, measured from a hundred, where every world is joined. At a thousand nodes
+collisions took a quarter of band L's receptions and a seventh of ESP-NOW's. Nearly all of them
+were gossip (92 % and 94 %), and most of all collisions came in the meeting dwell, where the
+followers of every cell in reach meet: in seed 1 at 42 kB, 5.9 million of 7.7 million in band L
+and 2.7 million of 3.8 million over ESP-NOW. Of what followers wanted from their own announcer,
+0.0 and 0.2 % was lost.
+
+### 39.2 Load: more channels, the same demand
+
+A cell carries what its followers follow, all of it. To load the network without asking more of
+any listener, the town of §36.3 was run with S sources of ten 42 kB tracks each and every node
+following each channel with probability 2/S: about two channels each, whatever S is. A source's
+ten tracks are an album, as in §36.3. `meshcast-sim cell --nodes 200 --area-km2 30 --stations 3
+--sources S --follow-fraction F --tracks 10 --track-kb 42 --hours 24 --bulk B --seeds 8`, and the
+same in one cell of a hundred nodes on 1 km² with one station:
+
+| Album at half / 90 % of follower-album pairs, minutes | S = 2 | 5 | 10 | 20 | 40 |
+|---|---|---|---|---|---|
+| One cell, band O | 11 / 12 | 12 / 12 | 19 / 21 | 55 / 61 | 114 / 119 |
+| Town, band O | 21 / 25 | 41 / 56 | 76 / 104 | 188 / 246 | 412 / 492 |
+| Town, band L | 32 / 37 | 51 / 62 | 85 / 108 | 142 / 206 | 230 / 372 |
+| Town, ESP-NOW | 50 / 73 | 77 / 128 | 115 / 184 | 180 / 292 | 311 / 518 |
+
+| Town | S = 2 | 5 | 10 | 20 | 40 |
+|---|---|---|---|---|---|
+| Band O: the busiest 10 s at the typical node | 99 % | 99 % | 100 % | 100 % | 100 % |
+| ... gate's smoothed occupancy above 30 %, share of windows at the typical node (worst) | 0.7 % (3.9) | 2.5 % (12.2) | 6.1 % (24.9) | 17.7 % (41.9) | 35.7 % (65.8) |
+| ... above 50 % | 0 (2.7) | 0.3 % (9.5) | 0.9 % (18.8) | 3.4 % (30.5) | 6.4 % (46.1) |
+| ... wanted symbols lost: from the own announcer / from others | 4.5 / 19.6 % | 6.6 / 26.9 % | 9.1 / 30.7 % | 14.8 / 35.4 % | 18.9 / 40.2 % |
+| ... frames per source, thousands | 50 | 43 | 43 | 56 | 54 |
+| ... role changes a day | 505 | 690 | 1,019 | 2,832 | 6,066 |
+| Band L: the busiest 10 s | 38 % | 42 % | 47 % | 52 % | 55 % |
+| ... smoothed above 30 %, typical node (worst) | 0 (0.3) | 0 (0.3) | 0 (0.8) | 0 (1.3) | 0.1 % (2.0) |
+| ... wanted lost, own / others | 1.0 / 5.1 % | 1.3 / 4.1 % | 2.8 / 5.2 % | 3.3 / 5.3 % | 3.7 / 5.3 % |
+| ... frames per source, thousands | 216 | 164 | 165 | 161 | 151 |
+| ESP-NOW: the busiest 10 s | 80 % | 97 % | 99 % | 99 % | 99 % |
+| ... smoothed above 30 %, typical node (worst) | 0 (0.2) | 0 (0.4) | 0 (0.7) | 0 (0.9) | 0 (1.3) |
+| ... wanted lost, own / others | 2.0 / 4.8 % | 3.0 / 4.7 % | 5.1 / 5.1 % | 5.4 / 5.2 % | 4.7 / 4.9 % |
+| ... delivered (what the carrier joined) | 99.2 % (99.2) | 98.9 % (99.3) | 99.1 % (99.4) | 98.2 % (99.5) | 98.1 % (99.1) |
+
+Foreign energy, as the gate counts it, the airtime of frames it could not decode, was above 30 %
+in at most 1.6 % of the windows of any node in any world.
+
+### 39.3 What load costs
+
+**Nothing collapses.** From two sources to forty the frames per source stayed within a third of
+their least in the band O town, and fell in one band O cell, in band L and over ESP-NOW, where
+more load fills airtime that light load left idle between rounds. Delivery time grows with what a
+cell must carry, the union of what its followers follow, and, once the cell's airtime is full, in
+proportion to it. Against two sources it doubled in one band O cell between ten and twenty
+sources, after the gate's smoothed occupancy had reached its 50 % (at its highest at the typical
+node, 51 % at five sources and 59 % at ten); in the band O town by five; in band L and over
+ESP-NOW between five and ten. So no occupancy marks where delivery time doubles. In band L it
+doubled while the busiest 10 s stayed under half and the smoothed occupancy at the typical node
+almost never passed 30 %: what binds there is each announcer's legal airtime and its rounds of
+asking and granting, not the channel. In band O a cell's airtime is its legal budget. At two
+sources an announcer in the town has two albums to pass, 840 kB, which at the 9 kbit/s the duty
+cycle leaves content after the control reserve (100 kbit/s × 10 % × 90 %, PROTOCOL.md §8) take
+at least 12 minutes; half the follower-album pairs were complete after 21.
+
+One cost load has over ESP-NOW: from five sources on, delivery fell short of what the carrier
+joins, by up to 5.6 points in one world (92.9 % of 98.5 at twenty sources). At two sources it
+delivered what the carrier joined, as in the town of §36.3 (within 0.1 points there).
+
+**Collisions grow with load most in band O.** What followers lost of their own announcer's
+symbols rose from 4.5 to 18.9 % in band O, and of what others sent them from 20 to 40 %. Every one
+of those losses in band O came from a transmitter the sender could not hear. In band L losses
+from the own announcer grew from 1.0 to 3.7 %, over ESP-NOW from 2.0 to at most 5.4 %, and from
+others they stayed between 4 and 5.3 %; 84 to 94 % of what others lost came from transmitters
+their sender could not hear. Carrier sensing does what it can, and what is left is hidden.
+
+**The 30 % target.** At the typical node the gate's smoothed occupancy stayed under 30 % in band L
+and over ESP-NOW at every load: above it in at most 0.1 % of the node's windows, and in at most
+0.9 % in the density runs of §39.1. The worst node of a world was above it in at most 2 % of its
+windows on average over the worlds, and in 6.9 % at most, in one band L world at forty sources.
+In the band O town the target holds only at light load, and not at every node even then: at two
+sources the typical node was above 30 % in 0.7 % of its windows and the worst in 2.1 to 6.6 %;
+at forty, the typical node a third of the time, and above the gate's own 50 % for MeshCast's
+traffic in 6 % (the worst node, nearly half). Each gate measures where its node sends. What a
+node between cells hears adds up from senders whose own gates may each measure less; that is the
+likeliest reading, not one traced here.
+
+**Followers leave busy announcers.** Role changes grew sixfold from ten sources to forty in the
+band O town, twofold in band L and threefold over ESP-NOW. Excursions grew from 2 a world at five
+sources to 1,586 at forty. That is §39.4.
+
+### 39.4 Busy is not lacking
+
+A follower leaves an announcer that has neither sent it, nor named an uploader for, something it
+wants within `T_excursion` (PROTOCOL.md §5.2): asking is not getting (§25). Under load a cell's
+queue is longer than that. In the band O town at twenty sources, half the follower-album pairs
+were complete after 196 minutes over sixteen worlds, and nodes changed role 2,949 times a day.
+With leaving for what an announcer has named no uploader for switched off, half were complete
+after 146.5 minutes (49.5 sooner, se 6.8), with 27 % fewer frames and 1,748 role changes. The
+followers had been leaving announcers that were getting what they wanted, only not this yet.
+
+The rule this asks for: an announcer that has named an uploader within `T_excursion` for anything
+its follower wants is busy, not lacking, and the follower leaves it only for what it lists and does
+not send. Sixteen worlds of the band O town at twenty sources, world for world against main:
+
+| | Album at half / 90 %, minutes | Playback start, median / 90 % | Frames | Role changes a day | Excursions a world |
+|---|---|---|---|---|---|
+| Main | 196 / 255 | 170 / 232 | 1,195,394 | 2,949 | 407 |
+| Busy is not lacking | 37.5 sooner (se 6.8) / 30.8 sooner (se 6.2) | 36.9 / 28.8 sooner (se 6.6 / 6.2) | −18 % | 2,029 | 280 |
+| No leaving for what is not named | 49.5 sooner (se 6.8) / 33.7 sooner (se 7.0) | 48.5 / 33.6 sooner (se 6.8 / 7.1) | −27 % | 1,748 | 239 |
+
+Leaving for what is not named stays, for the networks it was made for (§25). Two other forms did
+less, in the first eight worlds: the same rule for excursions too, so that a busy announcer's
+followers also stopped fetching elsewhere what it had named no uploader for, 16.9 minutes sooner
+at half (se 12.0) against 30.2 (se 10.1) for the rule alone; and `T_excursion` at 120 minutes
+instead of 40, 2.7 sooner (se 12.5).
+
+At other loads, eight worlds unless said:
+
+| | Album at half / 90 %, against main | Frames |
+|---|---|---|
+| Band O town, five sources | identical | identical |
+| ... ten sources | 2.0 sooner (se 1.1) / 4.0 later (se 2.4) | −6 % |
+| ... forty sources, sixteen worlds | 2.2 sooner (se 11.2) / 2.1 sooner (se 9.3) | the same |
+| Band L town, twenty sources | 8.9 sooner (se 3.2) / 8.6 sooner (se 3.5) | −3 %; role changes −138 (se 21) |
+| ESP-NOW town, twenty sources | 5.6 sooner (se 7.1) / 10.6 later (se 11.0) | −1 % |
+
+And against the whole of the validation, world for world:
+
+| | Main | Busy is not lacking |
+|---|---|---|
+| Matrix (§9), nine scenarios | | identical (band L town 27 frames fewer) |
+| Size sweep (§13.1), midL, 7 to 846 kB | | sooner at every size: everything 0.4 to 3.7 minutes, start at 90 % 0.3 to 2.3; 1.9 to 7.1 % fewer frames |
+| ... midO | | within 0.5 minutes and 0.4 % of frames |
+| §30.1 without quiet channels, 16 worlds | 99.9 % band L, 99.7 % band O | band L the same, role changes −15 (se 9); band O identical |
+| Valley strip (§32), 24 worlds | 82.2 % band L, 98.7 % band O | +0.5 points (se 0.3) / +0.03 (se 0.27) |
+| 400 quiet channels (§30.1), band L, 24 worlds | 99.3 % | +0.1 points (se 0.07) |
+| Churn and the living network, with an attacker, a lure or a spoofer | | identical |
+| One or five lures (§12) | 99.8 % / 98.5 % | identical with one; with five, one world of eight 0.17 points less |
+| Five lures that claim the highest score | 98.0 % | 97.9 %, −1 % frames |
+
+The cost §25 recorded for leaving for what is not named, in band L with large objects that take
+longer than `T_excursion` to cross the network, is partly paid back: at 846 kB in midL playback
+starts 1.7 minutes sooner on 7.1 % fewer frames. A false announcer now holds a follower, for what
+it does not list, as long as it names an uploader for one thing the follower wants every
+`T_excursion`, where before it had to for each; one that lists what it lacks, as the lures in the
+simulator do, is left as before (ABUSE.md).
+
+### 39.5 Where the definitions of done stand
+
+**1. Delivered volume by density**: answered for band O (§36.2), band L and ESP-NOW (§39.1). Each
+of the three delivers all that is asked at ten, a hundred and a thousand nodes per square
+kilometre, but for an ESP-NOW world at ten that its carrier did not join; band L needs five cells
+for a square kilometre at a thousand nodes, ESP-NOW eight or nine, band O one. LoRa as bulk ran
+two nodes only (§36.1).
+
+**3. Loss and occupancy against density and load**: answered (§38, §39.2, §39.3). Delivery time
+does not collapse with load up to forty channels; it grows with what each cell carries once its
+airtime is full, and no occupancy marks where it doubles. Collisions take up to a fifth of what
+followers want from their announcer in a loaded band O town and up to 5.4 % elsewhere, nearly
+all from transmitters the sender could not hear. The 30 % target holds at the typical node on
+band L and ESP-NOW, with the worst node of a world above it now and then; in band O only at light
+load, and not at every node.
+
+The others stand as §36.6 left them, 4 with §37.
