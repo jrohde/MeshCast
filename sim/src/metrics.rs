@@ -170,3 +170,103 @@ pub fn several_announcers(events: &[RoleEvent], c: usize, victim: u32, kill_ms: 
     }
     (max_sim, longest)
 }
+
+/// Announcers on either side of a wall (FEASIBILITY.md §41), replayed from the role events: how
+/// soon each side has one of its own while the wall stands, and from ten minutes on whether two
+/// that hear each other announce on it; after the wall comes down, how long two that hear each
+/// other announce. Several announcers that cannot hear each other are several cells (PROTOCOL.md
+/// §3), not a fault.
+pub struct WallTally {
+    side_of: BTreeMap<u32, usize>,
+    /// Pairs of nodes (lower id first) that hear each other both ways without the wall.
+    pairs: std::collections::BTreeSet<(u32, u32)>,
+    up: Millis,
+    down: Millis,
+    /// The wall went up, it stood ten minutes, it came down: marked with the announcers then.
+    marked: [bool; 3],
+    pub announcer_after: [Option<Millis>; 2],
+    pub max_during: [usize; 2],
+    since: [Option<Millis>; 2],
+    pub longest_during: [Millis; 2],
+    pub at_merge: usize,
+    since_after: Option<Millis>,
+    longest_after: Millis,
+    last_several_end: Option<Millis>,
+}
+
+impl WallTally {
+    pub fn new(side_of: BTreeMap<u32, usize>, pairs: std::collections::BTreeSet<(u32, u32)>, up: Millis, down: Millis) -> Self {
+        WallTally { side_of, pairs, up, down, marked: [false; 3], announcer_after: [None; 2], max_during: [0; 2], since: [None; 2], longest_during: [0; 2], at_merge: 0, since_after: None, longest_after: 0, last_several_end: None }
+    }
+
+    /// Announcers now, on one side or on both.
+    pub fn count(&self, announcing: &BTreeMap<u32, bool>, side: Option<usize>) -> usize {
+        announcing.iter().filter(|(id, on)| **on && side.map_or(true, |s| self.side_of.get(id) == Some(&s))).count()
+    }
+
+    /// Whether two announcers that hear each other announce now, on one side or anywhere.
+    pub fn pair_announcing(&self, announcing: &BTreeMap<u32, bool>, side: Option<usize>) -> bool {
+        let on: Vec<u32> = announcing.iter().filter(|(id, a)| **a && side.map_or(true, |s| self.side_of.get(id) == Some(&s))).map(|(id, _)| *id).collect();
+        on.iter().enumerate().any(|(k, a)| on[k + 1..].iter().any(|b| self.pairs.contains(&((*a).min(*b), (*a).max(*b)))))
+    }
+
+    /// Mark the moments of the wall that come before `t`, with the announcers as they were.
+    pub fn until(&mut self, announcing: &BTreeMap<u32, bool>, t: Millis) {
+        let settled = self.up + 600_000;
+        if !self.marked[0] && t >= self.up {
+            self.marked[0] = true;
+            self.step(announcing, self.up);
+        }
+        if !self.marked[1] && t >= settled && settled < self.down {
+            self.marked[1] = true;
+            self.step(announcing, settled);
+        }
+        if !self.marked[2] && t >= self.down {
+            self.marked[2] = true;
+            for s in 0..2 {
+                if let Some(x) = self.since[s].take() {
+                    self.longest_during[s] = self.longest_during[s].max(self.down - x);
+                }
+            }
+            self.at_merge = self.count(announcing, None);
+            self.step(announcing, self.down);
+        }
+    }
+
+    /// The announcers have just changed, at `t`.
+    pub fn step(&mut self, announcing: &BTreeMap<u32, bool>, t: Millis) {
+        if t >= self.up && t < self.down {
+            for s in 0..2 {
+                let n = self.count(announcing, Some(s));
+                if n > 0 && self.announcer_after[s].is_none() {
+                    self.announcer_after[s] = Some(t - self.up);
+                }
+                if t >= self.up + 600_000 {
+                    self.max_during[s] = self.max_during[s].max(n);
+                    if self.pair_announcing(announcing, Some(s)) {
+                        self.since[s].get_or_insert(t);
+                    } else if let Some(x) = self.since[s].take() {
+                        self.longest_during[s] = self.longest_during[s].max(t - x);
+                    }
+                }
+            }
+        } else if t >= self.down {
+            if self.pair_announcing(announcing, None) {
+                self.since_after.get_or_insert(t);
+            } else if let Some(x) = self.since_after.take() {
+                self.longest_after = self.longest_after.max(t - x);
+                self.last_several_end = Some(t);
+            }
+        }
+    }
+
+    /// After the wall came down, up to `until`: whether several announced at the end, the longest
+    /// stretch with several, and when the last such stretch ended.
+    pub fn after(&self, until: Millis) -> (bool, Millis, Option<Millis>) {
+        let longest = match self.since_after {
+            Some(x) => self.longest_after.max(until.saturating_sub(x)),
+            None => self.longest_after,
+        };
+        (self.since_after.is_some(), longest, self.last_several_end)
+    }
+}

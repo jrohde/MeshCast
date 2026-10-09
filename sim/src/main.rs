@@ -227,6 +227,22 @@ enum Cmd {
         #[command(flatten)]
         common: Common,
     },
+    /// Like `failover`, but a wall splits the area in two halves, west and east, at a given hour,
+    /// with `wall_db` more loss on every link across it, and comes down later (FEASIBILITY.md §41).
+    Partition {
+        #[arg(long, default_value_t = 20)]
+        nodes: usize,
+        #[arg(long, default_value_t = 1.0)]
+        area_km2: f64,
+        #[arg(long, default_value_t = 2.0)]
+        wall_at_h: f64,
+        #[arg(long, default_value_t = 4.0)]
+        merge_at_h: f64,
+        #[arg(long, default_value_t = 100.0)]
+        wall_db: f64,
+        #[command(flatten)]
+        common: Common,
+    },
     /// Like `cell`, but the announcer is switched off at a given hour and back on later.
     Failover {
         #[arg(long, default_value_t = 20)]
@@ -281,6 +297,7 @@ struct Report {
     /// The highest smoothed occupancy, at the typical and the worst node, in per cent.
     gate_occ_max: [f64; 2],
     failover: Option<FailoverReport>,
+    partition: Option<PartitionReport>,
     core_stats: Vec<(usize, String)>,
     /// Mean bytes a follower holds complete at the end, in kB.
     held_kb_per_follower: f64,
@@ -469,6 +486,35 @@ struct FailoverReport {
     announcer_after_revive: Option<u32>,
 }
 
+/// A wall split the area in two halves (west 0, east 1) and came down again.
+#[derive(Serialize, Debug, Clone)]
+struct PartitionReport {
+    wall_at_h: f64,
+    merge_at_h: f64,
+    /// Nodes west and east of the wall.
+    sides: [usize; 2],
+    /// The side the source stands on.
+    source_side: usize,
+    /// Per side: seconds from the wall until the side has an announcer of its own (0 if it had one).
+    announcer_after_s: [Option<f64>; 2],
+    /// Per side, while the wall stands, from ten minutes after it went up: the most announcers at
+    /// once, and the longest stretch with two that hear each other.
+    max_announcers_during: [usize; 2],
+    longest_pair_during_s: [f64; 2],
+    /// Announcers when the wall comes down, and at the end.
+    announcers_at_merge: usize,
+    announcers_at_end: usize,
+    /// After the merge: the longest stretch with two announcers that hear each other, and how long
+    /// until there were none for good (None if there were two at the end).
+    longest_pair_after_s: f64,
+    no_pair_after_merge_s: Option<f64>,
+    /// Followers on the side without the source: the share holding everything when the wall came
+    /// down, the median minutes after it until the others did, and the share at the end.
+    far_complete_at_merge: f64,
+    far_complete_after_merge_min: Option<f64>,
+    far_complete_at_end: f64,
+}
+
 /// Delivery per kind of object in the publishing mix.
 #[derive(Serialize, Clone)]
 struct KindSummary {
@@ -605,6 +651,32 @@ fn main() {
         Cmd::Dynamics { nodes, area_km2, stations, channels, quiet_channels, quiet_publish_h, follows, publish_h, bulletin_kb, window, churn_h, node_churn_h, newcomer_h, strip_m, common } => {
             run_dynamics(nodes, area_km2, stations, channels, quiet_channels, quiet_publish_h, follows, publish_h, bulletin_kb, window, churn_h, node_churn_h, newcomer_h, strip_m, &common);
         }
+        Cmd::Partition { nodes, area_km2, wall_at_h, merge_at_h, wall_db, common } => {
+            let spec = ScenarioSpec {
+                nodes,
+                area_km2,
+                stations: 1,
+                sources: 1,
+                tracks: common.tracks,
+                track_kb: common.track_kb,
+                mix: common.mix_items(),
+                hours: common.hours,
+                seed: common.seed,
+                bulk: common.bulk,
+                control_sf: common.control_sf,
+                exponent: common.exponent,
+                shadow_db: common.shadow_db,
+                follow_fraction: 1.0,
+                positions: None,
+                stations_at: None,
+                sources_at: None,
+                renditions: common.renditions(),
+                attack: common.attack(),
+                clocks: common.clocks(),
+                collections: common.collections(),
+            };
+            run(spec, &common, Some(Event::Wall { up_h: wall_at_h, down_h: merge_at_h, db: wall_db }));
+        }
         Cmd::Failover { nodes, area_km2, kill_at_h, revive_at_h, common } => {
             let spec = ScenarioSpec {
                 nodes,
@@ -629,7 +701,7 @@ fn main() {
                 clocks: common.clocks(),
                 collections: common.collections(),
             };
-            run(spec, &common, Some((kill_at_h, revive_at_h)));
+            run(spec, &common, Some(Event::Kill { kill_h: kill_at_h, revive_h: revive_at_h }));
         }
     }
 }
@@ -667,7 +739,7 @@ fn budget(exponent: f64) {
     println!("An hour of Opus at 24 kbit/s is 10.8 MB; at 16 kbit/s mono 7.2 MB. Halve the ranges in a city.");
 }
 
-fn run(spec: ScenarioSpec, common: &Common, failover: Option<(f64, f64)>) {
+fn run(spec: ScenarioSpec, common: &Common, failover: Option<Event>) {
     if common.seeds <= 1 {
         let (report, wall) = simulate(spec, common.verbose, failover);
         print_report(&report, wall);
@@ -710,18 +782,26 @@ fn run(spec: ScenarioSpec, common: &Common, failover: Option<(f64, f64)>) {
     }
 }
 
-fn simulate(spec: ScenarioSpec, verbose: bool, failover: Option<(f64, f64)>) -> (Report, std::time::Duration) {
+fn simulate(spec: ScenarioSpec, verbose: bool, failover: Option<Event>) -> (Report, std::time::Duration) {
     let params = params();
     let mut built = build(&spec, params);
     built.engine.verbose = verbose;
     let until: Millis = (spec.hours * 3.6e6) as Millis;
     let mut fo_killed = None;
-    if let Some((kill_h, revive_h)) = failover {
+    let mut walled = None;
+    if let Some(Event::Kill { kill_h, revive_h }) = failover {
         // The station (highest score) is expected to be announcer; kill node index of station 0.
         let victim = (0..spec.nodes).find(|&i| built.engine.nodes[i].mains).unwrap_or(0);
         built.engine.schedule_kill(victim, (kill_h * 3.6e6) as Millis);
         built.engine.schedule_revive(victim, (revive_h * 3.6e6) as Millis);
         fo_killed = Some((victim, kill_h, revive_h));
+    }
+    if let Some(Event::Wall { up_h, down_h, db }) = failover {
+        // The wall runs north to south through the middle of the area.
+        let side = (spec.area_km2 * 1e6).sqrt();
+        let sides: Vec<bool> = built.positions.iter().map(|p| p.0 >= side / 2.0).collect();
+        built.engine.schedule_wall(sides.clone(), db as f32, (up_h * 3.6e6) as Millis, (down_h * 3.6e6) as Millis);
+        walled = Some((sides, up_h, down_h));
     }
     let t0 = std::time::Instant::now();
     if std::env::var("MESHCAST_TRACE_TIME").is_ok() {
@@ -922,6 +1002,61 @@ fn simulate(spec: ScenarioSpec, verbose: bool, failover: Option<(f64, f64)>) -> 
         }
     });
 
+
+    // Partition analysis: replay the announcers on the bulk carrier, per side of the wall.
+    let pa = walled.map(|(sides, up_h, down_h): (Vec<bool>, f64, f64)| {
+        let up = (up_h * 3.6e6) as Millis;
+        let down = (down_h * 3.6e6) as Millis;
+        let side_of: BTreeMap<u32, usize> = eng.nodes.iter().enumerate().map(|(i, n)| (n.node.id().0, sides[i] as usize)).collect();
+        let source = built.sources.first().map(|s| s.node).unwrap_or(0);
+        let source_side = sides[source] as usize;
+        let ids: Vec<u32> = eng.nodes.iter().map(|n| n.node.id().0).collect();
+        let pairs: std::collections::BTreeSet<(u32, u32)> = (0..ids.len()).flat_map(|i| (i + 1..ids.len()).map(move |j| (i, j))).filter(|&(i, j)| eng.hears(i, j, bulk_c) && eng.hears(j, i, bulk_c)).map(|(i, j)| (ids[i].min(ids[j]), ids[i].max(ids[j]))).collect();
+        let mut w = metrics::WallTally::new(side_of, pairs, up, down);
+        let mut announcing: BTreeMap<u32, bool> = BTreeMap::new();
+        for e in m.role_events.iter().filter(|e| e.carrier == bulk_c) {
+            w.until(&announcing, e.t_ms);
+            announcing.insert(e.node, e.role == "Announcer");
+            w.step(&announcing, e.t_ms);
+        }
+        w.until(&announcing, until);
+        let (several_at_end, longest_after, last_several_end) = w.after(until);
+        let one_after = if several_at_end { None } else { Some(last_several_end.map_or(0, |t| t - down)) };
+        // The followers on the side without the source: when they held every track.
+        let far: Vec<usize> = (0..eng.nodes.len()).filter(|&i| i != source && sides[i] as usize != source_side).collect();
+        let done_at: Vec<Option<Millis>> = far
+            .iter()
+            .map(|&f| {
+                let mut last = 0;
+                for (id, t) in &built.tracks {
+                    if t.label == scenario::COVER || !t.followers.contains(&f) {
+                        continue;
+                    }
+                    last = last.max(*m.completions.get(&(f, *id))?);
+                }
+                Some(last)
+            })
+            .collect();
+        let share = |pred: &dyn Fn(Millis) -> bool| if far.is_empty() { 0.0 } else { done_at.iter().filter(|d| d.map_or(false, |t| pred(t))).count() as f64 / far.len() as f64 };
+        let mut after: Vec<f64> = done_at.iter().flatten().filter(|&&t| t > down).map(|&t| (t - down) as f64 / 60_000.0).collect();
+        after.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        PartitionReport {
+            wall_at_h: up_h,
+            merge_at_h: down_h,
+            sides: [sides.iter().filter(|s| !**s).count(), sides.iter().filter(|s| **s).count()],
+            source_side,
+            announcer_after_s: w.announcer_after.map(|t| t.map(|t| t as f64 / 1000.0)),
+            max_announcers_during: w.max_during,
+            longest_pair_during_s: w.longest_during.map(|t| t as f64 / 1000.0),
+            announcers_at_merge: w.at_merge,
+            announcers_at_end: w.count(&announcing, None),
+            longest_pair_after_s: longest_after as f64 / 1000.0,
+            no_pair_after_merge_s: one_after.map(|t| t as f64 / 1000.0),
+            far_complete_at_merge: share(&|t| t <= down),
+            far_complete_after_merge_min: percentile(&after, 0.5),
+            far_complete_at_end: share(&|_| true),
+        }
+    });
     // What a follower carries: the bytes it holds complete, over the nodes that follow an
     // announcer at the end and publish nothing.
     let bulk_i = eng.phys.iter().position(|p| p.kind != CarrierKind::LoraControl).unwrap_or(0);
@@ -1010,6 +1145,7 @@ fn simulate(spec: ScenarioSpec, verbose: bool, failover: Option<(f64, f64)>) -> 
         gate_over,
         gate_occ_max,
         failover: fo,
+        partition: pa,
         core_stats,
         held_kb_per_follower,
         table_peaks: eng.metrics.table_peaks.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
@@ -1302,6 +1438,9 @@ fn print_report(r: &Report, wall: std::time::Duration) {
     }
     if let Some(fo) = &r.failover {
         println!("\nfailover: {:?}", fo);
+    }
+    if let Some(pa) = &r.partition {
+        println!("\npartition: {:?}", pa);
     }
     println!("\ncore stats (transmitting nodes and the first three):");
     for (i, s) in &r.core_stats {
@@ -2022,4 +2161,12 @@ struct Connectivity {
     parts: usize,
     neighbours_mean: f64,
     followers_with_source: f64,
+}
+
+/// What happens to a running network on the way: its announcer switched off and on again, or a
+/// wall that splits the area in two and comes down again (FEASIBILITY.md §36.5, §41).
+#[derive(Clone, Copy)]
+enum Event {
+    Kill { kill_h: f64, revive_h: f64 },
+    Wall { up_h: f64, down_h: f64, db: f64 },
 }

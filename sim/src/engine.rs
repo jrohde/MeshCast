@@ -87,6 +87,8 @@ enum Ev {
     Kill(usize),
     Revive(usize),
     Attack(usize),
+    /// Raise (true) or take down (false) the wall of `schedule_wall`.
+    Wall(bool),
 }
 
 /// A node that asks for more than it listens to (docs/ABUSE.md): every `period_ms` it sends a
@@ -128,6 +130,9 @@ pub struct Engine {
     loss: Vec<f32>,
     /// Per node, per carrier: (neighbour, rx power at neighbour in dBm).
     reach: Vec<Vec<Vec<(usize, f64)>>>,
+    /// A partition: per node its side, and the attenuation between the sides while it stands.
+    wall: Option<(Vec<bool>, f32)>,
+    wall_up: bool,
     /// Active or recently ended transmissions keyed by (carrier, channel).
     recent: HashMap<(usize, u8), VecDeque<u64>>,
     txs: HashMap<u64, Transmission>,
@@ -179,21 +184,7 @@ impl Engine {
                 loss[j * n + i] = l as f32;
             }
         }
-        let mut reach = vec![vec![Vec::new(); phys.len()]; n];
-        for i in 0..n {
-            for (c, phy) in phys.iter().enumerate() {
-                let floor = phy.sensitivity_dbm.min(phy.cca_threshold_dbm);
-                for j in 0..n {
-                    if i == j {
-                        continue;
-                    }
-                    let rx = phy.tx_dbm - phy.pl0_db - loss[i * n + j] as f64;
-                    if rx >= floor {
-                        reach[i][c].push((j, rx));
-                    }
-                }
-            }
-        }
+        let reach = compute_reach(&loss, &phys, n);
         let mut nodes = Vec::with_capacity(n);
         for (k, cfg) in configs.into_iter().enumerate() {
             let mains = cfg.mains;
@@ -215,7 +206,7 @@ impl Engine {
         }
         let mut metrics = Metrics::default();
         metrics.per_node_bulk = vec![(0, 0); n];
-        let mut e = Engine { attackers: Vec::new(), attack_ids: Vec::new(), rendition_ids: Default::default(), nodes, phys, heap: BinaryHeap::new(), seq: 0, tx_seq: 0, loss, reach, recent: HashMap::new(), txs: HashMap::new(), now: 0, metrics, verbose: false, trace_grants: std::env::var("MESHCAST_TRACE_GRANTS").is_ok(), trace_busy: std::env::var("MESHCAST_TRACE_BUSY").ok().and_then(|v| v.parse().ok()), busy_from: VecDeque::new(), busy_blame: Default::default(), next_sample: 0, trace_leave: std::env::var("MESHCAST_TRACE_LEAVE").is_ok(), seen_leave: vec![0; n], lose: Vec::new(), trace_rx: std::env::var("MESHCAST_TRACE_RX").ok().and_then(|v| v.parse().ok()), no_ctrl_rx: std::env::var("MESHCAST_NO_CTRL_RX").is_ok(), clock_restart: restart };
+        let mut e = Engine { attackers: Vec::new(), attack_ids: Vec::new(), rendition_ids: Default::default(), nodes, phys, heap: BinaryHeap::new(), seq: 0, tx_seq: 0, loss, reach, wall: None, wall_up: false, recent: HashMap::new(), txs: HashMap::new(), now: 0, metrics, verbose: false, trace_grants: std::env::var("MESHCAST_TRACE_GRANTS").is_ok(), trace_busy: std::env::var("MESHCAST_TRACE_BUSY").ok().and_then(|v| v.parse().ok()), busy_from: VecDeque::new(), busy_blame: Default::default(), next_sample: 0, trace_leave: std::env::var("MESHCAST_TRACE_LEAVE").is_ok(), seen_leave: vec![0; n], lose: Vec::new(), trace_rx: std::env::var("MESHCAST_TRACE_RX").ok().and_then(|v| v.parse().ok()), no_ctrl_rx: std::env::var("MESHCAST_NO_CTRL_RX").is_ok(), clock_restart: restart };
         for i in 0..n {
             e.schedule_wake(i, 1);
         }
@@ -309,6 +300,35 @@ impl Engine {
 
     pub fn schedule_revive(&mut self, node: usize, t: Millis) {
         self.push(t, Ev::Revive(node));
+    }
+
+    /// A partition (FEASIBILITY.md §41): from `up` to `down`, `db` more loss on every link between
+    /// a node of one side and a node of the other.
+    pub fn schedule_wall(&mut self, sides: Vec<bool>, db: f32, up: Millis, down: Millis) {
+        self.wall = Some((sides, db));
+        self.push(up, Ev::Wall(true));
+        self.push(down, Ev::Wall(false));
+    }
+
+    fn set_wall(&mut self, up: bool) {
+        let Some((sides, db)) = self.wall.clone() else { return };
+        if up == self.wall_up {
+            return;
+        }
+        let n = self.nodes.len();
+        let d = if up { db } else { -db };
+        for i in 0..n {
+            for j in 0..n {
+                if i != j && sides[i] != sides[j] {
+                    self.loss[i * n + j] += d;
+                }
+            }
+        }
+        self.wall_up = up;
+        self.reach = compute_reach(&self.loss, &self.phys, n);
+        if std::env::var("MESHCAST_TRACE_ROLES").is_ok() {
+            println!("WALL {} {}", self.now, up);
+        }
     }
 
     /// Switch a node off or on right now (battery dead, taken indoors, switched on again).
@@ -476,6 +496,7 @@ impl Engine {
                 Ev::Kill(i) => self.set_alive(i, false),
                 Ev::Attack(k) => self.attack(k),
                 Ev::Revive(i) => self.set_alive(i, true),
+                Ev::Wall(up) => self.set_wall(up),
             }
         }
         self.now = until;
@@ -919,6 +940,11 @@ impl Engine {
         eprintln!("LEAVE {} {} ann={} alive={} holds={} wants={} relay={} {:?} {:?} knowers={} bridges={} knowing={} holders=[{}]", self.now, i, ann.0, alive, holds, wants, self.nodes[i].node.relays(&x), x, self.nodes[i].node.object_kind(&x), knowers, bridges.len(), knowing, holders.join(" "));
     }
 
+    /// Whether `to` decodes `from` on `carrier`, as the links stand now.
+    pub fn hears(&self, from: usize, to: usize, carrier: usize) -> bool {
+        self.rx_dbm(from, to, carrier) >= self.phys[carrier].sensitivity_dbm
+    }
+
     fn rx_dbm(&self, from: usize, to: usize, carrier: usize) -> f64 {
         let n = self.nodes.len();
         self.phys[carrier].tx_dbm - self.phys[carrier].pl0_db - self.loss[from * n + to] as f64
@@ -1177,4 +1203,25 @@ impl Engine {
         }
     }
 
+}
+
+/// Per node, per carrier: the nodes that receive it above the lower of sensitivity and the
+/// clear-channel threshold, with the power they receive.
+fn compute_reach(loss: &[f32], phys: &[Phy], n: usize) -> Vec<Vec<Vec<(usize, f64)>>> {
+    let mut reach = vec![vec![Vec::new(); phys.len()]; n];
+    for i in 0..n {
+        for (c, phy) in phys.iter().enumerate() {
+            let floor = phy.sensitivity_dbm.min(phy.cca_threshold_dbm);
+            for j in 0..n {
+                if i == j {
+                    continue;
+                }
+                let rx = phy.tx_dbm - phy.pl0_db - loss[i * n + j] as f64;
+                if rx >= floor {
+                    reach[i][c].push((j, rx));
+                }
+            }
+        }
+    }
+    reach
 }

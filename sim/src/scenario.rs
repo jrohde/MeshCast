@@ -177,6 +177,8 @@ pub struct Built {
     pub phys: Vec<Phy>,
     pub sources: Vec<SourceInfo>,
     pub stations: Vec<usize>,
+    /// Where each node stands, in metres.
+    pub positions: Vec<(f64, f64)>,
 }
 
 /// MESHCAST_IP_STATIONS: the stations have internet (ROADMAP.md, Phase 0 definition of done 2).
@@ -370,7 +372,7 @@ pub fn build(spec: &ScenarioSpec, params: Params) -> Built {
             Clock { epoch, ppm }
         })
         .collect();
-    let mut engine = Engine::with_clocks(configs, positions, phys.clone(), prop, spec.seed, clocks, real);
+    let mut engine = Engine::with_clocks(configs, positions.clone(), phys.clone(), prop, spec.seed, clocks, real);
 
     let mut tracks = BTreeMap::new();
     let mut source_infos = Vec::new();
@@ -494,5 +496,5 @@ pub fn build(spec: &ScenarioSpec, params: Params) -> Built {
         engine.attack_ids = ids;
         engine.start_attacks();
     }
-    Built { small, engine, tracks, phys, sources: source_infos, stations }
+    Built { small, engine, tracks, phys, sources: source_infos, stations, positions }
 }
