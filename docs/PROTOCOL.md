@@ -409,8 +409,8 @@ frequency of the bulk carrier, the window also keeps the two from overlapping.
 | 10 | 2 | `round` — carousel round counter |
 | 12 | 8 | `time` — the sender's shared time in milliseconds as the frame begins (§6) |
 | 20 | 1 | `time_quality` — 1 shared time; 2 phone/NTP and 3 GPS are reserved (§6) |
-| 21 | 1 | `colour` — this announcer's rank in its conflict set: its channel offset, or its time slot on a single-channel carrier |
-| 22 | 1 | `colours` — colours in use around it: how many slots the cycle has |
+| 21 | 1 | `colour` — this announcer's rank in its conflict set: its channel offset (`colour mod n`) and, with more colours than channels, its time slot (§5.3) |
+| 22 | 1 | `colours` — colours in use around it, which set how many slots the cycle has: `colours / n` rounded up, and under a regulator's cap at most as many as one announcer's share of the airtime goes into the whole (§5.3) |
 | 23 | 1 | `upload_phases` — how many phases its listening time is divided into for uploads (§4); 1 means none |
 | 24 | 4 | `occupancy` — measured channel occupancy per bulk channel, 4 × u8 percent ("spectrum weather") |
 | 28 | 2 | CRC-16 |
@@ -681,11 +681,12 @@ announcer goes out at once, but on a hopping carrier an offer to another cell's 
 for the rendezvous, the only time that announcer listens on a channel the holder can reach. The
 announcer grants the first offer it hears and names that holder in its next WANT; only the named
 holder uploads, one object at a time (further grants queue), on the announcer's channel and in
-its slot. A grant lapses after `T_grant` without a symbol arriving, counted from the grant or
-from the last symbol, whichever is later, and the ask becomes open again: an uploader that
-delivered once and then fell silent is no more responsible than one that never started. An
-announcer's NACK names who answers (§3.5). **An announcer's HAVE is not an offer**: it lists what
-its carousel serves, and announcers do not upload. So only a node that follows someone else can
+the phase of its listening time it names, and where no regulator caps the carrier in the
+announcer's time slot as well (§5.3). A grant lapses after `T_grant` without a symbol arriving,
+counted from the grant or from the last symbol, whichever is later, and the ask becomes open
+again: an uploader that delivered once and then fell silent is no more responsible than one that
+never started. An announcer's NACK names who answers (§3.5). **An announcer's HAVE is not an offer**: it lists what its carousel serves, and
+announcers do not upload. So only a node that follows someone else can
 be granted, and only its HAVE silences other holders' offers. Before this rule an announcer could
 grant another announcer, which never sent, and the followers that would have offered fell silent
 because they had heard the other announcer's HAVE; FEASIBILITY.md §9.6. This is the DHCP pattern, and it replaced "any holder answers after a random wait",
@@ -1288,10 +1289,21 @@ itself greedily: the lowest colour not announced by any conflicting announcer wi
 one shared base sequence shifted by the colour, so conflicting announcers are never on the same
 channel; when there are more colours than channels, colour `c` also selects time slot
 `c div n` of `T_slot`, and single-channel carriers are simply `n = 1`: every colour is a slot.
-One mechanism, in frequency where possible and in time where necessary. Time slots apply only on
-carriers the regulator does not cap: under a duty cycle or polite access the cap already bounds
-what every announcer adds up to, and slots on top of it only added idle time (FEASIBILITY.md
-§7.7).
+One mechanism, in frequency where possible and in time where necessary, on every carrier: a
+regulator's cap bounds what each announcer sends, not where two that cannot hear each other meet.
+In a band O town without turns a follower lost one wanted symbol in six of its own announcer's
+carousel to collisions; with them one in fifteen, and the town got its tracks sooner on 18 %
+fewer frames (FEASIBILITY.md §38). Under a cap only carousels take turns: an upload keeps to its
+phase of its announcer's listening time (§4) and waits for no slot. Held to the slot as well, a
+cell takes in new content in one slot of k on top of the cap, and turns made that town slower
+than none. Where nothing caps, an upload takes its announcer's turn too: it is a short burst that
+fits in the slot, and sent outside it, more of what uploaders sent was lost (FEASIBILITY.md
+§38). Under a cap a cycle has at most as many slots as
+one announcer's share of the airtime goes into the whole (ten under a 10 % duty cycle; colours
+beyond fold onto them), so a turn never holds an announcer below the airtime the cap allows it,
+however large a colour count is reported (ABUSE.md). A turn takes only a frame that fits in it,
+`T_guard` clear of its edges: the announcer whose turn comes next cannot hear it. A frame too
+long for even an empty turn may start anywhere in it, `T_guard` from its edges, rather than never.
 
 EtherDiscipline's per-200 kHz accounting is unchanged: a random sequence spends about `1/n` of
 the airtime in each slice. (Sequences derived by a fixed offset per announcer never coincide and
@@ -1480,7 +1492,7 @@ simulator has no node with one.
 | `T_upload_phase` | 1 s | one upload phase: uploaders to one announcer take turns this long each |
 | `T_render_ahead` | 30 min | a device that cannot decode asks for a rendition this long before its slot |
 | `T_grant` | 10 min | a grant lapses this long after its last symbol (or after the grant, if none came) |
-| `T_slot` | 10 s | time slot when announcers in conflict share a channel |
+| `T_slot` | 10 s | time slot when announcers in conflict share a channel, for their carousels, and for uploads where no regulator caps the carrier (FEASIBILITY.md §38) |
 | `conflict_ttl`, `T_report_min` | 30 min, 60 s | conflict report lifetime and follower report rate limit |
 | `T_jitter` (tx) | 0–500 ms | random delay before control/metadata frames |
 | repair overhead (v1) | 10 % | RaptorQ repair symbols per block |
