@@ -4937,3 +4937,59 @@ Every row of PROTOCOL.md §8 and ETHERFATSOEN.md §4 now says what the code does
 simulator runs with, but the repair overhead, which is v1's, and every tunable value of the code
 has a row. What the simulator tuned in
 §7 to §40 is in them. Whether those values are right for real radios is Phase 1's to measure.
+
+## 41. A cell split, and joined again
+
+The fourth definition of done asks how the network behaves when it is partitioned and merges
+again; §36.5 had not simulated it. `meshcast-sim partition` builds the failover scenario (one
+station, one source, the nodes on 1 km²) and raises a wall through the middle of the area at a
+given hour: every link from the west half to the east half loses 100 dB more, so that nothing
+crosses, until the wall comes down. `meshcast-sim partition --nodes N --area-km2 1 --hours 8
+--tracks 3 --track-kb 42 --bulk B --seed S`, seeds 1 to 16, in two cases:
+
+- **(a) A cell splits**: `--wall-at-h 2 --merge-at-h 4`, when everything has been delivered. The
+  half without the station usually loses its announcer; in some worlds each half already had one
+  (6 of 16 in band L at 20 nodes, 1 of 16 in band O at 200, 12 of 16 in band L at 200).
+- **(b) Two cells grow up apart and join**: `--wall-at-h 0 --merge-at-h 3`. The half without the
+  source has nothing, and gets everything only once the wall is down.
+
+"A pair" below is two announcers that decode each other both ways on the bulk carrier. Several
+announcers that cannot hear each other are several cells (PROTOCOL.md §3), and in band L at 25 mW
+a square kilometre of 200 nodes is several cells without any wall (§39.1). Pairs on one side are
+counted from ten minutes after the wall went up, past the first election.
+
+| | Band O, 20 nodes | Band O, 200 | Band L, 20 | Band L, 200 |
+|---|---|---|---|---|
+| (a) A half that lost its announcer has one after, median (most) | 200 s (202) | 199 s (207) | 217 s (217) | 216 s at most |
+| ... worlds where a half kept a pair longer than 60 s | 0 | 0 | 0 | 1 |
+| ... announcers when the wall came down | 2 | 2 (3 in one world) | 2 to 3 | 4 to 6 |
+| ... after the wall came down, the longest a pair lasted, median (most) | 10.3 s (12.4) | 10.0 s (13.2) | 0.8 s (1.9) | 1.9 s (100 s in one world, to the end in three) |
+| (b) Each half has an announcer after, median (most) | 243 s (245) | 242 s (243) | 217 s (217) | 216 s (217) |
+| ... worlds where a half kept a pair longer than 60 s | 0 | 0 | 0 | 0 |
+| ... after the wall came down, the longest a pair lasted, median (most) | 10.5 s (12.6) | 10.1 s (13.4) | 1.1 s (2.0) | 1.1 s (85 s in one world, 65 minutes in one) |
+| ... the median follower in the half without the source has all three tracks, minutes after the wall came down (median) | 5.5 | 5.4 | 10.7 | 7.9 |
+
+A half that lost its announcer had a new one within a failover's time, as §36.5 found: about
+200 s in band O, 217 s in band L. Two halves that grew up apart had theirs after 242 to 245 s in
+band O and 216 to 217 s in band L. From ten minutes after the wall went up, only one band L world
+at 200 nodes had two announcers that hear each other on one side; before that, in the first
+election of case (b), every band L world had a pair for up to 85 s, longer than 60 s in 3 worlds
+of 16 at 20 nodes and 9 at 200. When the wall came down, a pair that hear each other lasted 13.4 s
+at most in band O and 2.0 s at most in band L, but for six of the 32 worlds of band L at 200
+nodes: there one pair lasted 85 s, one 100 s, one 65 minutes, and three to the end of the run. In
+five more of those worlds, in case (b), a new pair formed about 216 s after the wall came down,
+one failover time later, and lasted under two seconds. Everything published on one side reached
+every follower on the other by the end of the run; the median follower had it five to eleven
+minutes after the wall came down.
+
+Two of the three worlds that kept a pair to the end were traced (seeds 4 and 5 of case (a)). In
+seed 5 announcers 4 and 116 heard each other at −98 dBm, against −94 and −89 dBm at their typical
+neighbours; in seed 4 three announcers in a chain, 6, 35 and 185, made two pairs, 6 and 35 at
+−100 dBm against −94 and −99, 35 and 185 at −106 against −99 and about −90. These are the pairs
+§37.1 found in towns and §37.5 leaves open: announcers that hear each other, but not as well as
+their typical neighbour, so that the tie-break's same-cell judgement takes them for cells that
+overlap; between two fifths and all of their followers hear the other. The same sixteen worlds
+without the wall (`--wall-db 0`) end with such a pair in one world (seed 14); with it, in three
+(seeds 4, 5 and 14). The third, and the pairs of 85 s, 100 s and 65 minutes, were not traced.
+
+The smoke test `a_cell_split_by_a_wall_heals_when_it_comes_down` runs case (a) at 20 nodes.

@@ -12,9 +12,11 @@ with the protocol as it now is. §36.6 says where each stands, and §39.5 for 1 
 are answered (1 for every bulk carrier but LoRa; 3 with no occupancy at which delivery time
 doubles: it grows with what each cell carries once its airtime is full, §39); 4 in part: since
 §37 two announcers that hear each other no longer persist after a failover unless one shuns the
-other, but two hidden from each other whose followers hear both still can, and partition and
-merge are not simulated; 5 is not yet extrapolated; 6 is answered (§40): the parameter tables
-say what the code does. Questions the simulator answers best go on alongside Phase 1.
+other, and a cell split by a wall and joined again settles within a beacon interval but for
+pairs the same-cell judgement takes for cells that overlap (§41, §37.5); two hidden from each
+other whose followers hear both still can persist; 5 is not yet extrapolated; 6 is answered
+(§40): the parameter tables say what the code does. Questions the simulator answers best go on
+alongside Phase 1.
 
 **Goal:** prove or disprove the design on a laptop before touching hardware, and produce the
 starting parameters for EtherFatsoen and the election.
