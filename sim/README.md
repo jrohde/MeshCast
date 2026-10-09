@@ -45,6 +45,8 @@ as before `docs/FEASIBILITY.md` §38. `MESHCAST_T_SLOT_MS` sets `T_slot`.
 each other announced on one side (from ten minutes after the wall went up) or after the wall came
 down, and when the followers in the half without the source held everything
 (`docs/FEASIBILITY.md` §41).
+`MESHCAST_RELAY_ASK_SOON=0` makes a relay ask for what it took on at its usual cadence instead of
+soon, as before `docs/FEASIBILITY.md` §44.
 `MESHCAST_BURST_PER_TURN=0` keeps a token-bucket burst raised for a turn or an upload phase
 for good, and `MESHCAST_CHALLENGE_IN_ORDER=0` lets a challenger on a carrier that does not hop
 step up within the election jitter by chance, both as before `docs/FEASIBILITY.md` §40.

@@ -1267,6 +1267,9 @@ fn params() -> Params {
     if let Ok(v) = std::env::var("MESHCAST_BURST_PER_TURN") {
         p.burst_per_turn = v != "0";
     }
+    if let Ok(v) = std::env::var("MESHCAST_RELAY_ASK_SOON") {
+        p.relay_ask_soon = v != "0";
+    }
     if let Ok(v) = std::env::var("MESHCAST_UPLOAD_SLOTS") {
         p.upload_slots = v != "0";
     }

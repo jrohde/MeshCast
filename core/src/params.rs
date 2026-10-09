@@ -213,6 +213,10 @@ pub struct Params {
     /// in one, as ETHERFATSOEN.md (`BURST`) says. Off: raised for good once a node took a turn or a
     /// phase, as before FEASIBILITY.md §40; kept to measure against.
     pub burst_per_turn: bool,
+    /// A relay asks its own announcer soon for what it took on, as for what a manifest names, not
+    /// on its usual cadence (FEASIBILITY.md §44). Off: on its cadence, as before; kept to measure
+    /// against.
+    pub relay_ask_soon: bool,
     /// An announcer marks what it relays as asked for listeners (PROTOCOL.md §4). Off: only what it
     /// or its followers listen to; kept to measure against.
     pub mark_relayed: bool,
@@ -296,6 +300,7 @@ impl Default for Params {
             upload_slots: false,
             turn_guard: true,
             burst_per_turn: true,
+            relay_ask_soon: true,
             mark_relayed: true,
             proactive: false,
             relay_unfollowed: true,
