@@ -856,7 +856,7 @@ fn simulate(spec: ScenarioSpec, verbose: bool, failover: Option<Event>) -> (Repo
                     let src = built.sources.iter().find(|s| s.node == info.source);
                     let cm = src.and_then(|s| s.collections.iter().find(|c| c.pieces.iter().any(|o| o.id.short() == *id))).map(|c| c.as_object().0.id.short());
                     let root = src.map(|s| (n.manifest_state(&s.channel), eng.nodes.get(aj).and_then(|a| a.node.manifest_state(&s.channel))));
-                    eprintln!("MISSING node {} attacker {} obj {:?} alive {} progress {:?} wants {} follows {:?} ann_has {:?} view {:?} cm held {:?}/{:?} root {:?}", f, eng.attackers.iter().any(|a| a.node == f), id, eng.nodes[f].alive, n.object_progress(id), n.wants_object(id), ann, eng.nodes.get(aj).map(|a| a.node.holds(id)), n.excursion_view(id), cm.map(|c| n.holds(&c)), cm.and_then(|c| eng.nodes.get(aj).map(|a| a.node.holds(&c))), root);
+                    eprintln!("MISSING node {} attacker {} obj {:?} alive {} progress {:?} wants {} follows {:?} ann_has {:?} view {:?} cm {:?} held {:?}/{:?} root {:?} source {}", f, eng.attackers.iter().any(|a| a.node == f), id, eng.nodes[f].alive, n.object_progress(id), n.wants_object(id), ann, eng.nodes.get(aj).map(|a| a.node.holds(id)), n.excursion_view(id), cm, cm.map(|c| n.holds(&c)), cm.and_then(|c| eng.nodes.get(aj).map(|a| a.node.holds(&c))), root, info.source);
                 }
             }
         }
@@ -1269,6 +1269,9 @@ fn params() -> Params {
     }
     if let Ok(v) = std::env::var("MESHCAST_RELAY_ASK_SOON") {
         p.relay_ask_soon = v != "0";
+    }
+    if let Ok(v) = std::env::var("MESHCAST_RELAY_ROOTS") {
+        p.relay_roots = v != "0";
     }
     if let Ok(v) = std::env::var("MESHCAST_UPLOAD_SLOTS") {
         p.upload_slots = v != "0";

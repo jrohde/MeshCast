@@ -4751,7 +4751,8 @@ at least 12 minutes; half the follower-album pairs were complete after 21.
 
 One cost load has over ESP-NOW: from five sources on, delivery fell short of what the carrier
 joins, by up to 5.6 points in one world (92.9 % of 98.5 at twenty sources). At two sources it
-delivered what the carrier joined, as in the town of §36.3 (within 0.1 points there).
+delivered what the carrier joined, as in the town of §36.3 (within 0.1 points there). Why, and
+what closed about half of it over sixteen worlds, is §45.
 
 **Collisions grow with load most in band O.** What followers lost of their own announcer's
 symbols rose from 4.5 to 18.9 % in band O, and of what others sent them from 20 to 40 %. Every one
@@ -5199,3 +5200,77 @@ within two minutes, and the bulletin moved on. That is §32.2's gap, and it clos
 cells form again, a relay leaving to lead a cell of its own (§32.3), at the pace of leaving
 (PROTOCOL.md §5.2). The hops are not slow; band L is slow where its cells do not reach each other,
 presumably on the 100 km strip too, which was not traced. How a gap can be bridged sooner is open.
+
+## 45. Why ESP-NOW delivered less than it joined under load
+
+§39.3 found ESP-NOW delivering less than its carrier joins from five sources on. Its worst world
+there (twenty sources, 200 nodes on 30 km², seed 4), run again on the code of §44, delivered
+89.3 % of the follower-object pairs where the carrier joined 98.5 %. The simulator lists every
+pair left undelivered at the end, with what the follower and its announcer hold of the object, of
+its collection manifest and of its channel's root (`MESHCAST_TRACE_GRANTS=1`, `MISSING` lines).
+Of 430 such pairs, 390 belonged to two channels, and no follower anywhere held their roots.
+
+Both sources announced, and nobody in their cells followed their channels. Each passed its new
+root once, in the first four minutes, as an announcer passes a new manifest of a channel it serves unasked (PROTOCOL.md
+§4), before anybody asked for it. From 15 and 37 minutes on, 62 and 54 other announcers asked for
+the two roots, 22,194 times in all, for followers who knew of them from their announcements. Not
+one of those asks was met in 24 hours. An announcer does not answer another announcer's asks (PROTOCOL.md §4).
+A follower that heard both a source and an asking announcer could have carried the root across, but a relay
+took on only what a manifest it held named, a piece or a cover, and the collection manifests that
+sets of pieces named (PROTOCOL.md §4, before §45.2); a root is named by no manifest. So once that
+one pass had left no other node that offered the root, the channel never left its source's cell. Its collection manifest was in the same position: a root names it, and a relay
+fetched a collection manifest only when a set of pieces named it.
+
+### 45.1 Tried: a source that announces passes, or answers, more
+
+Three changes at the source were tried on the eight worlds of §39.3:
+
+| | Delivered, mean of 8 worlds |
+|---|---|
+| Before | 97.9 % |
+| The source passes everything of its own not yet carried, unasked | 97.5 %: 89.3 → 93.7 and 98.1 → 100 in two worlds, 99.7 → 96.5 and 99.8 → 93.3 in two others |
+| ... only its root and collection manifests | identical to before in every world |
+| It answers another announcer's ask for what it publishes with a pass | +0.02 points (se 0.01) |
+
+Passed unasked, a piece is not kept by anybody who did not ask for it yet (§44.1). A source
+counts what it has sent itself as carried (PROTOCOL.md §4), and had sent its root and collection
+manifest in its first minutes, so the second change found nothing left to pass. An ask from another
+announcer is seldom heard by the source, and where it is, that announcer usually listens on another
+channel (PROTOCOL.md §5.3). None was taken.
+
+### 45.2 A relay names roots and collection manifests
+
+A follower that hears another cell's ask for listeners now also takes on a root it knows of by its
+channel's announcement, and a collection manifest that a root it holds names. Both are fetched
+and offered like a relayed piece, kept as part of the menu (PROTOCOL.md §2) once held, and wanted
+only while the relay is of use. In the world above both roots then reached every node, all 199 besides their
+source, and of the 430 undelivered pairs 60 were left, as many as the carrier does not join: it delivered
+98.5 %, what it joins. Over sixteen worlds, against before:
+
+| | Before | A relay names roots and collection manifests |
+|---|---|---|
+| ESP-NOW, twenty sources, 16 worlds | 97.7 % (carrier joins 98.8 %) | 98.2 %, +0.53 points (se 0.79): 89.3 → 98.5 and 95.1 → 100 in two worlds, 99.7 → 92.8 in one, the others within a point; +3.7 % frames (se 0.9) |
+| Band O / band L, twenty sources, 8 worlds | 100 % / 100 % | the same; −1.7 % (se 7.3) / +0.2 % frames (se 2.5); median follower-album time −5.1 (se 5.6) / +7.6 minutes (se 3.4) |
+| Band O strips of §43: 30 km / 100 km | 99.14 % / 97.54 % | 99.44 % / 98.91 %: +0.30 points (se 0.12) / +1.38 (se 0.40); +2.0 / +1.8 % frames |
+| Band L strips of §43: 30 km / 100 km | 81.34 % / 23.55 % | 81.03 % / 23.40 %: −0.31 points (se 0.25) / −0.15 (se 0.89); −0.3 / +0.3 % frames |
+
+And against the whole of the validation, world for world:
+
+| | Before | A relay names roots and collection manifests |
+|---|---|---|
+| Matrix (§9), size sweep (§13.1), one or five lures (§12), churn and the living network with an attacker, a lure or a spoofer | | identical, but for 0.2 % more frames in band L's churn |
+| §30.1 without quiet channels, 16 worlds | | −0.03 points (se 0.04) in band L, −0.01 (se 0.01) in band O |
+| Valley strip (§32), 24 worlds | | −0.04 points (se 0.29) in band L, +0.6 % frames (se 0.4); +0.83 points (se 0.26) in band O, +0.7 % frames (se 0.8) |
+| 400 quiet channels (§30.1), band L, 24 worlds | | +0.54 points (se 0.17), −1.2 % frames (se 1.3) |
+
+It is taken (PROTOCOL.md §4). Band L's twenty-source cell completing its median album 7.6
+minutes later, at 2 se, is the one cost seen; band L's strips and validation show none.
+
+The world that lost 6.9 points (seed 6) did so on timing, and shows what is left. One source there
+is heard by two nodes only. Before, the announcer next to it held its first piece at 1.6 hours,
+uploaded while the source still followed, and the source became an announcer itself at 1.8. With
+relays naming roots that announcer had not asked for the pieces when the source became one at 1.9
+hours, and none of them ever left it. Of the two nodes that hear it, one followed it for 21 of the 24 hours;
+the other followed it for 10.6 hours and another announcer for 11.3, and neither ever took on an
+ask for its pieces as a relay. A source whose only links are nodes that follow it is §44.3's gap
+at its smallest, and is open.

@@ -47,6 +47,9 @@ down, and when the followers in the half without the source held everything
 (`docs/FEASIBILITY.md` §41).
 `MESHCAST_RELAY_ASK_SOON=0` makes a relay ask for what it took on at its usual cadence instead of
 soon, as before `docs/FEASIBILITY.md` §44.
+`MESHCAST_RELAY_ROOTS=0` makes a relay take on only pieces, covers and the collection manifests a
+set names, not a root it knows of by its announcement or a collection manifest a root it holds
+names, as before `docs/FEASIBILITY.md` §45.
 `MESHCAST_BURST_PER_TURN=0` keeps a token-bucket burst raised for a turn or an upload phase
 for good, and `MESHCAST_CHALLENGE_IN_ORDER=0` lets a challenger on a carrier that does not hop
 step up within the election jitter by chance, both as before `docs/FEASIBILITY.md` §40.
@@ -201,7 +204,8 @@ relays go (`docs/FEASIBILITY.md` §28):
   reaching (`ok`) or not reaching (`col` collided, with the interferer; `hd` the announcer was
   sending) an announcer that wants what it offers, and at the end
   `MISSING` for every object a follower lacks (with the announcers it hears and who listed the
-  object, to tell whether an excursion or a named repair was possible) and `NOLEN` for every
+  object, to tell whether an excursion or a named repair was possible; its collection manifest
+  and its channel's root, whether the follower and its announcer hold them; and the source) and `NOLEN` for every
   want whose length the wanter does not know.
 - `MESHCAST_DEBUG_WANTS=1` traces each announcer's want list; `MESHCAST_DEBUG_NODE=4` adds node
   index 4's.
