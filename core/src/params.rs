@@ -217,6 +217,10 @@ pub struct Params {
     /// on its usual cadence (FEASIBILITY.md §44). Off: on its cadence, as before; kept to measure
     /// against.
     pub relay_ask_soon: bool,
+    /// A relay takes on another cell's ask for a root manifest it knows by its announcement, and for
+    /// a collection manifest a root it holds names (FEASIBILITY.md §45). Off: only pieces, covers and
+    /// the collection manifests a set names, as before; kept to measure against.
+    pub relay_roots: bool,
     /// An announcer marks what it relays as asked for listeners (PROTOCOL.md §4). Off: only what it
     /// or its followers listen to; kept to measure against.
     pub mark_relayed: bool,
@@ -301,6 +305,7 @@ impl Default for Params {
             turn_guard: true,
             burst_per_turn: true,
             relay_ask_soon: true,
+            relay_roots: true,
             mark_relayed: true,
             proactive: false,
             relay_unfollowed: true,

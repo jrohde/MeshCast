@@ -1704,6 +1704,18 @@ impl Node {
         if self.now < self.keep_until {
             return;
         }
+        // A manifest we fetch only to relay it is wanted only while that is of use. Kept as menu, a
+        // root that nobody can send, made up or out of reach, was asked for for as long as its
+        // announcement was the newest we heard (FEASIBILITY.md §45).
+        if self.cfg.params.relay_roots {
+            let menu = self.menu_only();
+            let lapsed: Vec<ShortId> = self.relayed.iter().filter(|id| menu.contains(id) && !self.store.has_complete(id) && !self.relay_fresh(id)).copied().collect();
+            for id in lapsed {
+                self.relayed.remove(&id);
+                self.wants.remove(&id);
+                self.progress.remove(&id);
+            }
+        }
         let keep = self.interesting_objects();
         self.relayed.retain(|id| keep.contains(id));
         let ttl = self.cfg.params.want_ttl_ms;
@@ -4624,6 +4636,12 @@ impl Node {
                 return col.pieces.iter().find(|o| o.id.short() == *id).map(|o| o.meta());
             }
         }
+        // Or a collection manifest a root we hold names (FEASIBILITY.md §45).
+        if self.cfg.params.relay_roots {
+            if let Some((_, c)) = self.named_collections().filter(|(chan, _)| any || self.follows_channel(chan)).find(|(_, c)| c.manifest.id.short() == *id) {
+                return Some(ObjectMeta { id: c.manifest.id, len: c.manifest.len, kind: ContentType::Collection });
+            }
+        }
         self.named_collections().filter(|(chan, _)| any || self.follows_channel(chan)).find_map(|(_, c)| c.cover.filter(|v| v.id.short() == *id).map(|v| ObjectMeta { id: v.id, len: v.len, kind: ContentType::Image }))
     }
 
@@ -4844,7 +4862,7 @@ impl Node {
                 continue;
             }
             // Relaying for another cell (PROTOCOL.md §4): its announcer asks, for its listeners, for
-            // a piece or cover we lack, and others are unlikely to meet the ask soon: we fetch it from
+            // an object we lack and can name, and others are unlikely to meet the ask soon: we fetch it from
             // our own cell and keep it, to hand it on, until that cell holds it.
             if from_announcer && !own {
                 // Of the asks this announcer made, those someone met: it granted the object to a
@@ -4888,7 +4906,15 @@ impl Node {
                     // Only what we can name, a piece or cover that a manifest we hold names, is
                     // relayed, so only its asks are kept: a name nobody checks would be kept, and
                     // fetched, for anyone who made one up (docs/ABUSE.md, item 5).
-                    let Some(meta) = self.relay_meta(&w) else { continue };
+                    // Or a root manifest we know by its announcement: nobody names it but its channel,
+                    // and a root whose one pass nobody kept was never carried again (FEASIBILITY.md §45).
+                    let any = self.cfg.params.relay_unfollowed;
+                    let root = if self.cfg.params.relay_roots { self.manifests.iter().filter(|(c, _)| any || self.follows_channel(c)).filter_map(|(_, i)| i.current()).find(|r| r.short == w).map(|r| r.len) } else { None };
+                    let meta = match (self.relay_meta(&w), root) {
+                        (Some(m), _) => Ok(m),
+                        (None, Some(len)) => Err(len),
+                        (None, None) => continue,
+                    };
                     if self.cfg.params.evict_by_evidence {
                         if let Some(m) = self.naming_manifest(&w) {
                             self.last_used.insert(m, now);
@@ -4898,7 +4924,7 @@ impl Node {
                     if !self.relay_due(first) {
                         continue;
                     }
-                    let len = meta.len as u64;
+                    let len = match meta { Ok(m) => m.len, Err(len) => len } as u64;
                     if room == 0 || len > room {
                         self.stats.relays_declined += 1;
                         continue;
@@ -4907,7 +4933,11 @@ impl Node {
                     self.count_relay_outcome(&w, false);
                     self.relayed.insert(w);
                     self.relay_log.push(w);
-                    if self.store.ensure(meta) {
+                    let done = match meta {
+                        Ok(m) => self.store.ensure(m),
+                        Err(len) => self.store.ensure_hint(w, len, ContentType::Manifest),
+                    };
+                    if done {
                         self.quiet_complete.push(w);
                     }
                     self.stats.relay_wants += 1;
