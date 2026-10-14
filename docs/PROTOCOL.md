@@ -278,8 +278,8 @@ Rules:
   (FEASIBILITY.md §27).
 - **Every node keeps the menu it hears.** Of a channel it neither follows nor serves, a node
   collects and keeps the root and collection manifests that come by, announced and pushed on the
-  control carrier or passed by its announcer when new, without asking for them, and within its
-  carry budget (§4). They let it name what another cell asks for, so that it can relay it (§4).
+  control carrier or passed by its announcer when new, without asking for them unless it relays
+  one for another cell (§4), and within its carry budget (§4). They let it name what another cell asks for, so that it can relay it (§4).
   Where asks name pieces one by one (§3.3), a node without them could not relay for a channel it
   did not follow (FEASIBILITY.md §27).
 - **A new root alone does not cost a collection its pieces.** A node keeps, per collection, the
@@ -901,13 +901,18 @@ that hear each other. Each kind of pair has its own way across:
   for listeners too, elsewhere. A relay that leads a cell of its own (§5.2) asked for it unmarked,
   the chain of relays broke there, and a band L valley 30 km long delivered 79.7 % of its
   bulletins in their period against 81.7 % with the mark (FEASIBILITY.md §33). Once such an ask has gone unmet long
-  enough (below), a follower that hears it and can name the object, because a
-  collection manifest or root it holds names it (its own, or the menu it keeps, §2), wants the
-  piece or cover itself, fetches it in its own cell like anything it wants, keeps it, and answers
-  the next ask with an offer. It asks its own announcer for it soon, as for what a new manifest
+  enough (below), a follower that hears it and can name the object wants it itself, fetches it in
+  its own cell like anything it wants, keeps it, and answers the next ask with an offer. It asks its own announcer for it soon, as for what a new manifest
   names (above): a relay has never asked for it, and asked on its cadence of `T_want_min` every
   hop of the chain waited for it; along a band L strip 100 km long a fifth more of the
-  bulletins arrived in their period, 23.6 % against 19.7 % (FEASIBILITY.md §44). A set it cannot read names a collection manifest of a channel it
+  bulletins arrived in their period, 23.6 % against 19.7 % (FEASIBILITY.md §44). It can name a piece or cover that a collection manifest or root it holds names (its own, or
+  the menu it keeps, §2), a collection manifest that a root it holds names, and a root it knows of
+  by its channel's announcement (§2). Relaying only pieces, covers and the collection manifests
+  that sets name (below), the root of a source that announced, in a cell where nobody followed its channel, was asked for by 62 announcers for a day
+  and never left that cell: nobody else held it, and nobody could name it to fetch it. One ESP-NOW
+  world with twenty sources delivered 89.3 % of its follower-object pairs where its carrier joined
+  98.5 %; with roots and collection manifests relayed too, 98.5 %, and sixteen such worlds 98.2 %
+  against 97.7 % (FEASIBILITY.md §45). A set it cannot read names a collection manifest of a channel it
   does not follow: it fetches that manifest first, from its own announcer, which holds the
   manifests of every channel it hears of (§2) and answers only for names it knows, and relays
   the pieces once it can name them; they have waited as long as the asks for the manifest. It
